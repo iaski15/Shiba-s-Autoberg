@@ -185,6 +185,68 @@ namespace Gp
         }
     }
 
+    /// <summary>Embedded payload: files baked into the exe at build time (gppay.* resources + gppay.manifest)
+    /// are written back beside the exe when missing, making the binary fully self-contained.</summary>
+    public static class Payload
+    {
+        class Entry { public string Res; public string Rel; }
+        static List<Entry> entries;
+
+        static void Load()
+        {
+            entries = new List<Entry>();
+            try
+            {
+                var asm = typeof(Payload).Assembly;
+                using (var s = asm.GetManifestResourceStream("gppay.manifest"))
+                {
+                    if (s == null) return;
+                    using (var r = new StreamReader(s))
+                    {
+                        string line;
+                        while ((line = r.ReadLine()) != null)
+                        {
+                            line = line.TrimStart('\uFEFF');
+                            int bar = line.IndexOf('|');
+                            if (bar <= 0) continue;
+                            entries.Add(new Entry { Res = line.Substring(0, bar), Rel = line.Substring(bar + 1) });
+                        }
+                    }
+                }
+            }
+            catch { entries = new List<Entry>(); }
+        }
+
+        /// <summary>Number of files embedded at build time (0 when built without payload).</summary>
+        public static int Count { get { if (entries == null) Load(); return entries.Count; } }
+
+        /// <summary>Writes every missing or size-mismatched payload file beside the exe.
+        /// Returns the relative paths that were restored.</summary>
+        public static List<string> ExtractMissing()
+        {
+            if (entries == null) Load();
+            var written = new List<string>();
+            var asm = typeof(Payload).Assembly;
+            foreach (var e in entries)
+            {
+                try
+                {
+                    string dst = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, e.Rel);
+                    using (var src = asm.GetManifestResourceStream(e.Res))
+                    {
+                        if (src == null) continue;
+                        if (File.Exists(dst) && new FileInfo(dst).Length == src.Length) continue;
+                        Directory.CreateDirectory(Path.GetDirectoryName(dst));
+                        using (var f = File.Create(dst)) src.CopyTo(f);
+                    }
+                    written.Add(e.Rel);
+                }
+                catch { }
+            }
+            return written;
+        }
+    }
+
     /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
     public class PatchRunner
     {

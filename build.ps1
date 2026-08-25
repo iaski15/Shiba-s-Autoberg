@@ -37,7 +37,37 @@ function Compile($sources, $out, $extra) {
 # ---- self test host (console) ----
 Compile @("`"$src\Core.cs`"", "`"$src\TestMain.cs`"") (Join-Path $root '_selftest.exe') $null
 
-# ---- main app (windowed) ----
-Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"") (Join-Path $root 'Goldberg Patcher.exe') @('/target:winexe')
+# ---- embedded payload (tools the app needs at runtime) ----
+$pay = @(
+    'steamless\Steamless.CLI.exe',
+    'steamless\Steamless.CLI.exe.config'
+)
+Get-ChildItem (Join-Path $root 'steamless\Plugins') -Filter '*.dll' | ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
+$pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
+$pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'release\tools\generate_interfaces\generate_interfaces_x64.exe')
+Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
+
+$payRes = @()
+$i = 0
+$manLines = @()
+foreach ($rel in $pay) {
+    $full = Join-Path $root $rel
+    if (-not (Test-Path -LiteralPath $full)) { throw "payload file missing: $rel" }
+    $rn = 'gppay.{0:D4}' -f $i
+    $manLines += "$rn|$rel"
+    $payRes += "/res:`"$full`",$rn"
+    $i++
+}
+$manTmp = Join-Path $env:TEMP ('gp_manifest_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+Set-Content -LiteralPath $manTmp -Value $manLines -Encoding Ascii
+$payRes += "/res:`"$manTmp`",gppay.manifest"
+Write-Host ("payload files: " + $i)
+
+# ---- main app (windowed, self-contained) ----
+try {
+    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+} finally {
+    Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "`nDone."

@@ -356,6 +356,15 @@ namespace Gp
         void OnShownFirst(object s, EventArgs e)
         {
             Log(LogLevel.Dim, "Goldberg Patcher ready. Drop a game .exe to begin.");
+
+            if (Payload.Count > 0)
+            {
+                int restored = Payload.ExtractMissing().Count;
+                Log(LogLevel.Dim, restored > 0
+                    ? "Self-contained payload: restored " + restored + "/" + Payload.Count + " bundled file(s)."
+                    : "Self-contained payload: all " + Payload.Count + " bundled file(s) verified.");
+            }
+
             var missing = Tools.Missing();
             if (missing.Count > 0)
             {
