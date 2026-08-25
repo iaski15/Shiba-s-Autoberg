@@ -142,6 +142,36 @@ static class TestMain
                   "online-fix forces steam_appid.txt to 480",
                   File.Exists(Path.Combine(gameDir2, "steam_appid.txt"))
                       ? File.ReadAllText(Path.Combine(gameDir2, "steam_appid.txt")).Trim() : "(missing)");
+
+            // previously Goldberg-patched game: original dll must be restored from goldberg_backup
+            var gameDir3 = Directory.CreateDirectory(Path.Combine(work2, "OFGame2")).FullName;
+            var exe3 = Path.Combine(gameDir3, "OFGame2.exe");
+            File.Copy(exe2, exe3);
+            var origBytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42 };
+            Directory.CreateDirectory(Path.Combine(gameDir3, "goldberg_backup"));
+            File.WriteAllBytes(Path.Combine(gameDir3, "goldberg_backup", "steam_api64.dll"), origBytes);
+            File.WriteAllBytes(Path.Combine(gameDir3, "steam_api64.dll"), new byte[] { 1, 2, 3 });
+
+            var opts3 = new PatchOptions
+            {
+                GameExe = exe3,
+                AppId = "",
+                UnpackDrm = false,
+                Backup = false,
+                WriteAppIdTxt = false,
+                CreateSettings = false,
+                GenerateInterfaces = false,
+                OnlineFix = true,
+            };
+            var runner3 = new PatchRunner();
+            var res3 = runner3.Run(opts3, CancellationToken.None);
+
+            Check(res3.Success, "online-fix re-patch succeeded", res3.Summary);
+            Check(File.ReadAllBytes(Path.Combine(gameDir3, "steam_api64.dll")).SequenceEqual(origBytes),
+                  "online-fix restored the original steam_api64.dll from backup");
+            Check(File.Exists(Path.Combine(gameDir3, "steam_appid.txt")) &&
+                  File.ReadAllText(Path.Combine(gameDir3, "steam_appid.txt")).Trim() == "480",
+                  "online-fix writes steam_appid.txt=480 even with appid writing toggled off");
         }
         finally
         {

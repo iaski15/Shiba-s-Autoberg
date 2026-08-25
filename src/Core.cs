@@ -219,7 +219,7 @@ namespace Gp
                 if (!o.OnlineFix && (string.IsNullOrEmpty(o.AppId) || !Regex.IsMatch(o.AppId, @"^\d{1,10}$")))
                     throw new Exception("Steam AppID must be a numeric ID (find it on steamdb.info).");
                 if (o.OnlineFix)
-                    Log(LogLevel.Info, "Generic online-fix mode: steam_appid.txt will be forced to 480 (Spacewar).");
+                    Log(LogLevel.Info, "Generic online-fix: the original Steamworks dll stays in place so the game attaches to Steam as Spacewar (AppID 480).");
 
                 var exePath = Path.GetFullPath(o.GameExe);
                 var gameDir = Path.GetDirectoryName(exePath);
@@ -282,19 +282,22 @@ namespace Gp
 
                 // ---- interfaces from ORIGINAL dll -------------------------------
                 string interfacesTxt = null;
-                if (o.GenerateInterfaces)
+                if (o.GenerateInterfaces && !o.OnlineFix)
                 {
                     Pct(52);
                     interfacesTxt = TryGenerateInterfaces(foundApi, gameDir, preferredName, ct);
                 }
 
-                // ---- replace/place goldberg dlls ---------------------------------
+                // ---- dlls --------------------------------------------------------
                 Pct(62);
-                InstallGoldbergDlls(installDir, pe.Arch, foundApi, backup, res);
+                if (o.OnlineFix)
+                    PrepareOnlineFixMode(installDir, res);
+                else
+                    InstallGoldbergDlls(installDir, pe.Arch, foundApi, backup, res);
 
                 // ---- steam_appid.txt ---------------------------------------------
                 Pct(82);
-                if (o.WriteAppIdTxt)
+                if (o.WriteAppIdTxt || o.OnlineFix)
                 {
                     string appId = o.EffectiveAppId;
                     string txt = appId + Environment.NewLine;
@@ -333,9 +336,13 @@ namespace Gp
                 // ---- done ---------------------------------------------------------
                 Pct(100);
                 res.Success = true;
-                res.Summary = string.Format("Patched with AppID {0}. Goldberg dll installed to: {1}",
-                    o.EffectiveAppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
+                res.Summary = o.OnlineFix
+                    ? string.Format("Online-fix ready (Spacewar · 480). Start Steam, then launch {0} – it will show up as playing Spacewar.", Path.GetFileName(finalExe))
+                    : string.Format("Patched with AppID {0}. Goldberg dll installed to: {1}",
+                        o.EffectiveAppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
                 Log(LogLevel.Ok, res.Summary);
+                if (o.OnlineFix)
+                    Log(LogLevel.Dim, "Multiplayer traffic is routed through Steam's own servers under Spacewar's AppID.");
                 if (res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
                 Log(LogLevel.Ok, "✔ Done! Launch the game to test.");
             }
@@ -526,6 +533,86 @@ namespace Gp
                 return null;
             }
             finally { try { Directory.Delete(tmp, true); } catch { } }
+        }
+
+        /// <summary>Generic online-fix mode: the game's ORIGINAL steam_api dll must stay in place so that,
+        /// with steam_appid.txt = 480, the process attaches to the running Steam client as Spacewar and
+        /// matchmaking/networking is routed through Valve's servers. If this game was Goldberg-patched
+        /// before, the originals are restored from goldberg_backup.</summary>
+        private void PrepareOnlineFixMode(string installDir, PatchResult res)
+        {
+            string backupDir = Path.Combine(installDir, "goldberg_backup");
+
+            // undo a previous Goldberg install if the originals were backed up
+            bool restored = false;
+            foreach (var n in new[] { "steam_api.dll", "steam_api64.dll" })
+            {
+                string bak = Path.Combine(backupDir, n);
+                if (!File.Exists(bak)) continue;
+                string cur = Path.Combine(installDir, n);
+                if (!File.Exists(cur) || !FilesEqual(bak, cur))
+                {
+                    File.Copy(bak, cur, true);
+                    Log(LogLevel.Ok, "Restored original " + n + " from goldberg_backup\\");
+                    restored = true;
+                    res.ReplacedFiles.Add(n);
+                }
+            }
+
+            // sanity-check the active dll(s): they must not be a bundled Goldberg dll
+            bool anyApi = false;
+            foreach (var n in new[] { "steam_api.dll", "steam_api64.dll" })
+            {
+                string cur = Path.Combine(installDir, n);
+                if (!File.Exists(cur)) continue;
+                anyApi = true;
+                if (!restored && LooksLikeBundledGoldberg(cur))
+                    throw new Exception("steam_api dll in this game folder is a Goldberg emulator dll and no original backup exists.\n" +
+                        "Online-fix mode needs the game's ORIGINAL Steamworks dll so Steam can see the game.\n" +
+                        "Restore/reinstall the original steam_api dll first, then run online-fix again.");
+                Log(LogLevel.Dim, "Original " + n + " kept in place – required for Steam detection & server routing.");
+            }
+            if (!anyApi)
+                Log(LogLevel.Warn, "No steam_api dll found in the install folder – if this game uses Steamworks, double-check the chosen exe.");
+        }
+
+        static bool LooksLikeBundledGoldberg(string dllPath)
+        {
+            foreach (var src in new[] { Tools.ApiDll86, Tools.ApiDll64 })
+            {
+                try
+                {
+                    if (!File.Exists(src)) continue;
+                    if (!FilesEqual(dllPath, src)) continue;
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        static bool FilesEqual(string p1, string p2)
+        {
+            try
+            {
+                var f1 = new FileInfo(p1);
+                var f2 = new FileInfo(p2);
+                if (f1.Length != f2.Length) return false;
+                using (var s1 = f1.OpenRead()) using (var s2 = f2.OpenRead())
+                {
+                    var b1 = new byte[81920];
+                    var b2 = new byte[81920];
+                    int r1;
+                    while ((r1 = s1.Read(b1, 0, b1.Length)) > 0)
+                    {
+                        int r2 = s2.Read(b2, 0, b2.Length);
+                        if (r1 != r2) return false;
+                        for (int i = 0; i < r1; i++) if (b1[i] != b2[i]) return false;
+                    }
+                    return true;
+                }
+            }
+            catch { return false; }
         }
 
         private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, Func<string, string> backup, PatchResult res)

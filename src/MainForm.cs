@@ -265,7 +265,7 @@ namespace Gp
             tBackup = new Toggle("Back up replaced files", settings.Backup);
             tAppid = new Toggle("Write steam_appid.txt", settings.WriteAppIdTxt);
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
-            tOnlineFix = new Toggle("Generic online-fix (force Spacewar AppID 480)", settings.OnlineFix);
+            tOnlineFix = new Toggle("Generic online-fix (show game as Spacewar on Steam)", settings.OnlineFix);
             tOnlineFix.CheckedChanged += delegate
             {
                 appIdBox.Enabled = !running && !tOnlineFix.Checked;
