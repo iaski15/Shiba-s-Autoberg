@@ -171,7 +171,7 @@ namespace Gp
         readonly AppCard appIdCard;
         readonly AppIdBox appIdBox;
         readonly AppCard optionsCard;
-        readonly Toggle tUnpack, tBackup, tAppid, tSettings;
+        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix;
         readonly GradientButton patchBtn;
         readonly ProgressBarLite progress;
         readonly Banner banner;
@@ -196,7 +196,7 @@ namespace Gp
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(820, 740);
+            ClientSize = new Size(820, 780);
             BackColor = Ui.Bg;
             Text = "Goldberg Patcher";
             KeyPreview = true;
@@ -258,30 +258,37 @@ namespace Gp
             };
 
             optionsCard = new AppCard();
-            optionsCard.Bounds = new Rectangle(Pad, 354, 820 - Pad * 2, 98);
+            optionsCard.Bounds = new Rectangle(Pad, 354, 820 - Pad * 2, 138);
             Controls.Add(optionsCard);
 
             tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
             tBackup = new Toggle("Back up replaced files", settings.Backup);
             tAppid = new Toggle("Write steam_appid.txt", settings.WriteAppIdTxt);
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
+            tOnlineFix = new Toggle("Generic online-fix (force Spacewar AppID 480)", settings.OnlineFix);
+            tOnlineFix.CheckedChanged += delegate
+            {
+                appIdBox.Enabled = !running && !tOnlineFix.Checked;
+                RecalcLog();
+            };
             tUnpack.Bounds = new Rectangle(24, 16, 370, 24);
             tBackup.Bounds = new Rectangle(408, 16, 330, 24);
             tAppid.Bounds = new Rectangle(24, 56, 370, 24);
             tSettings.Bounds = new Rectangle(408, 56, 340, 24);
-            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings }) optionsCard.Controls.Add(c);
+            tOnlineFix.Bounds = new Rectangle(24, 96, 370, 24);
+            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix }) optionsCard.Controls.Add(c);
 
             patchBtn = new GradientButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(Pad, 464, 820 - Pad * 2, 52);
+            patchBtn.Bounds = new Rectangle(Pad, 504, 820 - Pad * 2, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(Pad, 524, 820 - Pad * 2, 5);
+            progress.Bounds = new Rectangle(Pad, 564, 820 - Pad * 2, 5);
             Controls.Add(progress);
 
             banner = new Banner();
-            banner.Bounds = new Rectangle(Pad, 538, 820 - Pad * 2, 58);
+            banner.Bounds = new Rectangle(Pad, 578, 820 - Pad * 2, 58);
             banner.ActionClicked += OnBannerAction;
             Controls.Add(banner);
 
@@ -309,7 +316,7 @@ namespace Gp
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         Rectangle LogBounds()
         {
-            int top = banner.Visible ? 604 : 546;
+            int top = banner.Visible ? 644 : 586;
             return new Rectangle(Pad, top, ClientSize.Width - Pad * 2, ClientSize.Height - top - 40);
         }
         void RecalcLog()
@@ -467,8 +474,9 @@ namespace Gp
                 statusBar.Set("Waiting for input", Ui.WarnC);
                 return;
             }
+            var ofix = tOnlineFix.Checked;
             var id = appIdBox.Text.Trim();
-            if (id.Length == 0 || !id.All(char.IsDigit))
+            if (!ofix && (id.Length == 0 || !id.All(char.IsDigit)))
             {
                 banner.Show(Banner.BannerKind.Warn, "Enter a valid numeric Steam AppID.\nYou can find it on steamdb.info by searching your game's name.");
                 ShowBannerLayout(true);
@@ -479,18 +487,20 @@ namespace Gp
             var opts = new PatchOptions
             {
                 GameExe = zone.GamePath,
-                AppId = id,
+                AppId = ofix ? "480" : id,
                 UnpackDrm = tUnpack.Checked,
                 Backup = tBackup.Checked,
                 WriteAppIdTxt = tAppid.Checked,
                 CreateSettings = tSettings.Checked,
                 GenerateInterfaces = true,
+                OnlineFix = ofix,
             };
             settings.LastAppId = id;
             settings.UnpackDrm = tUnpack.Checked;
             settings.Backup = tBackup.Checked;
             settings.WriteAppIdTxt = tAppid.Checked;
             settings.CreateSettings = tSettings.Checked;
+            settings.OnlineFix = ofix;
             settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id;
             settings.Save();
 
@@ -500,7 +510,7 @@ namespace Gp
             patchBtn.Text = "Cancel";
             zone.Enabled = false;
             appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = false;
             banner.HideBanner();
             ShowBannerLayout(false);
             progress.SetValue(1);
@@ -543,7 +553,8 @@ namespace Gp
             patchBtn.Text = "Patch Game";
             zone.Enabled = true;
             appIdBox.Enabled = true;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = true;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = true;
+            appIdBox.Enabled = !tOnlineFix.Checked;
 
             if (res.Success)
             {

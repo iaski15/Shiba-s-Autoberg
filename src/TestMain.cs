@@ -113,6 +113,41 @@ static class TestMain
             try { Directory.Delete(work, true); } catch { }
         }
 
+        // ---- generic online-fix (Spacewar) ----
+        Console.WriteLine("\n[integration: generic online-fix]");
+        string work2 = Path.Combine(Path.GetTempPath(), "gp_selftest_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            var gameDir2 = Directory.CreateDirectory(Path.Combine(work2, "OFGame")).FullName;
+            var exe2 = Path.Combine(gameDir2, "OFGame.exe");
+            File.Copy(Path.Combine(root, @"steamless\Steamless.CLI.exe"), exe2);
+
+            var opts2 = new PatchOptions
+            {
+                GameExe = exe2,
+                AppId = "",
+                UnpackDrm = false,
+                Backup = false,
+                WriteAppIdTxt = true,
+                CreateSettings = false,
+                GenerateInterfaces = false,
+                OnlineFix = true,
+            };
+            var runner2 = new PatchRunner();
+            var res2 = runner2.Run(opts2, CancellationToken.None);
+
+            Check(res2.Success, "online-fix pipeline succeeded", res2.Summary);
+            Check(File.Exists(Path.Combine(gameDir2, "steam_appid.txt")) &&
+                  File.ReadAllText(Path.Combine(gameDir2, "steam_appid.txt")).Trim() == "480",
+                  "online-fix forces steam_appid.txt to 480",
+                  File.Exists(Path.Combine(gameDir2, "steam_appid.txt"))
+                      ? File.ReadAllText(Path.Combine(gameDir2, "steam_appid.txt")).Trim() : "(missing)");
+        }
+        finally
+        {
+            try { Directory.Delete(work2, true); } catch { }
+        }
+
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
         return fail == 0 ? 0 : 1;
     }

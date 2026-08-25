@@ -137,6 +137,10 @@ namespace Gp
         public bool WriteAppIdTxt = true;
         public bool CreateSettings = false;
         public bool GenerateInterfaces = true;
+        public bool OnlineFix = false;
+
+        /// <summary>AppID actually written when online-fix mode forces Spacewar.</summary>
+        public string EffectiveAppId { get { return OnlineFix ? "480" : (AppId ?? "").Trim(); } }
     }
 
     public class PatchLogEntry
@@ -212,8 +216,10 @@ namespace Gp
                 // ---- validate --------------------------------------------------
                 if (string.IsNullOrEmpty(o.GameExe) || !File.Exists(o.GameExe))
                     throw new Exception("Game executable not found:\n" + o.GameExe);
-                if (string.IsNullOrEmpty(o.AppId) || !Regex.IsMatch(o.AppId, @"^\d{1,10}$"))
+                if (!o.OnlineFix && (string.IsNullOrEmpty(o.AppId) || !Regex.IsMatch(o.AppId, @"^\d{1,10}$")))
                     throw new Exception("Steam AppID must be a numeric ID (find it on steamdb.info).");
+                if (o.OnlineFix)
+                    Log(LogLevel.Info, "Generic online-fix mode: steam_appid.txt will be forced to 480 (Spacewar).");
 
                 var exePath = Path.GetFullPath(o.GameExe);
                 var gameDir = Path.GetDirectoryName(exePath);
@@ -290,7 +296,8 @@ namespace Gp
                 Pct(82);
                 if (o.WriteAppIdTxt)
                 {
-                    string txt = o.AppId.Trim() + Environment.NewLine;
+                    string appId = o.EffectiveAppId;
+                    string txt = appId + Environment.NewLine;
                     WriteIfChanged(Path.Combine(installDir, "steam_appid.txt"), txt);
                     res.ReplacedFiles.Add(ShortRel(gameDir, Path.Combine(installDir, "steam_appid.txt")));
                     var besideExe = Path.Combine(Path.GetDirectoryName(finalExe), "steam_appid.txt");
@@ -299,7 +306,8 @@ namespace Gp
                         WriteIfChanged(besideExe, txt);
                         res.ReplacedFiles.Add(ShortRel(gameDir, besideExe));
                     }
-                    Log(LogLevel.Ok, "steam_appid.txt → " + o.AppId);
+                    Log(LogLevel.Ok, "steam_appid.txt → " + appId +
+                        (o.OnlineFix ? "  (Spacewar / generic online-fix)" : ""));
                 }
 
                 // ---- steam_settings ----------------------------------------------
@@ -326,7 +334,7 @@ namespace Gp
                 Pct(100);
                 res.Success = true;
                 res.Summary = string.Format("Patched with AppID {0}. Goldberg dll installed to: {1}",
-                    o.AppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
+                    o.EffectiveAppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
                 Log(LogLevel.Ok, res.Summary);
                 if (res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
                 Log(LogLevel.Ok, "✔ Done! Launch the game to test.");
@@ -695,6 +703,7 @@ namespace Gp
         public bool WriteAppIdTxt = true;
         public bool CreateSettings = false;
         public bool GenerateInterfaces = true;
+        public bool OnlineFix = false;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher"); } }
@@ -721,6 +730,7 @@ namespace Gp
                         case "appidsrc": s.WriteAppIdTxt = v == "1"; break;
                         case "settings": s.CreateSettings = v == "1"; break;
                         case "interfaces": s.GenerateInterfaces = v == "1"; break;
+                        case "onlinefix": s.OnlineFix = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
                                 s.AppIdsByFolder[k.Substring(7)] = v;
@@ -745,6 +755,7 @@ namespace Gp
                 sb.AppendLine("appidsrc=" + (WriteAppIdTxt ? "1" : "0"));
                 sb.AppendLine("settings=" + (CreateSettings ? "1" : "0"));
                 sb.AppendLine("interfaces=" + (GenerateInterfaces ? "1" : "0"));
+                sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + kv.Key + "=" + kv.Value);
                 System.IO.File.WriteAllText(File0, sb.ToString());
