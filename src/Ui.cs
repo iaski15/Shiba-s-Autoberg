@@ -170,6 +170,11 @@ namespace Gp
             if (hoverBtn == 0) DragWindow();
             base.OnMouseDown(e);
         }
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            if (!closeR.Contains(e.Location) && !minR.Contains(e.Location)) OnMinimizeClicked();
+            base.OnMouseDoubleClick(e);
+        }
         protected override void OnMouseUp(MouseEventArgs e)
         {
             if (closeR.Contains(e.Location)) OnCloseClicked();
@@ -254,6 +259,17 @@ namespace Gp
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
 
+        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
+
+        public event Action<string> InvalidFile;
+
+        static bool IsExeDrop(DragEventArgs e)
+        {
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return false;
+            var files = (string[])e.Data.GetData(DataFormats.FileDrop);
+            return files != null && files.Length == 1 && (files[0] ?? "").EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+        }
+
         public void ClearGame()
         {
             gamePath = ""; archChip = sizeChip = apiChip = ""; apiState = 0; Invalidate();
@@ -282,21 +298,24 @@ namespace Gp
 
         protected override void OnDragEnter(DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                if (files != null && files.Length == 1 && files[0].EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                { e.Effect = DragDropEffects.Copy; dragOver = true; Invalidate(); return; }
-            }
-            e.Effect = DragDropEffects.None;
+            if (IsExeDrop(e)) { e.Effect = DragDropEffects.Copy; dragOver = true; Invalidate(); }
+            else e.Effect = DragDropEffects.None;
         }
-        protected override void OnDragOver(DragEventArgs e) { dragOver = true; Invalidate(); }
+        protected override void OnDragOver(DragEventArgs e)
+        {
+            bool ok = IsExeDrop(e);
+            if (ok != dragOver) { dragOver = ok; Invalidate(); }
+        }
         protected override void OnDragLeave(EventArgs e) { dragOver = false; Invalidate(); }
         protected override void OnDragDrop(DragEventArgs e)
         {
             dragOver = false; Invalidate();
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-            if (files != null && files.Length >= 1) SetGame(files[0]);
+            if (files == null || files.Length < 1) return;
+            string f0 = files[0] ?? "";
+            if (!f0.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            { var h = InvalidFile; if (h != null) h(f0); return; }
+            SetGame(files[0]);
         }
         protected override void OnClick(EventArgs e) { Browse(); base.OnClick(e); }
         protected override void OnMouseMove(MouseEventArgs e)
@@ -325,11 +344,12 @@ namespace Gp
                 var bc = dragOver ? Ui.Accent : Ui.BorderC;
                 using (var pen = new Pen(bc, 1.6f)) { pen.DashStyle = DashStyle.Dash; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), 13)) g.DrawPath(pen, p); }
 
-                var iconR = new Rectangle(Width / 2 - 18, 16, 36, 36);
-                var iconBg = Ui.Tint(Ui.Surface2, Ui.Accent, 0.25);
-                Ui.FillRound(g, iconR, 18, iconBg);
-                var tri = new PointF[] { new PointF(iconR.X + 15, iconR.Y + 11), new PointF(iconR.X + 15, iconR.Bottom - 11), new PointF(iconR.Right - 11, iconR.Y + 18) };
-                using (var b = new SolidBrush(dragOver ? Color.White : Ui.Accent2)) g.FillPolygon(b, tri);
+                var iconR = new Rectangle(Width / 2 - 19, 15, 38, 38);
+                var glowR = new Rectangle(iconR.X - 7, iconR.Y - 7, iconR.Width + 14, iconR.Height + 14);
+                using (var b = new SolidBrush(Color.FromArgb(dragOver ? 46 : 24, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B))) using (var p = Ui.RoundPath(glowR, 25)) g.FillPath(b, p);
+                using (var lg = new LinearGradientBrush(new RectangleF(iconR.X, iconR.Y, iconR.Width, iconR.Height), Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(iconR, 19)) g.FillPath(lg, p);
+                var tri = new PointF[] { new PointF(iconR.X + 16, iconR.Y + 12), new PointF(iconR.X + 16, iconR.Bottom - 12), new PointF(iconR.Right - 12, iconR.Y + 19) };
+                using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, tri);
 
                 var l1 = "Drop the game's .exe here";
                 var f1 = Ui.F(11.25f, true);
@@ -378,6 +398,9 @@ namespace Gp
                     Ui.DrawChip(g, ref cx, cy, 24, apiChip, col, Ui.Tint(Ui.Surface2, col, 0.14), null);
                 }
             }
+
+            if (!Enabled)
+                using (var b = new SolidBrush(Color.FromArgb(170, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
         }
 
         Graphics CreateGraphicsSafe() { return null; }
@@ -396,6 +419,7 @@ namespace Gp
     public class Toggle : Control
     {
         bool @checked;
+        bool hover = false, press = false;
         public event EventHandler CheckedChanged;
         public bool Checked
         {
@@ -408,20 +432,42 @@ namespace Gp
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
             Cursor = Cursors.Hand; Height = 24;
         }
-        protected override void OnMouseUp(MouseEventArgs e) { Checked = !Checked; base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) { hover = true; Invalidate(); } base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (Enabled) { press = true; Invalidate(); } base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            bool p = press; press = false; hover = Enabled && !press; Invalidate();
+            if (p) Checked = !Checked;
+            base.OnMouseUp(e);
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             int pillH = 18, pillW = 36;
             var pill = new Rectangle(0, Height / 2 - pillH / 2, pillW, pillH);
-            Ui.FillRound(g, pill, pillH / 2, @checked ? Ui.Accent : Ui.Surface2);
-            Ui.StrokeRound(g, pill, pillH / 2, @checked ? Ui.Accent : Ui.BorderC, 1f);
+
+            Color trackFill, trackBorder;
+            if (!Enabled)
+            {
+                trackFill = @checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.55) : Ui.Tint(Ui.Surface2, Ui.Bg, 0.3);
+                trackBorder = @checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.6) : Ui.Tint(Ui.BorderC, Ui.Bg, 0.3);
+            }
+            else if (@checked) { trackFill = Ui.Accent; trackBorder = Ui.Accent; }
+            else if (hover) { trackFill = Ui.Tint(Ui.Surface2, Color.White, 0.05); trackBorder = Ui.Tint(Ui.BorderC, Ui.Accent, 0.4); }
+            else { trackFill = Ui.Surface2; trackBorder = Ui.BorderC; }
+
+            Ui.FillRound(g, pill, pillH / 2, trackFill);
+            Ui.StrokeRound(g, pill, pillH / 2, trackBorder, 1f);
+            if (press && Enabled) Ui.FillRound(g, pill, pillH / 2, Color.FromArgb(40, 0, 0, 0));
             int knobD = pillH - 6;
             var knob = new Rectangle(@checked ? pill.Right - knobD - 3 : pill.X + 3, pill.Y + 3, knobD, knobD);
-            using (var b = new SolidBrush(Color.White)) g.FillEllipse(b, knob);
+            using (var b = new SolidBrush(Enabled ? Color.White : Ui.FromHex("#6E7688"))) g.FillEllipse(b, knob);
+
             TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + 10, 0, Width - pill.Right - 10, Height),
-                Ui.TextC, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                Enabled ? Ui.TextC : Ui.FromHex("#5A6373"), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
         }
     }
 
@@ -435,14 +481,21 @@ namespace Gp
         public GradientButton(string text)
         {
             Text = text;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             Cursor = Cursors.Hand;
+        }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (Enabled && (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)) { e.SuppressKeyPress = true; e.Handled = true; OnClick(EventArgs.Empty); return; }
+            base.OnKeyDown(e);
         }
         protected override void OnMouseLeave(EventArgs e) { hover = press = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseDown(MouseEventArgs e) { press = true; Invalidate(); base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e) { press = false; Invalidate(); base.OnMouseUp(e); }
-        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -461,6 +514,8 @@ namespace Gp
                 if (press) Ui.FillRound(g, rect, 12, Color.FromArgb(45, 0, 0, 0));
                 else if (hover) Ui.FillRound(g, rect, 12, Color.FromArgb(28, 255, 255, 255));
             }
+            if (Focused && Enabled) Ui.FillRound(g, rect, 12, Color.FromArgb(34, 255, 255, 255));
+            if (Enabled) using (var p = new Pen(Color.FromArgb(52, 255, 255, 255))) g.DrawLine(p, rect.X + 16, rect.Y + 1, rect.Right - 16, rect.Y + 1);
             var tf = Ui.F(11f, true);
             TextRenderer.DrawText(g, Text.ToUpperInvariant(), tf, rect, txt,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
@@ -555,31 +610,37 @@ namespace Gp
             string glyph = Kind == BannerKind.Success ? "\u2714" : Kind == BannerKind.Error ? "\u2718" : "!";
             using (var b = new SolidBrush(fg)) g.DrawString(glyph, Ui.F(11, true), b, 16, rect.Height / 2 - 11);
 
-            var lines = message.Split('\n');
-            int ty = rect.Height / 2 - (lines.Length * 17) / 2;
-            for (int i = 0; i < lines.Length; i++)
-            {
-                var f = i == 0 ? Ui.F(8.75f, true) : Ui.F(8.25f, false);
-                TextRenderer.DrawText(g, lines[i], f, new Rectangle(44, ty + i * 17, Width - 240, 18),
-                    i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-            }
-
+            // lay out action buttons first so the message text can use the remaining width
+            var bf = Ui.F(8f, true);
             actionRects.Clear();
             int ax = rect.Right - 14;
-            var bf = Ui.F(8f, true);
             for (int i = actions.Count - 1; i >= 0; i--)
             {
                 var sz = TextRenderer.MeasureText(actions[i].ToUpperInvariant(), bf, Size.Empty, TextFormatFlags.NoPadding);
                 int bw = sz.Width + 24;
                 ax -= bw;
-                var br = new Rectangle(ax, rect.Height / 2 - 14, bw, 28);
-                actionRects.Insert(0, br);
+                actionRects.Insert(0, new Rectangle(ax, rect.Height / 2 - 14, bw, 28));
+                ax -= 8;
+            }
+
+            var lines = message.Split('\n');
+            int textMaxW = (actions.Count > 0 ? actionRects[actionRects.Count - 1].X : Width - 56) - 56;
+            int ty = rect.Height / 2 - (lines.Length * 17) / 2;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var f = i == 0 ? Ui.F(8.75f, true) : Ui.F(8.25f, false);
+                TextRenderer.DrawText(g, lines[i], f, new Rectangle(44, ty + i * 17, Math.Max(80, textMaxW), 18),
+                    i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+            }
+
+            for (int i = 0; i < actions.Count; i++)
+            {
+                var br = actionRects[i];
                 bool hov = i == hoverAction;
                 Ui.FillRound(g, br, 14, hov ? fg : Ui.Tint(bg, fg, 0.16));
                 Ui.StrokeRound(g, br, 14, fg, 1f);
                 TextRenderer.DrawText(g, actions[i].ToUpperInvariant(), bf, br, hov ? Ui.Bg : fg,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                ax -= 8;
             }
         }
     }

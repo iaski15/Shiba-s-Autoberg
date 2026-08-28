@@ -129,8 +129,9 @@ namespace Gp
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             var r = ClientRectangle;
-            Ui.FillRound(g, r, 9, Ui.Surface2);
-            Ui.StrokeRound(g, r, 9, focused ? Ui.Accent : Ui.BorderC, 1.4f);
+            Ui.FillRound(g, r, 9, Enabled ? Ui.Surface2 : Ui.Tint(Ui.Surface2, Ui.Bg, 0.35));
+            Ui.StrokeRound(g, r, 9, focused && Enabled ? Ui.Accent : Ui.BorderC, 1.4f);
+            if (focused && Enabled) Ui.StrokeRound(g, Rectangle.Inflate(r, -2, -2), 7, Color.FromArgb(80, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B), 1f);
         }
     }
 
@@ -142,10 +143,27 @@ namespace Gp
         public Color DotColor = Ui.MutedC;
         public string RightText = "goldberg emu · steamless";
 
+        bool _pulse = false, pulseOn = false;
+        readonly System.Windows.Forms.Timer pulseTimer;
+        public bool Pulse
+        {
+            get { return _pulse; }
+            set
+            {
+                if (_pulse == value) return;
+                _pulse = value;
+                if (value) pulseTimer.Start();
+                else { pulseOn = false; pulseTimer.Stop(); Invalidate(); }
+            }
+        }
+
         public StatusBarCtl()
         {
             Dock = DockStyle.Bottom; Height = 30;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            pulseTimer = new System.Windows.Forms.Timer();
+            pulseTimer.Interval = 650;
+            pulseTimer.Tick += delegate { pulseOn = !pulseOn; Invalidate(); };
         }
         public void Set(string text, Color dot) { StatusText = text; DotColor = dot; Invalidate(); }
         protected override void OnPaint(PaintEventArgs e)
@@ -154,6 +172,8 @@ namespace Gp
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, 0, Width, 0);
+            if (_pulse && pulseOn)
+                using (var b = new SolidBrush(Color.FromArgb(70, DotColor))) g.FillEllipse(b, 23, Height / 2 - 7, 14, 14);
             using (var b = new SolidBrush(DotColor)) g.FillEllipse(b, 26, Height / 2 - 4, 8, 8);
             TextRenderer.DrawText(g, StatusText, Ui.F(8.25f, false), new Point(44, Height / 2 - 8), Ui.MutedC, TextFormatFlags.NoPadding);
             var sz = TextRenderer.MeasureText(RightText, Ui.F(7.75f, false), Size.Empty, TextFormatFlags.NoPadding);
@@ -209,6 +229,7 @@ namespace Gp
             zone = new DropZone();
             zone.Bounds = new Rectangle(Pad, 128, 820 - Pad * 2, 116);
             zone.FileChosen += OnGameSelected;
+            zone.InvalidFile += OnInvalidDropped;
             Controls.Add(zone);
 
             appIdCard = new AppCard();
@@ -258,8 +279,16 @@ namespace Gp
             };
 
             optionsCard = new AppCard();
-            optionsCard.Bounds = new Rectangle(Pad, 354, 820 - Pad * 2, 138);
+            optionsCard.Bounds = new Rectangle(Pad, 354, 820 - Pad * 2, 160);
             Controls.Add(optionsCard);
+
+            optionsCard.Paint += (s, e) =>
+            {
+                var g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                Ui.SpacedText(g, "OPTIONS", Ui.F(7.5f, true), new SolidBrush(Ui.MutedC), new PointF(22, 13), 1.5f);
+            };
 
             tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
             tBackup = new Toggle("Back up replaced files", settings.Backup);
@@ -271,24 +300,24 @@ namespace Gp
                 appIdBox.Enabled = !running && !tOnlineFix.Checked;
                 RecalcLog();
             };
-            tUnpack.Bounds = new Rectangle(24, 16, 370, 24);
-            tBackup.Bounds = new Rectangle(408, 16, 330, 24);
-            tAppid.Bounds = new Rectangle(24, 56, 370, 24);
-            tSettings.Bounds = new Rectangle(408, 56, 340, 24);
-            tOnlineFix.Bounds = new Rectangle(24, 96, 370, 24);
+            tUnpack.Bounds = new Rectangle(24, 40, 370, 24);
+            tBackup.Bounds = new Rectangle(408, 40, 330, 24);
+            tAppid.Bounds = new Rectangle(24, 80, 370, 24);
+            tSettings.Bounds = new Rectangle(408, 80, 340, 24);
+            tOnlineFix.Bounds = new Rectangle(24, 120, 370, 24);
             foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix }) optionsCard.Controls.Add(c);
 
             patchBtn = new GradientButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(Pad, 504, 820 - Pad * 2, 52);
+            patchBtn.Bounds = new Rectangle(Pad, 526, 820 - Pad * 2, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(Pad, 564, 820 - Pad * 2, 5);
+            progress.Bounds = new Rectangle(Pad, 586, 820 - Pad * 2, 5);
             Controls.Add(progress);
 
             banner = new Banner();
-            banner.Bounds = new Rectangle(Pad, 578, 820 - Pad * 2, 58);
+            banner.Bounds = new Rectangle(Pad, 600, 820 - Pad * 2, 58);
             banner.ActionClicked += OnBannerAction;
             Controls.Add(banner);
 
@@ -316,7 +345,7 @@ namespace Gp
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         Rectangle LogBounds()
         {
-            int top = banner.Visible ? 644 : 586;
+            int top = banner.Visible ? 666 : 608;
             return new Rectangle(Pad, top, ClientSize.Width - Pad * 2, ClientSize.Height - top - 40);
         }
         void RecalcLog()
@@ -430,6 +459,15 @@ namespace Gp
 
         int selectGeneration;
 
+        void OnInvalidDropped(string path)
+        {
+            if (running) return;
+            var name = Path.GetFileName(path);
+            banner.Show(Banner.BannerKind.Warn, "That doesn't look like a Windows executable.\nDrop the game's .exe file (" + name + ") instead.");
+            ShowBannerLayout(true);
+            statusBar.Set("Waiting for input", Ui.WarnC);
+        }
+
         void ApplyApiSearch(string dir, string archChip, string sizeChip, System.Collections.Generic.List<string> apis)
         {
             string apiChip; int apiState;
@@ -523,6 +561,7 @@ namespace Gp
             banner.HideBanner();
             ShowBannerLayout(false);
             progress.SetValue(1);
+            statusBar.Pulse = true;
             statusBar.Set("Patching… (Esc to cancel)", Ui.Accent);
 
             runner = new PatchRunner();
@@ -557,6 +596,7 @@ namespace Gp
         void OnPatchDone(PatchResult res)
         {
             running = false;
+            statusBar.Pulse = false;
             lastResult = res;
             patchBtn.Kind = GradientButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
@@ -653,13 +693,43 @@ namespace Gp
             log.AppendLine(msg, lvl);
         }
 
+        static void AmbientGlow(Graphics g, Rectangle clipRect, float cx, float cy, float radius, Color c, int alpha)
+        {
+            using (var p = new GraphicsPath())
+            {
+                p.AddEllipse(new RectangleF(cx - radius, cy - radius, radius * 2, radius * 2));
+                using (var b = new PathGradientBrush(p))
+                {
+                    b.CenterColor = Color.FromArgb(alpha, c.R, c.G, c.B);
+                    b.SurroundColors = new[] { Color.Transparent };
+                    g.FillRectangle(b, clipRect);
+                }
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
-            TextRenderer.DrawText(g, "Patch a Steam game", Ui.F(15.5f, true), new Point(Pad, 62), Ui.TextC, TextFormatFlags.NoPadding);
+
+            AmbientGlow(g, ClientRectangle, Width / 2f + 40f, 150f, 430f, Ui.Accent, 18);
+            AmbientGlow(g, ClientRectangle, (float)Width - 60f, Height - 210f, 400f, Ui.Accent2, 12);
+
+            // hero title in the brand gradient
+            string title = "Patch a Steam game";
+            var tf = Ui.F(15.5f, true);
+            try
+            {
+                float tw = (float)g.MeasureString(title, tf).Width;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.Accent, Ui.Accent2))
+                    g.DrawString(title, tf, lg, new PointF(Pad, 58f), StringFormat.GenericTypographic);
+            }
+            catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 62), Ui.TextC, TextFormatFlags.NoPadding); }
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
             TextRenderer.DrawText(g, "Unpack SteamStub DRM  ·  install Goldberg emulator  ·  configure AppID — automatically",
                 Ui.F(8.75f, false), new Point(Pad, 94), Ui.MutedC, TextFormatFlags.NoPadding);
         }
