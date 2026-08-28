@@ -178,6 +178,35 @@ static class TestMain
             try { Directory.Delete(work2, true); } catch { }
         }
 
+        // ---- steam appid lookup (offline units) ----
+        Console.WriteLine("\n[steam appid lookup]");
+        var cands = SteamLookup.CandidateTitles(@"C:\Games\Half-Life 2\hl2.exe");
+        Check(cands.IndexOf("Half-Life 2") >= 0, "candidate titles from install folder", string.Join("|", cands));
+
+        var steamCands = SteamLookup.CandidateTitles(@"C:\Program Files (x86)\Steam\steamapps\common\Portal 2\portal2.exe");
+        Check(steamCands.Count > 0 && steamCands[0] == "Portal 2",
+              "steamapps\\common layout yields game folder first", string.Join("|", steamCands));
+
+        var sample = "{\"total\":3,\"items\":[{\"type\":\"app\",\"name\":\"Half-Life 2\",\"id\":220},{\"type\":\"app\",\"name\":\"Half-Life\",\"id\":70},{\"appid\":\"770\",\"name\":\"Counter-Strike\"}]}";
+        var items = SteamLookup.ParseItems(sample);
+        Check(items.Count == 3 && items[0].AppId == "220" && items[0].GameName == "Half-Life 2",
+              "storesearch json parsed (id+name)");
+        Check(items[2].AppId == "770", "legacy 'appid' field still supported", items[2].AppId);
+
+        var exact = SteamLookup.BestMatch(items, "half life 2");
+        Check(exact != null && exact.AppId == "220",
+              "normalised exact match wins over ranked-first", exact == null ? "(null)" : exact.AppId);
+
+        var partial = SteamLookup.BestMatch(
+            new List<SteamMatch> { new SteamMatch { AppId = "630", GameName = "Portal" }, new SteamMatch { AppId = "999", GameName = "Something Else" } },
+            "portal 1");
+        Check(partial != null && partial.AppId == "630", "long-enough containment matches (folder 'portal 1' -> Portal)", partial == null ? "(null)" : partial.AppId);
+
+        var none = SteamLookup.BestMatch(items, "Zork");
+        Check(none == null, "unrelated title yields no match", none == null ? "" : none.AppId);
+        var shorty = SteamLookup.BestMatch(items, "HL2");
+        Check(shorty == null, "too-short title rejected", shorty == null ? "" : shorty.AppId);
+
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
         return fail == 0 ? 0 : 1;
     }

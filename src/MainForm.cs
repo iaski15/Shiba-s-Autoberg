@@ -191,7 +191,7 @@ namespace Gp
         readonly AppCard appIdCard;
         readonly AppIdBox appIdBox;
         readonly AppCard optionsCard;
-        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix;
+        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup;
         readonly GradientButton patchBtn;
         readonly ProgressBarLite progress;
         readonly Banner banner;
@@ -208,6 +208,14 @@ namespace Gp
         string[] lastActions = new string[0];
 
         System.Windows.Forms.Timer autoTimer;
+
+        // appid card live state: "" = default hint, otherwise a status line (auto-detect result)
+        string appidNote = "";
+        Color appidNoteCol = Ui.MutedC;
+        bool appidBusy = false;
+        bool notePulseOn = true;
+        System.Windows.Forms.Timer notePulse;
+        ToolTip zoneTip;
 
         public MainForm(StartupArgs sa)
         {
@@ -226,14 +234,15 @@ namespace Gp
             titleBar = new TitleBar();
             Controls.Add(titleBar);
 
+            zoneTip = new ToolTip();
             zone = new DropZone();
-            zone.Bounds = new Rectangle(Pad, 128, 820 - Pad * 2, 116);
+            zone.Bounds = new Rectangle(Pad, 116, 820 - Pad * 2, 116);
             zone.FileChosen += OnGameSelected;
             zone.InvalidFile += OnInvalidDropped;
             Controls.Add(zone);
 
             appIdCard = new AppCard();
-            appIdCard.Bounds = new Rectangle(Pad, 256, 820 - Pad * 2, 86);
+            appIdCard.Bounds = new Rectangle(Pad, 244, 820 - Pad * 2, 86);
             Controls.Add(appIdCard);
 
             appIdBox = new AppIdBox();
@@ -250,17 +259,44 @@ namespace Gp
                 Ui.SpacedText(g, "STEAM APPID", Ui.F(7.5f, true), new SolidBrush(Ui.MutedC), new PointF(22, 14), 1.5f);
 
                 var f8 = Ui.F(8.25f, false);
+                int ty = appIdCard.Height / 2 - 8;
+
                 string t1 = "Find your game's AppID on";
                 string t2 = "steamdb.info ↗";
                 var s1 = TextRenderer.MeasureText(t1, f8, Size.Empty, TextFormatFlags.NoPadding);
                 var s2 = TextRenderer.MeasureText(t2, f8, Size.Empty, TextFormatFlags.NoPadding);
-                int tx = appIdCard.Width - (s1.Width + 12 + s2.Width) - 26;
-                int ty = appIdCard.Height / 2 - 8;
-                TextRenderer.DrawText(g, t1, f8, new Point(tx, ty), Ui.MutedC, TextFormatFlags.NoPadding);
-                int lx = tx + s1.Width + 12;
-                TextRenderer.DrawText(g, t2, f8, new Point(lx, ty), Ui.Accent2, TextFormatFlags.NoPadding);
-                if (dbHover) using (var p = new Pen(Ui.Accent2, 1f)) g.DrawLine(p, lx, ty + 15, lx + s2.Width, ty + 15);
-                dbRect = new Rectangle(lx - 4, ty - 5, s2.Width + 8, 27);
+                int hintX = appIdCard.Width - (s1.Width + 12 + s2.Width) - 26;
+
+                // status line (auto-detect result) left of the hint area
+                if (!appidBusy && appidNote.Length > 0)
+                {
+                    var glyph = appidNoteCol == Ui.OkC ? "\u2714" : "!";
+                    using (var b = new SolidBrush(appidNoteCol)) g.DrawString(glyph, Ui.F(8.5f, true), b, 300, ty - 1);
+                    int noteMaxW = hintX - 316 - 12;
+                    string shownNote = noteMaxW > 70 ? Ui.TruncMiddle(g, appidNote, f8, noteMaxW) : "";
+                    TextRenderer.DrawText(g, shownNote, f8, new Point(316, ty), appidNoteCol, TextFormatFlags.NoPadding);
+                }
+
+                if (appidBusy)
+                {
+                    string t = "searching Steam Store…";
+                    var sz = TextRenderer.MeasureText(t, f8, Size.Empty, TextFormatFlags.NoPadding);
+                    int bx = appIdCard.Width - sz.Width - 26;
+                    float a = notePulseOn ? 1f : 0.45f;
+                    using (var b = new SolidBrush(Color.FromArgb((int)(235 * a), Ui.Accent.R, Ui.Accent.G, Ui.Accent.B)))
+                        g.FillEllipse(b, bx - 14, ty + 5, 7, 7);
+                    TextRenderer.DrawText(g, t, f8, new Point(bx, ty), Color.FromArgb((int)(235 * a), Ui.TextC.R, Ui.TextC.G, Ui.TextC.B), TextFormatFlags.NoPadding);
+                    dbRect = Rectangle.Empty;
+                }
+                else
+                {
+                    int tx = hintX;
+                    TextRenderer.DrawText(g, t1, f8, new Point(tx, ty), Ui.MutedC, TextFormatFlags.NoPadding);
+                    int lx = tx + s1.Width + 12;
+                    TextRenderer.DrawText(g, t2, f8, new Point(lx, ty), Ui.Accent2, TextFormatFlags.NoPadding);
+                    if (dbHover) using (var p = new Pen(Ui.Accent2, 1f)) g.DrawLine(p, lx, ty + 15, lx + s2.Width, ty + 15);
+                    dbRect = new Rectangle(lx - 4, ty - 5, s2.Width + 8, 27);
+                }
             };
             appIdCard.MouseMove += (s2b, e2) =>
             {
@@ -278,8 +314,13 @@ namespace Gp
                 if (dbRect.Contains(e2.Location)) try { Process.Start("https://steamdb.info"); } catch { }
             };
 
+            notePulse = new System.Windows.Forms.Timer();
+            notePulse.Interval = 550;
+            notePulse.Tick += delegate { if (!appidBusy) return; notePulseOn = !notePulseOn; appIdCard.Invalidate(); };
+            SetAppIdBusy(false);
+
             optionsCard = new AppCard();
-            optionsCard.Bounds = new Rectangle(Pad, 354, 820 - Pad * 2, 160);
+            optionsCard.Bounds = new Rectangle(Pad, 342, 820 - Pad * 2, 160);
             Controls.Add(optionsCard);
 
             optionsCard.Paint += (s, e) =>
@@ -295,6 +336,7 @@ namespace Gp
             tAppid = new Toggle("Write steam_appid.txt", settings.WriteAppIdTxt);
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
             tOnlineFix = new Toggle("Generic online-fix (show game as Spacewar on Steam)", settings.OnlineFix);
+            tLookup = new Toggle("Auto-detect Steam AppID online", settings.LookupAppId);
             tOnlineFix.CheckedChanged += delegate
             {
                 appIdBox.Enabled = !running && !tOnlineFix.Checked;
@@ -305,19 +347,20 @@ namespace Gp
             tAppid.Bounds = new Rectangle(24, 80, 370, 24);
             tSettings.Bounds = new Rectangle(408, 80, 340, 24);
             tOnlineFix.Bounds = new Rectangle(24, 120, 370, 24);
-            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix }) optionsCard.Controls.Add(c);
+            tLookup.Bounds = new Rectangle(408, 120, 340, 24);
+            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup }) optionsCard.Controls.Add(c);
 
             patchBtn = new GradientButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(Pad, 526, 820 - Pad * 2, 52);
+            patchBtn.Bounds = new Rectangle(Pad, 514, 820 - Pad * 2, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(Pad, 586, 820 - Pad * 2, 5);
+            progress.Bounds = new Rectangle(Pad, 574, 820 - Pad * 2, 5);
             Controls.Add(progress);
 
             banner = new Banner();
-            banner.Bounds = new Rectangle(Pad, 600, 820 - Pad * 2, 58);
+            banner.Bounds = new Rectangle(Pad, 588, 820 - Pad * 2, 58);
             banner.ActionClicked += OnBannerAction;
             Controls.Add(banner);
 
@@ -345,7 +388,7 @@ namespace Gp
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         Rectangle LogBounds()
         {
-            int top = banner.Visible ? 666 : 608;
+            int top = banner.Visible ? 654 : 596;
             return new Rectangle(Pad, top, ClientSize.Width - Pad * 2, ClientSize.Height - top - 40);
         }
         void RecalcLog()
@@ -407,9 +450,17 @@ namespace Gp
                 if (!string.IsNullOrEmpty(startup.AppId)) appIdBox.Text = startup.AppId;
                 if (startup.Auto)
                 {
+                    // wait for AppID resolution (local cache / steam_appid.txt / online detection) before patching
                     autoTimer = new System.Windows.Forms.Timer();
-                    autoTimer.Interval = 600;
-                    autoTimer.Tick += delegate { autoTimer.Stop(); StartPatch(); };
+                    autoTimer.Interval = 300;
+                    int waitedMs = 0;
+                    autoTimer.Tick += delegate
+                    {
+                        waitedMs += 300;
+                        bool boxHasId = appIdBox.Text.Trim().Length > 0;
+                        bool go = boxHasId || (selectionResolved && !lookupPending) || waitedMs >= 30000;
+                        if (go && waitedMs >= 600) { autoTimer.Stop(); StartPatch(); }
+                    };
                     autoTimer.Start();
                 }
             }
@@ -421,6 +472,10 @@ namespace Gp
         {
             banner.HideBanner();
             RecalcLog();
+            SetAppIdNote("", Ui.MutedC);
+            lookupPending = false; // any in-flight detection from the previous game no longer matters
+            appIdBox.Text = "";    // fresh AppID resolution on EVERY selection (folder cache → steam_appid.txt → online store)
+            zoneTip.SetToolTip(zone, "Full path:\n" + path);
             settings.LastExe = path;
             settings.Save();
 
@@ -452,12 +507,56 @@ namespace Gp
                     if (gen != selectGeneration) return;
                     var apis = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
                         ? t.Result : new System.Collections.Generic.List<string>();
-                    ApplyApiSearch(dir, archChip, sizeChip, apis);
+                    ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
                 });
             });
         }
 
         int selectGeneration;
+        bool lookupPending = false;
+        bool selectionResolved = false; // ApplyApiSearch finished its AppID resolution for the current game
+
+        void SetAppIdNote(string note, Color col)
+        {
+            appidNote = note ?? ""; appidNoteCol = col;
+            if (appidBusy) SetAppIdBusy(false);
+            appIdCard.Invalidate();
+        }
+        void SetAppIdBusy(bool busy)
+        {
+            if (appidBusy == busy) return;
+            appidBusy = busy;
+            if (busy) { notePulseOn = true; if (notePulse != null) notePulse.Start(); }
+            else if (notePulse != null) notePulse.Stop();
+            appIdCard.Invalidate();
+        }
+
+        void StartOnlineLookup(int gen, string dir)
+        {
+            var titles = SteamLookup.CandidateTitles(zone.GamePath);
+            if (titles.Count == 0) return;
+            Log(LogLevel.Dim, "No AppID found locally – searching the Steam Store for \"" + titles[0] + "\"…");
+
+            lookupPending = true;
+            SetAppIdBusy(true);
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                SteamMatch match = null;
+                foreach (var t in titles)
+                {
+                    match = SteamLookup.Search(t);
+                    if (match != null) break;
+                }
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (gen != selectGeneration || IsDisposed) return;
+                    lookupPending = false;
+                    if (appIdBox.Text.Trim().Length > 0) { SetAppIdBusy(false); return; } // user typed something meanwhile – don't clobber it
+                    if (match == null) { Log(LogLevel.Dim, "No Steam Store match found – enter the AppID manually."); SetAppIdNote("no store match – type it in manually", Ui.MutedC); }
+                    else { appIdBox.Text = match.AppId; Log(LogLevel.Ok, "Auto-detected Steam AppID " + match.AppId + "  (" + match.GameName + ") from the Steam Store – double-check it's the right game."); SetAppIdNote("matched · " + match.GameName, Ui.OkC); }
+                });
+            });
+        }
 
         void OnInvalidDropped(string path)
         {
@@ -468,7 +567,7 @@ namespace Gp
             statusBar.Set("Waiting for input", Ui.WarnC);
         }
 
-        void ApplyApiSearch(string dir, string archChip, string sizeChip, System.Collections.Generic.List<string> apis)
+        void ApplyApiSearch(int gen, string dir, string archChip, string sizeChip, System.Collections.Generic.List<string> apis)
         {
             string apiChip; int apiState;
             if (apis.Count > 0)
@@ -500,6 +599,10 @@ namespace Gp
                     appIdBox.Text = runner_FillAppId(dirs);
                 }
             }
+
+            // nothing local (cache / steam_appid.txt) found the id – try the Steam Store online
+            if (appIdBox.Text.Trim().Length == 0 && tLookup.Checked) StartOnlineLookup(gen, dir);
+            selectionResolved = true;
         }
 
         string runner_FillAppId(System.Collections.Generic.List<string> dirs)
@@ -548,7 +651,8 @@ namespace Gp
             settings.WriteAppIdTxt = tAppid.Checked;
             settings.CreateSettings = tSettings.Checked;
             settings.OnlineFix = ofix;
-            settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id;
+            settings.LookupAppId = tLookup.Checked;
+            if (id.Length > 0) settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id; // don't cache empty ids
             settings.Save();
 
             running = true;
@@ -557,7 +661,7 @@ namespace Gp
             patchBtn.Text = "Cancel";
             zone.Enabled = false;
             appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
             banner.HideBanner();
             ShowBannerLayout(false);
             progress.SetValue(1);
@@ -602,7 +706,7 @@ namespace Gp
             patchBtn.Text = "Patch Game";
             zone.Enabled = true;
             appIdBox.Enabled = true;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = true;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = true;
             appIdBox.Enabled = !tOnlineFix.Checked;
 
             if (res.Success)
@@ -724,14 +828,14 @@ namespace Gp
             {
                 float tw = (float)g.MeasureString(title, tf).Width;
                 g.TextRenderingHint = TextRenderingHint.AntiAlias;
-                using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.Accent, Ui.Accent2))
-                    g.DrawString(title, tf, lg, new PointF(Pad, 58f), StringFormat.GenericTypographic);
+                    using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.Accent, Ui.Accent2))
+                        g.DrawString(title, tf, lg, new PointF(Pad, 54f), StringFormat.GenericTypographic);
             }
-            catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 62), Ui.TextC, TextFormatFlags.NoPadding); }
+            catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 58), Ui.TextC, TextFormatFlags.NoPadding); }
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
             TextRenderer.DrawText(g, "Unpack SteamStub DRM  ·  install Goldberg emulator  ·  configure AppID — automatically",
-                Ui.F(8.75f, false), new Point(Pad, 94), Ui.MutedC, TextFormatFlags.NoPadding);
+                Ui.F(8.75f, false), new Point(Pad, 88), Ui.MutedC, TextFormatFlags.NoPadding);
         }
     }
 }

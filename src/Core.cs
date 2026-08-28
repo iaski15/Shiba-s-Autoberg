@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -836,6 +837,167 @@ namespace Gp
         }
     }
 
+    // --------------------------------------------------------------------- steam store lookup
+
+    public class SteamMatch
+    {
+        public string AppId = "";
+        public string GameName = "";
+    }
+
+    /// <summary>Guesses game-title candidates from an install path and searches the key-less Steam Store autocomplete API.</summary>
+    public static class SteamLookup
+    {
+        const string UrlFmt = "https://store.steampowered.com/api/storesearch/?term={0}&f=apps&cc=us&l=en";
+
+        /// <summary>Folder names up the tree (innermost first) that could be a game title.</summary>
+        public static List<string> CandidateTitles(string exePath)
+        {
+            var list = new List<string>();
+            try
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(exePath ?? ""));
+                var parts = (dir ?? "").Replace('/', '\\').Split('\\');
+                for (int i = parts.Length - 1; i >= 0 && list.Count < 3; i--)
+                {
+                    var p = (parts[i] ?? "").Trim();
+                    if (p.Length < 4) continue;
+                    if (IsContainer(p.ToLowerInvariant())) continue;
+                    bool dup = false;
+                    foreach (var q in list) if (q.Equals(p, StringComparison.OrdinalIgnoreCase)) { dup = true; break; }
+                    if (!dup) list.Add(p);
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        static bool IsContainer(string lp)
+        {
+            switch (lp)
+            {
+                case "games": case "game": case "apps": case "app": case "steam": case "common":
+                case "steamapps": case "program files": case "program files (x86)": case "my games":
+                case "software": case "public": case "users": case "documents": case "downloads":
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Searches the Steam Store autocomplete for a title. Returns null on no confident match or network failure.</summary>
+        public static SteamMatch Search(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title)) return null;
+            string json = HttpGet(UrlFmt.Replace("{0}", Uri.EscapeDataString(title.Trim())));
+            if (json == null) return null;
+            return BestMatch(ParseItems(json), title);
+        }
+
+        /// <summary>Picks the best match for a title: normalised exact match wins outright, else a long-enough containment.</summary>
+        public static SteamMatch BestMatch(List<SteamMatch> items, string title)
+        {
+            if (items == null || items.Count == 0) return null;
+            string n2 = Norm(title);
+            if (n2.Length < 3) return null;
+
+            SteamMatch best = null; int bestScore = 0;
+            foreach (var it in items)
+            {
+                if (string.IsNullOrEmpty(it.AppId)) continue;
+                string n1 = Norm(it.GameName);
+                if (n1.Length == 0) continue;
+                if (n1 == n2) return it; // exact: take immediately, even if ranked later
+                int score = Math.Min(n1.Length, n2.Length) >= 5 && (n1.Contains(n2) || n2.Contains(n1)) ? 2 : 0;
+                if (score > bestScore) { bestScore = score; best = it; }
+            }
+            return best;
+        }
+
+        /// <summary>Normalises a name for comparison: lowercase alphanumerics only ("Half-Life 2" == "halflife2").</summary>
+        public static string Norm(string s)
+        {
+            if (s == null) return "";
+            var sb = new StringBuilder();
+            foreach (char c in s.ToLowerInvariant()) if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) sb.Append(c);
+            return sb.ToString();
+        }
+
+        /// <summary>Extracts {appid, name} pairs from a storesearch response. Tolerant of extra/missing fields.</summary>
+        public static List<SteamMatch> ParseItems(string json)
+        {
+            var list = new List<SteamMatch>();
+            try
+            {
+                string body = (json ?? "");
+                int i = body.IndexOf("\"items\"");
+                if (i < 0) return list;
+                int lb = body.IndexOf('[', i);
+                if (lb < 0) return list;
+                body = body.Substring(lb + 1);
+                int rb = body.IndexOf(']');
+                if (rb >= 0) body = body.Substring(0, rb);
+
+                foreach (var chunk in SplitTopObjects(body))
+                {
+                    // the storesearch endpoint reports the AppID as "id" (older payloads used "appid")
+                    var mApp = Regex.Match(chunk, "\"(?:appid|id)\"\\s*:\\s*\"?(\\d{1,9})");
+                    var mName = Regex.Match(chunk, "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                    if (!mApp.Success) continue;
+                    list.Add(new SteamMatch
+                    {
+                        AppId = mApp.Groups[1].Value,
+                        GameName = Unescape(mName.Success ? mName.Groups[1].Value : ""),
+                    });
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        static List<string> SplitTopObjects(string body)
+        {
+            var outl = new List<string>();
+            int depth = 0, start = -1; bool inStr = false;
+            for (int i = 0; i < body.Length; i++)
+            {
+                char c = body[i];
+                if (inStr)
+                {
+                    if (c == '\\' && i + 1 < body.Length) i++;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') inStr = true;
+                else if (c == '{') { depth++; if (depth == 1) start = i; }
+                else if (c == '}') { depth--; if (depth == 0 && start >= 0) { outl.Add(body.Substring(start, i - start + 1)); start = -1; } }
+            }
+            return outl;
+        }
+
+        static string Unescape(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\\\", "\u0001").Replace("\\\"", "\"").Replace("\\n", " ").Replace("\u0001", "\\");
+        }
+
+        static string HttpGet(string url)
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Timeout = 8000;
+                req.ReadWriteTimeout = 8000;
+                req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoldbergPatcher/0.3";
+                using (var resp = req.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    return sr.ReadToEnd();
+            }
+            catch { return null; }
+        }
+    }
+
     internal static class Ext
     {
         public static IEnumerable<T> TakeLastVisible<T>(this IList<T> list, int n) { return list; }
@@ -853,6 +1015,7 @@ namespace Gp
         public bool CreateSettings = false;
         public bool GenerateInterfaces = true;
         public bool OnlineFix = false;
+        public bool LookupAppId = true;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher"); } }
@@ -880,6 +1043,7 @@ namespace Gp
                         case "settings": s.CreateSettings = v == "1"; break;
                         case "interfaces": s.GenerateInterfaces = v == "1"; break;
                         case "onlinefix": s.OnlineFix = v == "1"; break;
+                        case "lookup": s.LookupAppId = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
                                 s.AppIdsByFolder[k.Substring(7)] = v;
@@ -905,6 +1069,7 @@ namespace Gp
                 sb.AppendLine("settings=" + (CreateSettings ? "1" : "0"));
                 sb.AppendLine("interfaces=" + (GenerateInterfaces ? "1" : "0"));
                 sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
+                sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + kv.Key + "=" + kv.Value);
                 System.IO.File.WriteAllText(File0, sb.ToString());

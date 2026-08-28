@@ -212,7 +212,7 @@ namespace Gp
             // title
             var tsz = Ui.MeasureSpaced(g, "GOLDBERG PATCHER", Ui.F(9, true), 1.6f);
             Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, new PointF(52, 15), 1.6f);
-            TextRenderer.DrawText(g, "v0.2", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "v0.3", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
 
             // buttons
             if (hoverBtn == 1) { Ui.FillRound(g, minR, 6, Ui.Tint(Ui.Bg, Color.White, 0.07)); }
@@ -237,6 +237,8 @@ namespace Gp
         internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+        [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        internal static extern IntPtr ExtractAssociatedIcon(IntPtr hInst, string lpszFile);
     }
 
     // ─────────────────────────────────────────────── drop zone
@@ -249,6 +251,7 @@ namespace Gp
         int apiState = 0; // 0 warn, 1 ok
         bool dragOver = false;
         bool overChange = false;
+        Icon fileIcon = null;
 
         public string GamePath { get { return gamePath; } }
 
@@ -272,7 +275,9 @@ namespace Gp
 
         public void ClearGame()
         {
-            gamePath = ""; archChip = sizeChip = apiChip = ""; apiState = 0; Invalidate();
+            gamePath = ""; archChip = sizeChip = apiChip = ""; apiState = 0;
+            if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
+            Invalidate();
         }
 
         public void UpdateAnalysis(string arch, string size, string api, int state)
@@ -280,9 +285,23 @@ namespace Gp
             archChip = arch ?? ""; sizeChip = size ?? ""; apiChip = api ?? ""; apiState = state; Invalidate();
         }
 
+        static Icon LoadFileIcon(string path)
+        {
+            try
+            {
+                var h = NativeMethods.ExtractAssociatedIcon(IntPtr.Zero, path);
+                if (h == IntPtr.Zero) return null;
+                using (var tmp = Icon.FromHandle(h)) return (Icon)tmp.Clone(); // own the copy so we can dispose later
+            }
+            catch { return null; }
+        }
+
         public void SetGame(string path)
         {
-            gamePath = path ?? ""; Invalidate();
+            gamePath = path ?? "";
+            if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
+            fileIcon = LoadFileIcon(gamePath);
+            Invalidate();
             var h = FileChosen; if (h != null && gamePath.Length > 0) h(gamePath);
         }
 
@@ -364,20 +383,30 @@ namespace Gp
             {
                 Ui.StrokeRound(g, rect, 14, dragOver ? Ui.Accent : Ui.BorderC, 1.4f);
                 int pad = 18;
-                var iconR = new Rectangle(pad, 16, 34, 34);
-                Ui.FillRound(g, iconR, 17, Ui.Tint(Ui.Surface2, Ui.OkC, 0.22));
-                using (var b = new SolidBrush(Ui.OkC))
-                    g.DrawString("\u2713", Ui.F(13, true), b, iconR.X + 9, iconR.Y + 6);
+                var iconR = new Rectangle(pad, 15, 36, 36);
+                if (fileIcon != null)
+                {
+                    Ui.FillRound(g, iconR, 10, Ui.Surface2);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    using (var bmp = fileIcon.ToBitmap())
+                        g.DrawImage(bmp, new Rectangle(iconR.X + 3, iconR.Y + 3, 30, 30));
+                }
+                else
+                {
+                    Ui.FillRound(g, iconR, 18, Ui.Tint(Ui.Surface2, Ui.OkC, 0.22));
+                    using (var b = new SolidBrush(Ui.OkC))
+                        g.DrawString("\u2713", Ui.F(14, true), b, iconR.X + 9, iconR.Y + 8);
+                }
 
                 string name = Path.GetFileName(gamePath);
-                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Point(pad + 48, 18), Ui.TextC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Point(pad + 50, 20), Ui.TextC, TextFormatFlags.NoPadding);
 
                 var dirF = Ui.F(8.25f, false);
                 string dir = Path.GetDirectoryName(gamePath);
-                int dirMaxW = Width - (pad + 48) - 110;
+                int dirMaxW = Width - (pad + 50) - 110;
                 using (var sfm = CreateGraphicsSafe()) { }
                 string shownDir = TruncateForDraw(dir, dirF, dirMaxW);
-                TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + 48, 40), Ui.MutedC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + 50, 43), Ui.MutedC, TextFormatFlags.NoPadding);
 
                 // CHANGE link top-right
                 var cf = Ui.F(8f, true);
@@ -430,6 +459,7 @@ namespace Gp
         {
             Text = label; @checked = initial;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor = Ui.Surface; // match the card so no black/unpainted area shows behind the pill
             Cursor = Cursors.Hand; Height = 24;
         }
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
@@ -446,6 +476,7 @@ namespace Gp
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(Ui.Surface)) g.FillRectangle(b, ClientRectangle); // no black/unpainted area behind the pill
             int pillH = 18, pillW = 36;
             var pill = new Rectangle(0, Height / 2 - pillH / 2, pillW, pillH);
 
