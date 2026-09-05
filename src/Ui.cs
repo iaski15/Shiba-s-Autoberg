@@ -212,7 +212,7 @@ namespace Gp
             // title
             var tsz = Ui.MeasureSpaced(g, "GOLDBERG PATCHER", Ui.F(9, true), 1.6f);
             Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, new PointF(52, 15), 1.6f);
-            TextRenderer.DrawText(g, "v0.3", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "v0.4", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
 
             // buttons
             if (hoverBtn == 1) { Ui.FillRound(g, minR, 6, Ui.Tint(Ui.Bg, Color.White, 0.07)); }
