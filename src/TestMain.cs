@@ -107,6 +107,25 @@ static class TestMain
             Check(near.IndexOf(near.First(f => Path.GetDirectoryName(f).Equals(gameDir, StringComparison.OrdinalIgnoreCase)))
                   < near.IndexOf(near.First(f => f.StartsWith(deepDir, StringComparison.OrdinalIgnoreCase))),
                   "nearest match ranked first");
+
+            // ---- batch appid detection (offline sources only) ----
+            Console.WriteLine("\n[batch appid detection]");
+            var detCached = AppIdDetector.Detect(dummyExe, "777", false);
+            Check(detCached.AppId == "777" && detCached.Source == "saved",
+                  "cached id takes precedence over files in the tree", detCached.AppId + " / " + detCached.Source);
+
+            var detFile = AppIdDetector.Detect(dummyExe, "", false);
+            Check(detFile.AppId == "1250" && detFile.Source == "steam_appid.txt",
+                  "steam_appid.txt in install tree detected", detFile.AppId + " / " + detFile.Source);
+
+            var emptyDir = Directory.CreateDirectory(Path.Combine(work, "NoApp")).FullName;
+            File.Copy(dummyExe, Path.Combine(emptyDir, "NoApp.exe"));
+            var detNone = AppIdDetector.Detect(Path.Combine(emptyDir, "NoApp.exe"), "", false);
+            Check(!detNone.Found && detNone.AppId == "" && detNone.Source == "",
+                  "no local source -> not found (offline)", detNone.AppId + " / " + detNone.Source);
+
+            var detBad = AppIdDetector.Detect(dummyExe, " 840291 ", false);
+            Check(detBad.AppId == "840291" && detBad.Source == "saved", "cached id trimmed before use", detBad.AppId);
         }
         finally
         {

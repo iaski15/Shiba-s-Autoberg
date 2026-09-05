@@ -837,6 +837,183 @@ namespace Gp
         }
     }
 
+    // --------------------------------------------------------------------- batch patching
+
+    /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
+    public class AppIdDetection
+    {
+        public string AppId = "";   // "" when nothing was found
+        public string Source = "";  // "saved" | "steam_appid.txt" | "Steam Store (<game name>)"
+        public bool Found { get { return !string.IsNullOrEmpty(AppId); } }
+    }
+
+    /// <summary>Resolves a game's Steam AppID the same way the single-game view does:
+    /// previously saved id → steam_appid.txt anywhere in the install tree → Steam Store autocomplete.</summary>
+    public static class AppIdDetector
+    {
+        public static AppIdDetection Detect(string exePath, string cachedId, bool allowOnline)
+        {
+            var d = new AppIdDetection();
+            if (string.IsNullOrEmpty(exePath)) return d;
+
+            if (!string.IsNullOrEmpty(cachedId) && Regex.IsMatch(cachedId.Trim(), @"^\d{1,10}$"))
+            { d.AppId = cachedId.Trim(); d.Source = "saved"; return d; }
+
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+                if (dir != null)
+                {
+                    var dirs = new List<string>();
+                    foreach (var a in PatchRunner.FindSteamApiFiles(dir))
+                    {
+                        var ad = Path.GetDirectoryName(a);
+                        bool seen = false;
+                        foreach (var q in dirs) if (string.Equals(q, ad, StringComparison.OrdinalIgnoreCase)) { seen = true; break; }
+                        if (!seen) dirs.Add(ad);
+                    }
+                    dirs.Add(dir);
+                    var id = new PatchRunner().FindExistingAppId(dirs.ToArray());
+                    if (!string.IsNullOrEmpty(id)) { d.AppId = id; d.Source = "steam_appid.txt"; return d; }
+                }
+            }
+            catch { }
+
+            if (allowOnline)
+            {
+                try
+                {
+                    foreach (var t in SteamLookup.CandidateTitles(exePath))
+                    {
+                        var m = SteamLookup.Search(t);
+                        if (m != null && !string.IsNullOrEmpty(m.AppId))
+                        { d.AppId = m.AppId; d.Source = "Steam Store (" + m.GameName + ")"; return d; }
+                    }
+                }
+                catch { }
+            }
+            return d;
+        }
+    }
+
+    /// <summary>One game queued for a batch run. AppId may be empty (the engine skips it unless online-fix is on).</summary>
+    public class BatchInput
+    {
+        public string Exe = "";
+        public string AppId = "";
+    }
+
+    public class BatchItemOutcome
+    {
+        public string Exe = "";
+        public bool Success;
+        public bool Skipped;      // never patched (no AppID)
+        public bool Cancelled;    // user cancelled before / during this game
+        public string AppIdUsed = "";
+        public string Summary = "";
+    }
+
+    /// <summary>Options shared by every game in a batch – mirrors the single-game option toggles.</summary>
+    public class BatchPrefs
+    {
+        public bool UnpackDrm = true;
+        public bool Backup = true;
+        public bool WriteAppIdTxt = true;
+        public bool CreateSettings = false;
+        public bool OnlineFix = false;   // force Spacewar 480 for every game, AppIDs are ignored
+    }
+
+    /// <summary>Patches several games sequentially. AppIDs must be resolved by the caller (see AppIdDetector).</summary>
+    public class BatchPatcher
+    {
+        public event Action<PatchLogEntry> LogLine;       // all log output, worker thread
+        public event Action<int, int> GameStarted;        // (1-based index, total) before a game starts
+        public event Action<int, int> GamePercent;        // (1-based index, 0-100 sub-progress)
+        public event Action<BatchItemOutcome> ItemCompleted;
+
+        private void Log(LogLevel lvl, string msg)
+        {
+            var h = LogLine; if (h != null) h(new PatchLogEntry { Time = DateTime.Now, Level = lvl, Message = msg });
+        }
+
+        public Task<List<BatchItemOutcome>> RunAsync(List<BatchInput> items, BatchPrefs prefs, CancellationToken ct)
+        {
+            return Task.Run(() =>
+            {
+                var results = new List<BatchItemOutcome>();
+                int n = (items == null ? 0 : items.Count);
+
+                for (int i = 0; i < n; i++)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    string exe = items[i].Exe;
+                    var o = new BatchItemOutcome { Exe = exe };
+                    var started = GameStarted; if (started != null) started(i + 1, n);
+
+                    try
+                    {
+                        bool ofix = prefs.OnlineFix;
+                        string appId = (items[i].AppId ?? "").Trim();
+                        Log(LogLevel.Info, string.Format("── [{0}/{1}] {2}{3}", i + 1, n, Path.GetFileName(exe),
+                            ofix ? "   (online-fix · Spacewar 480)" : "   AppID " + (appId.Length > 0 ? appId : "?")));
+
+                        if (!ofix && appId.Length == 0)
+                        {
+                            o.Skipped = true;
+                            o.Summary = "No AppID available – skipped.";
+                            Log(LogLevel.Warn, Path.GetFileName(exe) + ": no AppID detected or entered – skipping this game.");
+                            var done1 = ItemCompleted; if (done1 != null) done1(o);
+                            results.Add(o);
+                            continue;
+                        }
+
+                        var opts = new PatchOptions
+                        {
+                            GameExe = exe,
+                            AppId = ofix ? "480" : appId,
+                            UnpackDrm = prefs.UnpackDrm,
+                            Backup = prefs.Backup,
+                            WriteAppIdTxt = prefs.WriteAppIdTxt,
+                            CreateSettings = prefs.CreateSettings,
+                            GenerateInterfaces = true,
+                            OnlineFix = ofix,
+                        };
+                        o.AppIdUsed = opts.EffectiveAppId;
+
+                        var runner = new PatchRunner();
+                        runner.LogLine += e => Log(e.Level, "   " + e.Message);
+                        runner.ProgressChanged += p => { var gp = GamePercent; if (gp != null) gp(i + 1, p); };
+
+                        var res = runner.Run(opts, ct);
+                        o.Success = res.Success;
+                        o.Summary = res.Summary;
+                        if (!res.Success && string.Equals(res.Summary, "Cancelled.", StringComparison.Ordinal)) o.Cancelled = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        o.Cancelled = true;
+                        o.Summary = "Cancelled.";
+                        Log(LogLevel.Warn, Path.GetFileName(exe) + ": cancelled.");
+                    }
+                    catch (Exception ex)
+                    {
+                        o.Summary = ex.Message;
+                        Log(LogLevel.Error, Path.GetFileName(exe) + ": " + ex.Message);
+                    }
+
+                    results.Add(o);
+                    var done = ItemCompleted; if (done != null) done(o);
+                    if (o.Cancelled) break;
+                }
+
+                int ok = 0, bad = 0, skip = 0;
+                foreach (var r in results) { if (r.Success) ok++; else if (r.Skipped || r.Cancelled) skip++; else bad++; }
+                Log(LogLevel.Info, "── Batch finished: " + ok + " patched · " + bad + " failed · " + skip + " skipped ──────────────");
+                return results;
+            });
+        }
+    }
+
     // --------------------------------------------------------------------- steam store lookup
 
     public class SteamMatch

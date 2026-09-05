@@ -65,7 +65,7 @@ Write-Host ("payload files: " + $i)
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
 } finally {
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
 }

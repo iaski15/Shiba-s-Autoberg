@@ -19,6 +19,8 @@ namespace Gp
         public string AppId = "";
         public bool Auto;
         public bool ExitWhenDone;
+        // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
+        public string Batch = "";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -31,6 +33,7 @@ namespace Gp
                 {
                     if (s == "--exe" && i + 1 < a.Length) r.Exe = a[++i];
                     else if (s == "--appid" && i + 1 < a.Length) r.AppId = a[++i];
+                    else if (s == "--batch" && i + 1 < a.Length) r.Batch = a[++i];
                     else if (s == "--auto") r.Auto = true;
                     else if (s == "--exit-when-done") r.ExitWhenDone = true;
                 }
@@ -52,6 +55,14 @@ namespace Gp
         {
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
+
+            var sa = StartupArgs.Parse(args);
+            if (sa.Batch.Length > 0)
+            {
+                Environment.Exit(RunBatchCli(sa));
+                return;
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += (s, e) =>
@@ -66,7 +77,62 @@ namespace Gp
                 catch { }
                 MessageBox.Show(e.Exception.Message, "Goldberg Patcher – unexpected error");
             };
-            Application.Run(new MainForm(StartupArgs.Parse(args)));
+            Application.Run(new MainForm(sa));
+        }
+
+        // headless batch mode: same BatchPatcher engine as the GUI "Batch Patch…" dialog
+        static int RunBatchCli(StartupArgs sa)
+        {
+            var items = new List<BatchInput>();
+            foreach (var raw in (sa.Batch ?? "").Split(';'))
+            {
+                string entry = (raw ?? "").Trim();
+                if (entry.Length == 0) continue;
+                int bar = entry.IndexOf('|');
+                string exePart, appId;
+                if (bar < 0) { exePart = entry; appId = ""; }
+                else { exePart = entry.Substring(0, bar).Trim(); appId = entry.Substring(bar + 1).Trim(); }
+
+                string full;
+                try { full = Path.GetFullPath(exePart); }
+                catch { Console.WriteLine("SKIP " + exePart + "   (bad path)"); continue; }
+                if (!File.Exists(full)) { Console.WriteLine("SKIP " + full + "   (file not found)"); continue; }
+                items.Add(new BatchInput { Exe = full, AppId = appId });
+            }
+
+            if (items.Count == 0)
+            {
+                Console.WriteLine("Goldberg Patcher --batch: no usable game entries.");
+                Console.WriteLine("Usage: \"Goldberg Patcher.exe\" --batch \"C:\\game1\\g1.exe|480;C:\\game2\\g2.exe\"");
+                return 2;
+            }
+
+            // resolve missing AppIDs from local sources (saved id / steam_appid.txt in the tree)
+            foreach (var it in items)
+                if (string.IsNullOrEmpty(it.AppId))
+                    try { var d = AppIdDetector.Detect(it.Exe, "", false); if (d.Found) it.AppId = d.AppId; } catch { }
+
+            Console.WriteLine("Goldberg Patcher --batch: " + items.Count + (items.Count == 1 ? " game" : " games"));
+            var prefs = new BatchPrefs { UnpackDrm = true, Backup = true, WriteAppIdTxt = true, CreateSettings = false, OnlineFix = false };
+            var patcher = new BatchPatcher();
+            patcher.LogLine += e => Console.WriteLine("  [" + e.Level.ToString().ToLowerInvariant() + "] " + e.Message);
+
+            List<BatchItemOutcome> results;
+            try { results = patcher.RunAsync(items, prefs, CancellationToken.None).Result; }
+            catch (Exception ex) { Console.WriteLine("Batch error: " + ex.Message); return 1; }
+
+            int ok = 0, bad = 0, skip = 0;
+            foreach (var o in results ?? new List<BatchItemOutcome>())
+            {
+                if (o.Success) { ok++; continue; }
+                if (o.Skipped || o.Cancelled) { skip++; Console.WriteLine("SKIP " + o.Exe + "   (" + o.Summary + ")"); continue; }
+                bad++;
+                Console.WriteLine("FAIL " + o.Exe + "   (" + o.Summary + ")");
+            }
+
+            Console.WriteLine("--batch done: " + ok + " patched, " + skip + " skipped, " + bad + " failed.");
+            if (bad > 0) return 1;
+            return ok > 0 ? 0 : 2;
         }
     }
 
@@ -193,6 +259,7 @@ namespace Gp
         readonly AppCard optionsCard;
         readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup;
         readonly GradientButton patchBtn;
+        readonly GradientButton batchBtn;
         readonly ProgressBarLite progress;
         readonly Banner banner;
         readonly AppCard logCard;
@@ -350,10 +417,18 @@ namespace Gp
             tLookup.Bounds = new Rectangle(408, 120, 340, 24);
             foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup }) optionsCard.Controls.Add(c);
 
+            int rowW = 820 - Pad * 2;
+            int batchW = 210, gap = 14;
             patchBtn = new GradientButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(Pad, 514, 820 - Pad * 2, 52);
+            patchBtn.Bounds = new Rectangle(Pad, 514, rowW - batchW - gap, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
+
+            batchBtn = new GradientButton("Batch Patch…");
+            batchBtn.Kind = GradientButton.BtnKind.Secondary;
+            batchBtn.Bounds = new Rectangle(Pad + rowW - batchW, 514, batchW, 52);
+            batchBtn.Click += delegate { OpenBatch(); };
+            Controls.Add(batchBtn);
 
             progress = new ProgressBarLite();
             progress.Bounds = new Rectangle(Pad, 574, 820 - Pad * 2, 5);
@@ -783,6 +858,50 @@ namespace Gp
                     }
                     catch { }
                     break;
+            }
+        }
+
+        // ---------------------------------------------------------- batch patching
+
+        void OpenBatch()
+        {
+            if (running) return;
+
+            var prefs = new BatchPrefs
+            {
+                UnpackDrm = tUnpack.Checked,
+                Backup = tBackup.Checked,
+                WriteAppIdTxt = tAppid.Checked,
+                CreateSettings = tSettings.Checked,
+                OnlineFix = tOnlineFix.Checked,
+            };
+
+            batchBtn.Enabled = false;
+            var f = new BatchForm(settings, prefs);
+            try { f.ShowDialog(this); } finally { f.Dispose(); batchBtn.Enabled = true; }
+
+            if (!f.HasRun) return;
+            string summary = f.SummaryLine();
+            Log(LogLevel.Info, "Batch: " + summary);
+            tLookup.Checked = settings.LookupAppId; // may have been changed inside the dialog
+
+            if (f.OkCount > 0 && f.FailCount == 0 && f.SkipCount == 0)
+            {
+                banner.Show(Banner.BannerKind.Success, "Batch complete – all " + f.TotalGames + " game(s) patched.", new string[0]);
+                ShowBannerLayout(true);
+                statusBar.Set("Batch done – " + summary, Ui.OkC);
+            }
+            else if (f.OkCount > 0)
+            {
+                banner.Show(Banner.BannerKind.Warn, "Batch complete with problems: " + summary, new string[0]);
+                ShowBannerLayout(true);
+                statusBar.Set("Batch done – " + summary, f.FailCount > 0 ? Ui.ErrC : Ui.WarnC);
+            }
+            else
+            {
+                banner.Show(Banner.BannerKind.Error, "Batch finished without patching anything. " + summary + "\nSee the batch dialog log for details.", new string[0]);
+                ShowBannerLayout(true);
+                statusBar.Set("Batch failed", Ui.ErrC);
             }
         }
 

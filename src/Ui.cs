@@ -506,7 +506,7 @@ namespace Gp
 
     public class GradientButton : Control
     {
-        public enum BtnKind { Primary, Cancel, Success }
+        public enum BtnKind { Primary, Cancel, Success, Secondary }
         public BtnKind Kind = BtnKind.Primary;
         bool hover, press;
         public GradientButton(string text)
@@ -537,14 +537,17 @@ namespace Gp
             if (!Enabled) { fill1 = fill2 = Ui.Surface2; txt = Ui.FromHex("#5A6373"); }
             else if (Kind == BtnKind.Cancel) { fill1 = Ui.FromHex("#B23A47"); fill2 = Ui.FromHex("#8E2F3A"); txt = Color.White; }
             else if (Kind == BtnKind.Success) { fill1 = Ui.FromHex("#1F9D66"); fill2 = Ui.FromHex("#157A4F"); txt = Color.White; }
+            else if (Kind == BtnKind.Secondary) { fill1 = Ui.Surface2; fill2 = Ui.Tint(Ui.Surface2, Color.Black, 0.25); txt = Ui.TextC; }
             else { fill1 = Ui.Accent; fill2 = Ui.Accent2; txt = Color.White; }
 
             using (var lg = new LinearGradientBrush(rect, fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, 12)) g.FillPath(lg, p);
-            if (Enabled && Kind == BtnKind.Primary)
+            if (Enabled && (Kind == BtnKind.Primary || Kind == BtnKind.Secondary))
             {
                 if (press) Ui.FillRound(g, rect, 12, Color.FromArgb(45, 0, 0, 0));
-                else if (hover) Ui.FillRound(g, rect, 12, Color.FromArgb(28, 255, 255, 255));
+                else if (hover) Ui.FillRound(g, rect, 12, Kind == BtnKind.Primary ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(22, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B));
             }
+            if (Enabled && Kind == BtnKind.Secondary)
+                using (var p = new Pen(hover ? Color.FromArgb(160, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B) : Ui.BorderC, 1.2f)) using (var r = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), 11)) g.DrawPath(p, r);
             if (Focused && Enabled) Ui.FillRound(g, rect, 12, Color.FromArgb(34, 255, 255, 255));
             if (Enabled) using (var p = new Pen(Color.FromArgb(52, 255, 255, 255))) g.DrawLine(p, rect.X + 16, rect.Y + 1, rect.Right - 16, rect.Y + 1);
             var tf = Ui.F(11f, true);
@@ -687,6 +690,8 @@ namespace Gp
             Font = new Font("Consolas", 8.75f);
             HideSelection = false;
         }
+        public void AppendLine(string msg) { AppendLine(msg, LogLevel.Info); }
+
         public void AppendLine(string msg, LogLevel level)
         {
             Color c;
