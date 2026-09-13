@@ -321,12 +321,14 @@ namespace Gp
 
                 // ---- backup dir ----------------------------------------------
                 string backupDir = Path.Combine(installDir, "goldberg_backup");
+                bool anyBackup = false;
                 Func<string, string> backup = (src) =>
                 {
                     if (!o.Backup) return null;
                     Directory.CreateDirectory(backupDir);
                     var dst = Path.Combine(backupDir, Path.GetFileName(src));
                     File.Copy(src, dst, true);
+                    anyBackup = true;
                     return dst;
                 };
                 res.BackupDir = o.Backup ? backupDir : "";
@@ -378,9 +380,9 @@ namespace Gp
 
                 // ---- steam_settings ----------------------------------------------
                 Pct(90);
-                if (o.CreateSettings)
+                if (o.CreateSettings || o.OnlineFix)   // online-fix always ships the scaffold
                 {
-                    var settingsDir = CopySettingsExample(installDir);
+                    var settingsDir = CopySettingsExample(installDir, o.OnlineFix && !o.CreateSettings);
                     res.SettingsDir = settingsDir;
                     if (interfacesTxt != null)
                     {
@@ -406,7 +408,7 @@ namespace Gp
                 Log(LogLevel.Ok, res.Summary);
                 if (o.OnlineFix)
                     Log(LogLevel.Dim, "Multiplayer traffic is routed through Steam's own servers under Spacewar's AppID.");
-                if (res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
+                if (anyBackup && res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
                 Log(LogLevel.Ok, "✔ Done! Launch the game to test.");
             }
             catch (OperationCanceledException)
@@ -600,40 +602,42 @@ namespace Gp
 
         /// <summary>Generic online-fix mode: the game's ORIGINAL steam_api dll must stay in place so that,
         /// with steam_appid.txt = 480, the process attaches to the running Steam client as Spacewar and
-        /// matchmaking/networking is routed through Valve's servers. If this game was Goldberg-patched
-        /// before, the originals are restored from goldberg_backup.</summary>
+        /// matchmaking/networking is routed through Valve's servers.
+        /// The live dll is NEVER modified unless it is provably one of our bundled Goldberg emulator
+        /// builds (byte-identical) – in that case the original from goldberg_backup must be restored,
+        /// because the emulator cannot attach to a real Steam client. Any other dll (original or an
+        /// updated Steamworks version) is left exactly as-is; only steam_appid.txt is written.</summary>
         private void PrepareOnlineFixMode(string installDir, PatchResult res)
         {
             string backupDir = Path.Combine(installDir, "goldberg_backup");
 
-            // undo a previous Goldberg install if the originals were backed up
-            bool restored = false;
-            foreach (var n in new[] { "steam_api.dll", "steam_api64.dll" })
-            {
-                string bak = Path.Combine(backupDir, n);
-                if (!File.Exists(bak)) continue;
-                string cur = Path.Combine(installDir, n);
-                if (!File.Exists(cur) || !FilesEqual(bak, cur))
-                {
-                    File.Copy(bak, cur, true);
-                    Log(LogLevel.Ok, "Restored original " + n + " from goldberg_backup\\");
-                    restored = true;
-                    res.ReplacedFiles.Add(n);
-                }
-            }
-
-            // sanity-check the active dll(s): they must not be a bundled Goldberg dll
             bool anyApi = false;
             foreach (var n in new[] { "steam_api.dll", "steam_api64.dll" })
             {
                 string cur = Path.Combine(installDir, n);
                 if (!File.Exists(cur)) continue;
                 anyApi = true;
-                if (!restored && LooksLikeBundledGoldberg(cur))
-                    throw new Exception("steam_api dll in this game folder is a Goldberg emulator dll and no original backup exists.\n" +
-                        "Online-fix mode needs the game's ORIGINAL Steamworks dll so Steam can see the game.\n" +
-                        "Restore/reinstall the original steam_api dll first, then run online-fix again.");
-                Log(LogLevel.Dim, "Original " + n + " kept in place – required for Steam detection & server routing.");
+
+                if (LooksLikeBundledGoldberg(cur))
+                {
+                    // live dll is a Goldberg emulator build – online-fix cannot work with it in place
+                    string bak = Path.Combine(backupDir, n);
+                    if (!File.Exists(bak) || FilesEqual(bak, cur))
+                        throw new Exception("steam_api dll in this game folder is a Goldberg emulator dll and no original backup exists.\n" +
+                            "Online-fix mode needs the game's ORIGINAL Steamworks dll so Steam can see the game.\n" +
+                            "Restore/reinstall the original steam_api dll first, then run online-fix again.");
+                    File.Copy(bak, cur, true);
+                    Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from goldberg_backup\\ (required for online-fix).");
+                    res.ReplacedFiles.Add(n);
+                }
+                else
+                {
+                    // not one of our builds: leave it alone, whatever it is
+                    string bak = Path.Combine(backupDir, n);
+                    if (File.Exists(bak) && !FilesEqual(bak, cur))
+                        Log(LogLevel.Warn, "goldberg_backup\\" + n + " differs from the live dll and the live dll is not a known Goldberg build – leaving it in place.");
+                    Log(LogLevel.Dim, "Original " + n + " kept in place – required for Steam detection & server routing.");
+                }
             }
             if (!anyApi)
                 Log(LogLevel.Warn, "No steam_api dll found in the install folder – if this game uses Steamworks, double-check the chosen exe.");
@@ -703,13 +707,14 @@ namespace Gp
             }
         }
 
-        private string CopySettingsExample(string installDir)
+        private string CopySettingsExample(string installDir, bool forOnlineFix)
         {
             string srcRoot = Tools.SettingsExampleDir;
             if (!Directory.Exists(srcRoot)) { Log(LogLevel.Warn, "steam_settings.EXAMPLE folder not found – skipping."); return null; }
             string dstRoot = Path.Combine(installDir, "steam_settings");
             int files = CopyTreeRename(srcRoot, dstRoot);
-            Log(LogLevel.Ok, string.Format("steam_settings folder created ({0} files) at: {1}", files, ShortRel(installDir, dstRoot)));
+            Log(LogLevel.Ok, string.Format("steam_settings folder created ({0} files) at: {1}{2}", files,
+                ShortRel(installDir, dstRoot), forOnlineFix ? "  (online-fix mode)" : ""));
             return dstRoot;
         }
 

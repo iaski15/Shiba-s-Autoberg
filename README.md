@@ -8,7 +8,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 - **Automatic game analysis** — detects x86/x64 (including .NET AnyCPU executables) from PE headers and picks the matching `steam_api.dll` / `steam_api64.dll`
 - **DRM unpacking** — uses [Steamless](https://gitlab.com/Mr_Goldberg/steamless) to automatically unpack common Steam DRM variants so the game runs without Steam
-- **Backup & restore** — originals are saved to `<game>\goldberg_backup\`; online-fix mode restores them before applying its own setup
+- **Backup & restore** — originals are saved to `<game>\goldberg_backup\`; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from `goldberg_backup\`
 - **Interface generation** — runs GSE's `generate_interfaces` tool against the *original* dll so the emulator responds to exactly the interfaces the game requests
 - **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
@@ -35,9 +35,9 @@ After patching, launch the game normally. If it does not work out of the box, re
 
 For games that need to talk to a real Steam backend (some multiplayer titles), enable **Online fix**. The patcher:
 
-1. Restores the original dlls from `goldberg_backup\` if this game was previously patched
-2. Keeps your genuine `steam_api(64).dll` in place
-3. Writes `steam_appid.txt` with AppID `480` (Spacewar)
+1. Writes `steam_appid.txt` with AppID `480` (Spacewar) — the only file it changes by default
+2. Keeps your genuine `steam_api(64).dll` in place; a live dll is never replaced or downgraded unless it is byte-identical to one of the bundled Goldberg emulator builds, in which case the original from `goldberg_backup\` is restored (the emulator cannot attach to a real Steam client)
+3. Creates the `steam_settings` scaffold folder
 
 The game then attaches to your real Steam account as Spacewar and all traffic is routed through Valve's servers. You must be online with Steam running.
 
@@ -88,7 +88,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 - **Automatic game analysis** — detects x86/x64 (including .NET AnyCPU executables) from PE headers and picks the matching `steam_api.dll` / `steam_api64.dll`
 - **DRM unpacking** — uses [Steamless](https://gitlab.com/Mr_Goldberg/steamless) to automatically unpack common Steam DRM variants so the game runs without Steam
-- **Backup & restore** — originals are saved to `<game>\goldberg_backup\`; online-fix mode restores them before applying its own setup
+- **Backup & restore** — originals are saved to `<game>\goldberg_backup\`; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from `goldberg_backup\`
 - **Interface generation** — runs GSE's `generate_interfaces` tool against the *original* dll so the emulator responds to exactly the interfaces the game requests
 - **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
@@ -115,9 +115,9 @@ After patching, launch the game normally. If it does not work out of the box, re
 
 For games that need to talk to a real Steam backend (some multiplayer titles), enable **Online fix**. The patcher:
 
-1. Restores the original dlls from `goldberg_backup\` if this game was previously patched
-2. Keeps your genuine `steam_api(64).dll` in place
-3. Writes `steam_appid.txt` with AppID `480` (Spacewar)
+1. Writes `steam_appid.txt` with AppID `480` (Spacewar) — the only file it changes by default
+2. Keeps your genuine `steam_api(64).dll` in place; a live dll is never replaced or downgraded unless it is byte-identical to one of the bundled Goldberg emulator builds, in which case the original from `goldberg_backup\` is restored (the emulator cannot attach to a real Steam client)
+3. Creates the `steam_settings` scaffold folder
 
 The game then attaches to your real Steam account as Spacewar and all traffic is routed through Valve's servers. You must be online with Steam running.
 

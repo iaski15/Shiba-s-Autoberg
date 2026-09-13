@@ -161,15 +161,20 @@ static class TestMain
                   "online-fix forces steam_appid.txt to 480",
                   File.Exists(Path.Combine(gameDir2, "steam_appid.txt"))
                       ? File.ReadAllText(Path.Combine(gameDir2, "steam_appid.txt")).Trim() : "(missing)");
+            Check(Directory.Exists(Path.Combine(gameDir2, "steam_settings")) &&
+                  Directory.GetFiles(Path.Combine(gameDir2, "steam_settings")).Length > 0,
+                  "online-fix creates the steam_settings scaffold even with CreateSettings off");
 
-            // previously Goldberg-patched game: original dll must be restored from goldberg_backup
+
+            // previously Goldberg-patched game (live dll IS a bundled Goldberg build):
+            // original must be restored from goldberg_backup – required for online-fix to work
             var gameDir3 = Directory.CreateDirectory(Path.Combine(work2, "OFGame2")).FullName;
             var exe3 = Path.Combine(gameDir3, "OFGame2.exe");
             File.Copy(exe2, exe3);
             var origBytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42 };
             Directory.CreateDirectory(Path.Combine(gameDir3, "goldberg_backup"));
             File.WriteAllBytes(Path.Combine(gameDir3, "goldberg_backup", "steam_api64.dll"), origBytes);
-            File.WriteAllBytes(Path.Combine(gameDir3, "steam_api64.dll"), new byte[] { 1, 2, 3 });
+            File.Copy(Path.Combine(root, @"release\regular\x64\steam_api64.dll"), Path.Combine(gameDir3, "steam_api64.dll"));
 
             var opts3 = new PatchOptions
             {
@@ -187,10 +192,38 @@ static class TestMain
 
             Check(res3.Success, "online-fix re-patch succeeded", res3.Summary);
             Check(File.ReadAllBytes(Path.Combine(gameDir3, "steam_api64.dll")).SequenceEqual(origBytes),
-                  "online-fix restored the original steam_api64.dll from backup");
+                  "Goldberg emulator dll replaced by original from goldberg_backup");
             Check(File.Exists(Path.Combine(gameDir3, "steam_appid.txt")) &&
                   File.ReadAllText(Path.Combine(gameDir3, "steam_appid.txt")).Trim() == "480",
                   "online-fix writes steam_appid.txt=480 even with appid writing toggled off");
+
+            // live dll that is NOT a known Goldberg build must never be touched,
+            // even when goldberg_backup holds something different (e.g. after a game update)
+            var gameDir4 = Directory.CreateDirectory(Path.Combine(work2, "OFGame3")).FullName;
+            var exe4 = Path.Combine(gameDir4, "OFGame3.exe");
+            File.Copy(exe2, exe4);
+            var foreignBytes = new byte[] { 1, 2, 3 };
+            Directory.CreateDirectory(Path.Combine(gameDir4, "goldberg_backup"));
+            File.WriteAllBytes(Path.Combine(gameDir4, "goldberg_backup", "steam_api64.dll"), origBytes);
+            File.WriteAllBytes(Path.Combine(gameDir4, "steam_api64.dll"), foreignBytes);
+
+            var opts4 = new PatchOptions
+            {
+                GameExe = exe4,
+                AppId = "",
+                UnpackDrm = false,
+                Backup = false,
+                WriteAppIdTxt = true,
+                CreateSettings = false,
+                GenerateInterfaces = false,
+                OnlineFix = true,
+            };
+            var runner4 = new PatchRunner();
+            var res4 = runner4.Run(opts4, CancellationToken.None);
+
+            Check(res4.Success, "online-fix on untouched original dll succeeded", res4.Summary);
+            Check(File.ReadAllBytes(Path.Combine(gameDir4, "steam_api64.dll")).SequenceEqual(foreignBytes),
+                  "non-Goldberg live dll left completely alone (only steam_appid.txt written)");
         }
         finally
         {
