@@ -289,6 +289,9 @@ namespace Gp
 
         static Icon LoadFileIcon(string path)
         {
+            // Only ask shell32 for icons of files that actually exist – ExtractAssociatedIcon on a
+            // missing/garbage path has been observed to crash non-deterministically (AccessViolation).
+            if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return null;
             try
             {
                 var h = NativeMethods.ExtractAssociatedIcon(IntPtr.Zero, path);
