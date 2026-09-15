@@ -482,11 +482,21 @@ namespace Gp
 
             Task.Run(job).ContinueWith(delegate(Task<AppIdDetection> t)
             {
-                BeginInvoke((MethodInvoker)delegate
+                // Capture the result/exception on the pool thread: reading t.Result inside the UI
+                // delegate would rethrow a faulted task there and land in the global ThreadException
+                // MessageBox instead of a clean log line.
+                AppIdDetection d = null; Exception ex = null;
+                try { if (t.IsCompleted) d = t.Result; } catch (Exception e) { ex = e; }
+
+                UiInvoke(delegate
                 {
                     if (IsDisposed || rows.IndexOf(r) < 0) return;
-                    var d = t.IsCompleted ? t.Result : new AppIdDetection();
-                    if (d.Found)
+                    if (ex != null)
+                    {
+                        r.ApplyDetection("", "");
+                        log.AppendLine(Path.GetFileName(exe) + ": AppID detection failed – " + ex.Message, LogLevel.Warn);
+                    }
+                    else if (d != null && d.Found)
                     {
                         r.ApplyDetection(d.AppId, d.Source);
                         log.AppendLine(Path.GetFileName(exe) + " → AppID " + d.AppId + " (" + d.Source + ")");
@@ -548,25 +558,25 @@ namespace Gp
                 items.Add(new BatchInput { Exe = r.ExePath, AppId = prefs.OnlineFix ? "" : r.AppId });
 
             var patcher = new BatchPatcher();
-            patcher.LogLine += e => BeginInvoke((MethodInvoker)delegate
+            patcher.LogLine += e => UiInvoke(delegate
             {
                 log.AppendLine(e.Message, e.Level);
                 AppendRunLog(e.Message);
             });
-            patcher.GameStarted += (i, n) => BeginInvoke((MethodInvoker)delegate
+            patcher.GameStarted += (i, n) => UiInvoke(delegate
             {
                 if (IsDisposed) return;
                 progress.SetValue(n > 0 ? (int)((i - 1) * 100.0 / n) : 0);
                 if (i >= 1 && i <= rows.Count) rows[i - 1].SetState(BatchRow.RowState.Patching);
             });
-            patcher.GamePercent += (i, pct) => BeginInvoke((MethodInvoker)delegate
+            patcher.GamePercent += (i, pct) => UiInvoke(delegate
             {
                 if (!running || total == 0) return;
                 progress.SetValue((int)Math.Min(99, ((i - 1 + pct / 100.0) / total * 100.0)));
             });
-            patcher.ItemCompleted += o => BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) ApplyOutcome(o); });
+            patcher.ItemCompleted += o => UiInvoke(delegate { if (!IsDisposed) ApplyOutcome(o); });
 
-            patcher.RunAsync(items, prefs, cts.Token).ContinueWith(t => BeginInvoke((MethodInvoker)delegate
+            patcher.RunAsync(items, prefs, cts.Token).ContinueWith(t => UiInvoke(delegate
             {
                 List<BatchItemOutcome> res = null; Exception ex = null;
                 try { if (t.IsCompleted) { res = t.Result; ex = t.Exception; } } catch { }
@@ -579,6 +589,17 @@ namespace Gp
             if (!running || cts == null) return;
             try { cts.Cancel(); } catch { }
             runBtn.Text = "Cancelling…";
+        }
+
+        // Marshals an action to the UI thread from a worker thread. Swallows ObjectDisposedException when a
+        // callback arrives after the form has closed – BeginInvoke itself would otherwise throw on the pool
+        // thread (unobserved) because IsDisposed can only be checked inside the delegate.
+        void UiInvoke(Action a)
+        {
+            // Wrap in an anonymous method – Action and MethodInvoker are unrelated delegate types, so a
+            // direct cast is not allowed.
+            try { BeginInvoke((MethodInvoker)delegate { a(); }); }
+            catch (ObjectDisposedException) { }
         }
 
         readonly HashSet<string> appliedExes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -7,6 +7,7 @@ using System.Drawing.Text;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -510,6 +511,9 @@ namespace Gp
                 Log(LogLevel.Dim, restored > 0
                     ? "Self-contained payload: restored " + restored + "/" + Payload.Count + " bundled file(s)."
                     : "Self-contained payload: all " + Payload.Count + " bundled file(s) verified.");
+                if (Payload.LastErrors != null)
+                    foreach (var err in Payload.LastErrors)
+                        Log(LogLevel.Error, "Payload restore failed for " + err);
             }
 
             var missing = Tools.Missing();
@@ -534,7 +538,16 @@ namespace Gp
                         waitedMs += 300;
                         bool boxHasId = appIdBox.Text.Trim().Length > 0;
                         bool go = boxHasId || (selectionResolved && !lookupPending) || waitedMs >= 30000;
-                        if (go && waitedMs >= 600) { autoTimer.Stop(); StartPatch(); }
+                        if (!go || waitedMs < 600) return;
+                        autoTimer.Stop();
+                        if (!StartPatch())
+                        {
+                            // Validation bailed (e.g. the AppID never resolved). With --exit-when-done the
+                            // documented contract is exit code 3 – don't hang forever; without it, keep the
+                            // window open so the user can type an AppID and retry.
+                            Log(LogLevel.Error, "Auto-patch aborted – no valid Steam AppID could be resolved.");
+                            if (startup.ExitWhenDone) { Environment.ExitCode = 3; Close(); }
+                        }
                     };
                     autoTimer.Start();
                 }
@@ -577,7 +590,7 @@ namespace Gp
             System.Threading.Tasks.Task.Run(() => PatchRunner.FindSteamApiFiles(dir)).ContinueWith(t =>
             {
                 if (gen != selectGeneration || IsDisposed) return;
-                BeginInvoke((MethodInvoker)delegate
+                UiInvoke(delegate
                 {
                     if (gen != selectGeneration) return;
                     var apis = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
@@ -622,7 +635,7 @@ namespace Gp
                     match = SteamLookup.Search(t);
                     if (match != null) break;
                 }
-                BeginInvoke((MethodInvoker)delegate
+                UiInvoke(delegate
                 {
                     if (gen != selectGeneration || IsDisposed) return;
                     lookupPending = false;
@@ -669,8 +682,10 @@ namespace Gp
                     appIdBox.Text = cached;
                 else
                 {
-                    var dirs = apis.Select(Path.GetDirectoryName).ToList();
-                    dirs.Add(dir);
+                    // The exe's own folder first – that's the steam_appid.txt Steam actually reads;
+                    // a stale copy in some deep subfolder must not beat it.
+                    var dirs = new List<string> { dir };
+                    foreach (var a in apis) dirs.Add(Path.GetDirectoryName(a));
                     appIdBox.Text = runner_FillAppId(dirs);
                 }
             }
@@ -688,16 +703,16 @@ namespace Gp
 
         // ---------------------------------------------------------- patching
 
-        void StartPatch()
+        bool StartPatch()
         {
-            if (running) return;
+            if (running) return false;
 
             if (string.IsNullOrEmpty(zone.GamePath))
             {
                 banner.Show(Banner.BannerKind.Warn, "Pick a game executable first.\nDrag & drop the game's .exe into the box above.");
                 ShowBannerLayout(true);
                 statusBar.Set("Waiting for input", Ui.WarnC);
-                return;
+                return false;
             }
             var ofix = tOnlineFix.Checked;
             var id = appIdBox.Text.Trim();
@@ -706,7 +721,7 @@ namespace Gp
                 banner.Show(Banner.BannerKind.Warn, "Enter a valid numeric Steam AppID.\nYou can find it on steamdb.info by searching your game's name.");
                 ShowBannerLayout(true);
                 statusBar.Set("Waiting for input", Ui.WarnC);
-                return;
+                return false;
             }
 
             var opts = new PatchOptions
@@ -744,7 +759,7 @@ namespace Gp
             statusBar.Set("Patching… (Esc to cancel)", Ui.Accent);
 
             runner = new PatchRunner();
-            runner.LogLine += e => BeginInvoke((MethodInvoker)delegate
+            runner.LogLine += e => UiInvoke(delegate
             {
                 log.AppendLine(e.Message, e.Level);
                 try
@@ -755,14 +770,26 @@ namespace Gp
                 }
                 catch { }
             });
-            runner.ProgressChanged += p => BeginInvoke((MethodInvoker)delegate { progress.SetValue(p); });
+            runner.ProgressChanged += p => UiInvoke(delegate { progress.SetValue(p); });
 
             var token = cts.Token;
             runner.RunAsync(opts, token).ContinueWith(t =>
             {
                 var res = t.Status == TaskStatus.RanToCompletion ? t.Result : new PatchResult { Success = false, Summary = "Internal error." };
-                BeginInvoke((MethodInvoker)delegate { OnPatchDone(res); });
+                UiInvoke(delegate { OnPatchDone(res); });
             });
+            return true;
+        }
+
+        // Marshals an action to the UI thread. Swallows ObjectDisposedException when a callback from a
+        // worker thread arrives after the form has already closed – BeginInvoke itself would throw on the
+        // pool thread (unobserved) because IsDisposed can only be checked inside the delegate.
+        void UiInvoke(Action a)
+        {
+            // Wrap in an anonymous method – Action and MethodInvoker are unrelated delegate types, so a
+            // direct cast is not allowed.
+            try { BeginInvoke((MethodInvoker)delegate { a(); }); }
+            catch (ObjectDisposedException) { }
         }
 
         void CancelPatch()
@@ -846,10 +873,17 @@ namespace Gp
                 case "Retry as admin":
                     try
                     {
+                        // Omit --appid entirely when the box is empty (online-fix mode): otherwise the flag
+                        // would swallow "--auto" as its value and the relaunched process would fail validation.
+                        var retryArgs = new StringBuilder();
+                        retryArgs.Append("--exe \"").Append(zone.GamePath).Append("\"");
+                        string retryId = appIdBox.Text.Trim();
+                        if (retryId.Length > 0) retryArgs.Append(" --appid ").Append(retryId);
+                        retryArgs.Append(" --auto --exit-when-done");
                         var psi = new ProcessStartInfo
                         {
                             FileName = Application.ExecutablePath,
-                            Arguments = "--exe \"" + zone.GamePath + "\" --appid " + appIdBox.Text + " --auto --exit-when-done",
+                            Arguments = retryArgs.ToString(),
                             UseShellExecute = true,
                             Verb = "runas",
                         };

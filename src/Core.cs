@@ -49,50 +49,57 @@ namespace Gp
                 uint sig = br.ReadUInt32();
                 if (sig != 0x00004550) throw new InvalidDataException("Not a valid PE file.");
 
-                ushort machine = br.ReadUInt16();          // peOff+4
-                ushort numSections = br.ReadUInt16();      // peOff+6
-                int optSize = br.ReadUInt16();             // peOff+16 (skip to it)
-                fs.Position = peOff + 18;                  // skip past characteristics
-                br.ReadUInt16();
+                ushort machine = br.ReadUInt16();          // peOff+4   Machine
+                ushort numSections = br.ReadUInt16();      // peOff+6   NumberOfSections
+                fs.Position = peOff + 16;                  // SizeOfOptionalHeader (after TimeDateStamp + PointerToSymbolTable)
+                int optSize = br.ReadUInt16();
+
                 int optOff = peOff + 24;
+                if (optOff >= fs.Length) throw new InvalidDataException("Not a valid PE file.");
                 fs.Position = optOff;
                 ushort magic = br.ReadUInt16();
 
-                // Data directories start offset within optional header
-                int ddOff = optOff + (magic == 0x20B ? 112 : 96);
                 bool managed = false;
-                Dictionary<int, long[]> sections = new Dictionary<int, long[]>();
+                Dictionary<long, long[]> sections = null;
                 if (magic == 0x10B || magic == 0x20B)
                 {
-                    // read section table for rva mapping
-                    int secOff = optOff + optSize;
-                    for (int i = 0; i < numSections; i++)
-                    {
-                        fs.Position = secOff + i * 40 + 8;
-                        uint vsize = br.ReadUInt32();
-                        uint vaddr = br.ReadUInt32();
-                        uint rsize = br.ReadUInt32();
-                        uint raddr = br.ReadUInt32();
-                        sections[(int)vaddr] = new long[] { vsize, rsize, raddr };
-                    }
+                    // Data directories live at a fixed offset inside the optional header.
+                    int ddOff = optOff + (magic == 0x20B ? 112 : 96);
+
+                    // The section table normally follows the optional header, but some builds ship
+                    // with SizeOfOptionalHeader zeroed (Steamless.CLI.exe does) – in that case fall
+                    // back to the standard size for this magic and validate before trusting it.
+                    int stdSize = magic == 0x20B ? 0xF0 : 0xE0;
+                    sections = TryReadSections(optOff + optSize, numSections, fs, br)
+                             ?? TryReadSections(optOff + stdSize, numSections, fs, br);
+
                     // CLR directory = DD[14]
-                    fs.Position = ddOff + 14 * 8;
-                    uint clrRva = br.ReadUInt32();
-                    uint clrSize = br.ReadUInt32();
-                    if (clrRva != 0 && clrSize != 0)
+                    if (ddOff + 14 * 8 + 8 <= fs.Length)
                     {
-                        managed = true;
-                        int corFile = RvaToFile(clrRva, sections);
-                        if (corFile >= 0)
+                        fs.Position = ddOff + 14 * 8;
+                        uint clrRva = br.ReadUInt32();
+                        uint clrSize = br.ReadUInt32();
+                        if (clrRva != 0 && clrSize != 0)
                         {
-                            fs.Position = corFile + 16; // Flags
-                            uint flags = br.ReadUInt32();
-                            const uint FLAG_32BITREQUIRED = 0x2;
-                            const uint FLAG_32BITPREFERRED = 0x20000;
-                            if ((flags & FLAG_32BITPREFERRED) != 0 || (flags & FLAG_32BITREQUIRED) != 0)
-                            { info.AnyCpu = false; info.Arch = ExeArch.X86; }
-                            else
-                            { info.AnyCpu = true; } // resolved below by OS bitness
+                            managed = true;
+                            int corFile = RvaToFile(clrRva, sections);
+                            // COR20 header: cb @+0 must be sane; the COM Flags live at +8.
+                            if (corFile >= 0 && corFile + 12 <= fs.Length)
+                            {
+                                fs.Position = corFile;
+                                uint cb = br.ReadUInt32();
+                                if (cb >= 64 && cb <= 108)
+                                {
+                                    fs.Position = corFile + 8; // Flags
+                                    uint flags = br.ReadUInt32();
+                                    const uint FLAG_32BITREQUIRED = 0x2;
+                                    const uint FLAG_32BITPREFERRED = 0x20000;
+                                    if ((flags & (FLAG_32BITREQUIRED | FLAG_32BITPREFERRED)) != 0)
+                                    { info.AnyCpu = false; info.Arch = ExeArch.X86; }
+                                    else
+                                    { info.AnyCpu = true; } // resolved below by OS bitness
+                                }
+                            }
                         }
                     }
                 }
@@ -117,13 +124,34 @@ namespace Gp
             return info;
         }
 
-        static int RvaToFile(uint rva, Dictionary<int, long[]> sections)
+        /// <summary>Reads the section table at secOff, or returns null when it doesn't look like a
+        /// real section table (out of bounds, or first section's RVA implausible). Never throws.</summary>
+        static Dictionary<long, long[]> TryReadSections(int secOff, int numSections, FileStream fs, BinaryReader br)
         {
+            if (secOff <= 0 || numSections <= 0) return null;
+            if ((long)secOff + (long)numSections * 40 > fs.Length) return null; // table must fit in the file
+            var map = new Dictionary<long, long[]>();
+            for (int i = 0; i < numSections; i++)
+            {
+                fs.Position = secOff + i * 40 + 8;
+                uint vsize = br.ReadUInt32();
+                uint vaddr = br.ReadUInt32();
+                uint rsize = br.ReadUInt32();
+                uint raddr = br.ReadUInt32();
+                if (i == 0 && (vaddr < 0x1000 || vaddr >= 0x80000000)) return null; // not a real section table
+                map[(long)vaddr] = new long[] { vsize, rsize, (long)raddr };
+            }
+            return map;
+        }
+
+        static int RvaToFile(uint rva, Dictionary<long, long[]> sections)
+        {
+            if (sections == null) return -1;
             foreach (var kv in sections)
             {
                 long va = kv.Key, vsize = kv.Value[0], rsize = kv.Value[1], raddr = kv.Value[2];
                 long sz = Math.Max(vsize, rsize);
-                if (rva >= va && rva < va + sz) return (int)(raddr + (rva - va));
+                if ((long)rva >= va && (long)rva < va + sz) return (int)(raddr + (rva - va));
             }
             return -1;
         }
@@ -171,7 +199,7 @@ namespace Gp
         public static string SteamlessCli { get { return Path.Combine(BaseDir, @"steamless\Steamless.CLI.exe"); } }
         public static string SteamlessDir { get { return Path.Combine(BaseDir, "steamless"); } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
-        public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api.dll".Replace("steam_api.dll", "steam_api64.dll")); } }
+        public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api64.dll"); } }
         public static string GenInterfaces86 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x86.exe"); } }
         public static string GenInterfaces64 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x64.exe"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"release\steam_settings.EXAMPLE"); } }
@@ -187,11 +215,16 @@ namespace Gp
     }
 
     /// <summary>Embedded payload: files baked into the exe at build time (gppay.* resources + gppay.manifest)
-    /// are written back beside the exe when missing, making the binary fully self-contained.</summary>
+    /// are written back beside the exe when missing or corrupt, making the binary fully self-contained.
+    /// Manifest lines are `resource|relativePath|sha256`; existing files whose size matches are
+    /// hash-verified so a same-size corrupted file is repaired instead of kept.</summary>
     public static class Payload
     {
-        class Entry { public string Res; public string Rel; }
+        class Entry { public string Res; public string Rel; public string Hash; }
         static List<Entry> entries;
+
+        /// <summary>Per-file failures from the last ExtractMissing() call (empty when everything worked).</summary>
+        public static List<string> LastErrors { get; private set; }
 
         static void Load()
         {
@@ -208,9 +241,14 @@ namespace Gp
                         while ((line = r.ReadLine()) != null)
                         {
                             line = line.TrimStart('\uFEFF');
-                            int bar = line.IndexOf('|');
-                            if (bar <= 0) continue;
-                            entries.Add(new Entry { Res = line.Substring(0, bar), Rel = line.Substring(bar + 1) });
+                            var parts = line.Split('|');
+                            if (parts.Length < 2 || parts[0].Length == 0) continue;
+                            entries.Add(new Entry
+                            {
+                                Res = parts[0],
+                                Rel = parts[1],
+                                Hash = parts.Length >= 3 ? parts[2] : null, // tolerate legacy hash-less manifests
+                            });
                         }
                     }
                 }
@@ -221,12 +259,13 @@ namespace Gp
         /// <summary>Number of files embedded at build time (0 when built without payload).</summary>
         public static int Count { get { if (entries == null) Load(); return entries.Count; } }
 
-        /// <summary>Writes every missing or size-mismatched payload file beside the exe.
-        /// Returns the relative paths that were restored.</summary>
+        /// <summary>Writes every missing, size-mismatched or hash-corrupt payload file beside the exe.
+        /// Returns the relative paths that were restored; failures land in LastErrors.</summary>
         public static List<string> ExtractMissing()
         {
             if (entries == null) Load();
             var written = new List<string>();
+            LastErrors = new List<string>();
             var asm = typeof(Payload).Assembly;
             foreach (var e in entries)
             {
@@ -235,16 +274,38 @@ namespace Gp
                     string dst = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, e.Rel);
                     using (var src = asm.GetManifestResourceStream(e.Res))
                     {
-                        if (src == null) continue;
-                        if (File.Exists(dst) && new FileInfo(dst).Length == src.Length) continue;
+                        if (src == null) { LastErrors.Add(e.Rel + ": embedded resource missing"); continue; }
+                        bool intact = File.Exists(dst)
+                            && new FileInfo(dst).Length == src.Length
+                            && (e.Hash == null || Sha256Matches(dst, e.Hash));
+                        if (intact) continue;
                         Directory.CreateDirectory(Path.GetDirectoryName(dst));
                         using (var f = File.Create(dst)) src.CopyTo(f);
                     }
                     written.Add(e.Rel);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    LastErrors.Add(e.Rel + ": " + ex.Message);
+                }
             }
             return written;
+        }
+
+        static bool Sha256Matches(string path, string expectedHex)
+        {
+            try
+            {
+                using (var s = File.OpenRead(path))
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    var hash = sha.ComputeHash(s);
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (var b in hash) sb.Append(b.ToString("x2"));
+                    return string.Equals(sb.ToString(), expectedHex, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch { return false; } // unreadable → treat as corrupt so the caller rewrites it
         }
     }
 
@@ -344,6 +405,28 @@ namespace Gp
                 else Log(LogLevel.Dim, "Steamless auto-unpack disabled – skipping.");
                 res.FinalExe = finalExe;
                 ct.ThrowIfCancellationRequested();
+
+                // ---- re-analyze after unpack ------------------------------------
+                // Steamless rewrote the exe in place. The packed file's machine type was used above to pick the
+                // install target, but the dll that actually gets loaded must match what will run. Unpackers preserve
+                // architecture in practice; if the new file disagrees we trust it and warn.
+                if (res.Unpacked)
+                {
+                    try
+                    {
+                        var pe2 = PeReader.Analyze(finalExe);
+                        if (pe2.Arch != ExeArch.Unknown && pe2.Arch != pe.Arch)
+                            Log(LogLevel.Warn, "Unpacked exe reports a different architecture (" + pe2.MachineText
+                                + ") than the packed one – using it for dll selection.");
+                        if (pe2.Arch != ExeArch.Unknown)
+                        {
+                            pe = pe2;
+                            preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
+                            otherName = pe.Arch == ExeArch.X64 ? "steam_api.dll" : "steam_api64.dll";
+                        }
+                    }
+                    catch { /* keep the pre-unpack analysis */ }
+                }
 
                 // ---- interfaces from ORIGINAL dll -------------------------------
                 string interfacesTxt = null;
@@ -447,6 +530,7 @@ namespace Gp
             Log(LogLevel.Info, "Running Steamless to check/remove SteamStub DRM…");
             var before = DateTime.UtcNow;
             var outputLines = new List<string>();
+            bool timedOut = false;
 
             var psi = new ProcessStartInfo
             {
@@ -473,7 +557,7 @@ namespace Gp
                     while (!p.HasExited)
                     {
                         if (ct.IsCancellationRequested) { try { p.Kill(); } catch { } throw new OperationCanceledException(ct); }
-                        if (sw.Elapsed.TotalMinutes > 10) { try { p.Kill(); } catch { } break; }
+                        if (sw.Elapsed.TotalMinutes > 10) { timedOut = true; Log(LogLevel.Warn, "Steamless took over 10 minutes – killing it."); try { p.Kill(); } catch { } break; }
                         Thread.Sleep(120);
                     }
                     p.WaitForExit(2000);
@@ -513,7 +597,7 @@ namespace Gp
             lock (outputLines)
             {
                 successMsg = outputLines.Any(l => l.IndexOf("Successfully unpacked", StringComparison.OrdinalIgnoreCase) >= 0);
-                foreach (var l in outputLines.TakeLastVisible(outputLines.Count))
+                foreach (var l in outputLines.TakeLastVisible(50)) // echo only the tail – Steamless can be verbose
                 {
                     var t = l.TrimEnd();
                     if (t.Length == 0) continue;
@@ -524,6 +608,19 @@ namespace Gp
 
             if (outPath != null && File.Exists(outPath))
             {
+                // Never replace the original with a file we can't verify as a real PE. On timeout in
+                // particular, Steamless was killed mid-write and the .unpacked.exe may be half-written.
+                bool validPe;
+                try { PeReader.Analyze(outPath); validPe = true; }
+                catch { validPe = false; }
+                if (!validPe)
+                {
+                    Log(LogLevel.Error, "Steamless output \"" + Path.GetFileName(outPath) + "\" is not a valid PE"
+                        + (timedOut ? " – the unpack was killed after 10 minutes and the file may be incomplete." : ".")
+                        + "\nKeeping the original exe untouched; delete the .unpacked.exe manually if you're sure it's junk.");
+                    return exePath;
+                }
+
                 var origBackup = backup(exePath);
                 try
                 {
@@ -691,6 +788,7 @@ namespace Gp
             if (foundApi.Any(f => string.Equals(Path.GetFileName(f), otherName, StringComparison.OrdinalIgnoreCase)))
                 wanted.Add(otherName);
 
+            int installed = 0;
             foreach (var dllName in wanted)
             {
                 string src = dllName == "steam_api64.dll" ? Tools.ApiDll64 : Tools.ApiDll86;
@@ -703,8 +801,13 @@ namespace Gp
                 }
                 File.Copy(src, dst, true);
                 res.ReplacedFiles.Add(dllName);
-                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + (File.Exists(dst) ? "" : ""));
+                installed++;
+                Log(LogLevel.Ok, "Installed Goldberg → " + dllName);
             }
+
+            if (installed == 0)
+                throw new Exception("No steam_api dll could be installed – the bundled emulator dll(s) are missing from this patcher's folder.\n"
+                    + "The self-contained restore may have failed; check the log above and re-run, or reinstall the patcher.");
         }
 
         private string CopySettingsExample(string installDir, bool forOnlineFix)
@@ -869,7 +972,9 @@ namespace Gp
                 var dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
                 if (dir != null)
                 {
-                    var dirs = new List<string>();
+                    // The exe's own folder first – that's the steam_appid.txt Steam actually reads;
+                    // a stale copy in some deep subfolder must not beat it.
+                    var dirs = new List<string> { dir };
                     foreach (var a in PatchRunner.FindSteamApiFiles(dir))
                     {
                         var ad = Path.GetDirectoryName(a);
@@ -877,7 +982,6 @@ namespace Gp
                         foreach (var q in dirs) if (string.Equals(q, ad, StringComparison.OrdinalIgnoreCase)) { seen = true; break; }
                         if (!seen) dirs.Add(ad);
                     }
-                    dirs.Add(dir);
                     var id = new PatchRunner().FindExistingAppId(dirs.ToArray());
                     if (!string.IsNullOrEmpty(id)) { d.AppId = id; d.Source = "steam_appid.txt"; return d; }
                 }
@@ -1182,7 +1286,12 @@ namespace Gp
 
     internal static class Ext
     {
-        public static IEnumerable<T> TakeLastVisible<T>(this IList<T> list, int n) { return list; }
+        /// <summary>Returns the last n items of a list (all of it when n >= count).</summary>
+        public static IEnumerable<T> TakeLastVisible<T>(this IList<T> list, int n)
+        {
+            if (list == null || n <= 0) yield break;
+            for (int i = Math.Max(0, list.Count - n); i < list.Count; i++) yield return list[i];
+        }
     }
 
     // --------------------------------------------------------------------- app settings
@@ -1228,7 +1337,7 @@ namespace Gp
                         case "lookup": s.LookupAppId = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
-                                s.AppIdsByFolder[k.Substring(7)] = v;
+                                s.AppIdsByFolder[UnescKey(k.Substring(7))] = v;
                             break;
                     }
                 }
@@ -1253,10 +1362,21 @@ namespace Gp
                 sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
-                    sb.AppendLine("folder:" + kv.Key + "=" + kv.Value);
+                    sb.AppendLine("folder:" + EscKey(kv.Key) + "=" + kv.Value);
                 System.IO.File.WriteAllText(File0, sb.ToString());
             }
             catch { }
+        }
+
+        // Keys are written as `folder:<path>=<id>` and parsed by splitting on the FIRST '='.
+        // A game path containing '=' (or '%') would corrupt that split – percent-escape key chars.
+        static string EscKey(string s)
+        {
+            return (s ?? "").Replace("%", "%25").Replace("\\", "%5C").Replace("=", "%3D");
+        }
+        static string UnescKey(string s)
+        {
+            return (s ?? "").Replace("%3D", "=").Replace("%5C", "\\").Replace("%25", "%");
         }
     }
 }

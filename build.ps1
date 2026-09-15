@@ -42,7 +42,10 @@ $pay = @(
     'steamless\Steamless.CLI.exe',
     'steamless\Steamless.CLI.exe.config'
 )
-Get-ChildItem (Join-Path $root 'steamless\Plugins') -Filter '*.dll' | ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
+$pluginsDir = Join-Path $root 'steamless\Plugins'
+if (Test-Path $pluginsDir) {
+    Get-ChildItem $pluginsDir -Filter '*.dll' | ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
+}
 $pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
 $pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'release\tools\generate_interfaces\generate_interfaces_x64.exe')
 Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
@@ -54,12 +57,15 @@ foreach ($rel in $pay) {
     $full = Join-Path $root $rel
     if (-not (Test-Path -LiteralPath $full)) { throw "payload file missing: $rel" }
     $rn = 'gppay.{0:D4}' -f $i
-    $manLines += "$rn|$rel"
+    # Third field is the SHA256 so Payload.ExtractMissing can repair same-size corrupted files.
+    $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manLines += "$rn|$rel|$hash"
     $payRes += "/res:`"$full`",$rn"
     $i++
 }
 $manTmp = Join-Path $env:TEMP ('gp_manifest_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
-Set-Content -LiteralPath $manTmp -Value $manLines -Encoding Ascii
+# UTF-8 without BOM – the old Ascii encoding would corrupt non-ASCII paths in the manifest.
+[IO.File]::WriteAllLines($manTmp, $manLines, (New-Object System.Text.UTF8Encoding($false)))
 $payRes += "/res:`"$manTmp`",gppay.manifest"
 Write-Host ("payload files: " + $i)
 

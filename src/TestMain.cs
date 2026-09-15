@@ -33,6 +33,49 @@ static class TestMain
         var expectedAnyCpu = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
         Check(cli.Arch == expectedAnyCpu, "AnyCPU arch resolution", cli.MachineText);
 
+        // ---- synthetic PEs: regression tests for the PeReader offset bugs (bug 1) ----
+        Console.WriteLine("\n[PE analysis: synthetic]");
+        string synDir = Path.Combine(Path.GetTempPath(), "gp_selftest_pe_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(synDir);
+        try
+        {
+            // (a) Minimal native x64 PE with a nasty TimeDateStamp low half. The old code read that low
+            //     half as SizeOfOptionalHeader and ran off the end of this small file
+            //     (EndOfStreamException -> "Could not read the executable as a PE file").
+            var nativePath = Path.Combine(synDir, "native_x64.exe");
+            WriteNativeX64Pe(nativePath);
+            PeInfo npe = null; bool noThrow = true;
+            try { npe = PeReader.Analyze(nativePath); }
+            catch (Exception ex) { noThrow = false; Console.WriteLine("      | threw: " + ex.GetType().Name + ": " + ex.Message); }
+            Check(noThrow, "small native x64 PE parses without throwing", noThrow ? null : "(see above)");
+            if (noThrow)
+            {
+                Check(npe.Machine == 0x8664, "native x64 machine=AMD64", "0x" + npe.Machine.ToString("X"));
+                Check(npe.Arch == ExeArch.X64, "native x64 arch resolved", npe.MachineText);
+                Check(!npe.Managed && !npe.AnyCpu, "native x64 not managed/AnyCPU", npe.MachineText);
+            }
+
+            // (b) Minimal .NET PE32 with COR header flags=0 at +8 -> AnyCPU. This is the case that used to
+            //     pass only by luck: the section table was read from random bytes and the flags were read
+            //     from the wrong offset inside the COR header.
+            var dotnetPath = Path.Combine(synDir, "anycpu_dotnet.exe");
+            WriteAnyCpuDotNetPe(dotnetPath);
+            PeInfo dpe = null; bool noThrow2 = true;
+            try { dpe = PeReader.Analyze(dotnetPath); }
+            catch (Exception ex) { noThrow2 = false; Console.WriteLine("      | threw: " + ex.GetType().Name + ": " + ex.Message); }
+            Check(noThrow2, ".NET AnyCPU PE parses without throwing", noThrow2 ? null : "(see above)");
+            if (noThrow2)
+            {
+                Check(dpe.Managed, ".NET PE detected as managed", dpe.MachineText);
+                Check(dpe.AnyCpu, "COR flags=0 -> AnyCPU", dpe.MachineText);
+                Check(dpe.Arch == expectedAnyCpu, "synthetic AnyCPU arch resolution", dpe.MachineText);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(synDir, true); } catch { }
+        }
+
         Console.WriteLine("\n[integration: fake game]");
         string work = Path.Combine(Path.GetTempPath(), "gp_selftest_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         try
@@ -261,5 +304,70 @@ static class TestMain
 
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
         return fail == 0 ? 0 : 1;
+    }
+
+    // ---- synthetic PE builders for the PeReader regression tests above ----
+
+    static void W16(byte[] b, int off, ushort v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); }
+    static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
+
+    /// <summary>Minimal native x64 PE (~1 KB). TimeDateStamp low half is 0xDB25 – the old buggy code read
+    /// that as SizeOfOptionalHeader and ran off the end of this small file.</summary>
+    static void WriteNativeX64Pe(string path)
+    {
+        var b = new byte[1024];
+        W16(b, 0x00, 0x5A4D);          // "MZ"
+        W32(b, 0x3C, 0x80);            // e_lfanew
+        int pe = 0x80;
+        W32(b, pe, 0x00004550);        // "PE\0\0"
+        W16(b, pe + 4, 0x8664);        // Machine = AMD64
+        W16(b, pe + 6, 1);             // NumberOfSections
+        W32(b, pe + 8, 0xFC7CDB25);    // TimeDateStamp (nasty low half)
+        W32(b, pe + 12, 0);            // PointerToSymbolTable
+        W16(b, pe + 16, 0xF0);         // SizeOfOptionalHeader (PE32+ standard)
+        W16(b, pe + 18, 0x22);         // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+        int opt = pe + 24;
+        W16(b, opt, 0x20B);            // OptionalHeader Magic = PE32+
+        // Data directories (opt+112) stay zero -> no CLR dir -> not managed.
+        int sec = opt + 0xF0;          // section table right after the optional header
+        for (int i = 0; i < 5; i++) b[sec + i] = (byte)".text"[i];
+        W32(b, sec + 8, 0x1000);       // VirtualSize
+        W32(b, sec + 12, 0x1000);      // VirtualAddress
+        W32(b, sec + 16, 0x200);       // SizeOfRawData
+        W32(b, sec + 20, 0x400);       // PointerToRawData
+        File.WriteAllBytes(path, b);
+    }
+
+    /// <summary>Minimal .NET PE32 (I386/AnyCPU). COR header flags at +8 are 0 -> AnyCPU.</summary>
+    static void WriteAnyCpuDotNetPe(string path)
+    {
+        var b = new byte[2048];
+        W16(b, 0x00, 0x5A4D);          // "MZ"
+        W32(b, 0x3C, 0x80);            // e_lfanew
+        int pe = 0x80;
+        W32(b, pe, 0x00004550);        // "PE\0\0"
+        W16(b, pe + 4, 0x14C);         // Machine = I386 (typical for AnyCPU .NET)
+        W16(b, pe + 6, 1);             // NumberOfSections
+        W32(b, pe + 8, 0x5F000000);    // TimeDateStamp
+        W32(b, pe + 12, 0);            // PointerToSymbolTable
+        W16(b, pe + 16, 0xE0);         // SizeOfOptionalHeader (PE32 standard)
+        W16(b, pe + 18, 0x21);         // Characteristics: EXECUTABLE_IMAGE | 32BIT_MACHINE
+        int opt = pe + 24;
+        W16(b, opt, 0x10B);            // OptionalHeader Magic = PE32
+        int clrDir = opt + 96 + 14 * 8; // CLR data directory (DD[14])
+        W32(b, clrDir, 0x2008);        // RVA of COR header
+        W32(b, clrDir + 4, 72);        // size
+        int sec = opt + 0xE0;          // section table right after the optional header
+        for (int i = 0; i < 5; i++) b[sec + i] = (byte)".text"[i];
+        W32(b, sec + 8, 0x1000);       // VirtualSize
+        W32(b, sec + 12, 0x2000);      // VirtualAddress
+        W32(b, sec + 16, 0x400);       // SizeOfRawData
+        W32(b, sec + 20, 0x400);       // PointerToRawData (VA 0x2000 -> file offset 0x400)
+        int cor = 0x408;               // RvaToFile(0x2008) = 0x400 + (0x2008 - 0x2000)
+        W32(b, cor, 72);               // cb
+        b[cor + 4] = 2;                // MajorRuntimeVersion
+        b[cor + 5] = 5;                // MinorRuntimeVersion
+        W32(b, cor + 8, 0);            // Flags = 0 -> AnyCPU (no 32BITREQUIRED/PREFERRED)
+        File.WriteAllBytes(path, b);
     }
 }

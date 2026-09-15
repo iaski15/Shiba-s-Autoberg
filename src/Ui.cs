@@ -239,6 +239,8 @@ namespace Gp
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
         internal static extern IntPtr ExtractAssociatedIcon(IntPtr hInst, string lpszFile);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        internal static extern bool DestroyIcon(IntPtr hIcon);
     }
 
     // ─────────────────────────────────────────────── drop zone
@@ -291,7 +293,10 @@ namespace Gp
             {
                 var h = NativeMethods.ExtractAssociatedIcon(IntPtr.Zero, path);
                 if (h == IntPtr.Zero) return null;
-                using (var tmp = Icon.FromHandle(h)) return (Icon)tmp.Clone(); // own the copy so we can dispose later
+                Icon copy = null;
+                using (var tmp = Icon.FromHandle(h)) copy = (Icon)tmp.Clone(); // own the copy so we can dispose later
+                NativeMethods.DestroyIcon(h); // FromHandle does not take ownership of the HICON – release it ourselves
+                return copy;
             }
             catch { return null; }
         }
@@ -404,8 +409,8 @@ namespace Gp
                 var dirF = Ui.F(8.25f, false);
                 string dir = Path.GetDirectoryName(gamePath);
                 int dirMaxW = Width - (pad + 50) - 110;
-                using (var sfm = CreateGraphicsSafe()) { }
-                string shownDir = TruncateForDraw(dir, dirF, dirMaxW);
+                // Measure with the paint Graphics – creating a separate one during OnPaint is wasteful.
+                string shownDir = Ui.TruncMiddle(g, dir ?? "", dirF, dirMaxW);
                 TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + 50, 43), Ui.MutedC, TextFormatFlags.NoPadding);
 
                 // CHANGE link top-right
@@ -432,14 +437,11 @@ namespace Gp
                 using (var b = new SolidBrush(Color.FromArgb(170, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
         }
 
-        Graphics CreateGraphicsSafe() { return null; }
-        string TruncateForDraw(string s, Font f, int maxW)
+        protected override void Dispose(bool disposing)
         {
-            if (s == null) return "";
-            using (var g = CreateGraphics())
-            {
-                return Ui.TruncMiddle(g, s, f, maxW);
-            }
+            // fileIcon is a cloned Icon we own – release it with the control (bug #15).
+            if (disposing && fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
+            base.Dispose(disposing);
         }
     }
 
@@ -626,8 +628,6 @@ namespace Gp
             for (int i = 0; i < actionRects.Count; i++)
                 if (actionRects[i].Contains(e.Location)) { var h = ActionClicked; if (h != null) h(i); return; }
         }
-        protected override void OnVisibleChanged(EventArgs e) { if (Visible) ParentForm_Resize(); base.OnVisibleChanged(e); }
-        internal void ParentForm_Resize() { }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -683,6 +683,11 @@ namespace Gp
 
     public class LogView : RichTextBox
     {
+        // Long batch runs used to grow this control without bound (memory + UI lag). Cap the line count
+        // and drop the oldest lines in batches when the cap is exceeded.
+        const int MaxLines = 1500;
+        int lineCount = 0;
+
         public LogView()
         {
             ReadOnly = true; BorderStyle = System.Windows.Forms.BorderStyle.None;
@@ -708,7 +713,33 @@ namespace Gp
             SelectionColor = c;
             AppendText(msg + Environment.NewLine);
             SelectionColor = ForeColor;
+            lineCount++;
+            if (lineCount > MaxLines) TrimOldest(lineCount - MaxLines / 2); // drop a batch of the oldest lines
             ScrollToCaret();
+        }
+
+        void TrimOldest(int nLines)
+        {
+            try
+            {
+                var t = Text; // snapshot – trimming is rare, so this copy is cheap enough
+                int pos = 0, removed = 0;
+                while (removed < nLines && pos < t.Length)
+                {
+                    int nl = t.IndexOf('\n', pos);
+                    if (nl < 0) break;
+                    pos = nl + 1;
+                    removed++;
+                }
+                if (pos > 0)
+                {
+                    SelectionStart = 0;
+                    SelectionLength = Math.Min(pos, TextLength);
+                    SelectedText = ""; // delete the selection (DeleteText is not available on this framework build)
+                    lineCount -= removed;
+                }
+            }
+            catch { }
         }
     }
 }
