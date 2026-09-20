@@ -2059,7 +2059,7 @@ namespace Gp
         // ------------------------------------------------------------------ helpers
 
         // dirs that never contain a steam_api dll – pruned from deep scans for speed
-        static readonly HashSet<string> SkipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        internal static readonly HashSet<string> SkipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "goldberg_backup", "$recycle.bin", "system volume information", "__macosx",
             "_commonredist", "redist", "_redist", "__redist", "directx", "dxsetup", "vcredist",
@@ -2189,6 +2189,70 @@ namespace Gp
             return TryNormalize(value, out normalized) ? normalized : "";
         }
 
+        /// <summary>Memoised local lookups, keyed by the exe's folder. A batch detects an AppID for every row
+        /// and the UI re-detects on every selection, so the same folder was being scanned repeatedly. The
+        /// batch engine clears this once per run so a steam_appid.txt written mid-run is not missed.</summary>
+        static readonly Dictionary<string, AppIdDetection> localCache = new Dictionary<string, AppIdDetection>(StringComparer.OrdinalIgnoreCase);
+
+        public static void ClearLocalCache()
+        {
+            lock (localCache) localCache.Clear();
+        }
+
+        static void AddDir(List<string> dirs, HashSet<string> seen, string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !seen.Add(dir)) return;
+            dirs.Add(dir);
+        }
+
+        /// <summary>Directories plausibly holding a steam_appid.txt: the exe's own folder first - that is the
+        /// one Steam actually reads - then its parents, then a shallow descent. Bounded by both depth and a
+        /// hard cap on purpose: this used to run the full game-tree scan that FindSteamApiFiles performs, up
+        /// to 50,000 directories, once per batch row.</summary>
+        static List<string> AppIdCandidateDirs(string exeDir)
+        {
+            var dirs = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddDir(dirs, seen, exeDir);
+
+            string up = exeDir;
+            for (int i = 0; i < 2 && !string.IsNullOrEmpty(up); i++)
+            {
+                up = Path.GetDirectoryName(up);
+                AddDir(dirs, seen, up);
+            }
+
+            var queue = new Queue<KeyValuePair<string, int>>();
+            queue.Enqueue(new KeyValuePair<string, int>(exeDir, 0));
+            while (queue.Count > 0 && dirs.Count < 400)
+            {
+                var item = queue.Dequeue();
+                if (item.Value >= 3) continue;
+                string[] subs;
+                try { subs = Directory.GetDirectories(item.Key); }
+                catch { continue; }
+                foreach (var sub in subs)
+                {
+                    if (PatchRunner.SkipDirs.Contains(Path.GetFileName(sub))) continue;
+                    AddDir(dirs, seen, sub);
+                    queue.Enqueue(new KeyValuePair<string, int>(sub, item.Value + 1));
+                }
+            }
+            return dirs;
+        }
+
+        static AppIdDetection LookupLocal(string dir)
+        {
+            var found = new AppIdDetection();
+            try
+            {
+                var id = new PatchRunner().FindExistingAppId(AppIdCandidateDirs(dir).ToArray());
+                if (!string.IsNullOrEmpty(id)) { found.AppId = id; found.Source = "steam_appid.txt"; }
+            }
+            catch { }
+            return found;
+        }
+
         public static AppIdDetection Detect(string exePath, string cachedId, bool allowOnline, CancellationToken ct = default(CancellationToken))
         {
             ct.ThrowIfCancellationRequested();
@@ -2203,18 +2267,16 @@ namespace Gp
                 var dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
                 if (dir != null)
                 {
-                    // The exe's own folder first – that's the steam_appid.txt Steam actually reads;
-                    // a stale copy in some deep subfolder must not beat it.
-                    var dirs = new List<string> { dir };
-                    foreach (var a in PatchRunner.FindSteamApiFiles(dir, ct))
+                    AppIdDetection local;
+                    lock (localCache)
                     {
-                        var ad = Path.GetDirectoryName(a);
-                        bool seen = false;
-                        foreach (var q in dirs) if (string.Equals(q, ad, StringComparison.OrdinalIgnoreCase)) { seen = true; break; }
-                        if (!seen) dirs.Add(ad);
+                        if (!localCache.TryGetValue(dir, out local))
+                        {
+                            local = LookupLocal(dir);
+                            localCache[dir] = local;
+                        }
                     }
-                    var id = new PatchRunner().FindExistingAppId(dirs.ToArray());
-                    if (!string.IsNullOrEmpty(id)) { d.AppId = id; d.Source = "steam_appid.txt"; return d; }
+                    if (!string.IsNullOrEmpty(local.AppId)) { d.AppId = local.AppId; d.Source = local.Source; return d; }
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -2275,6 +2337,9 @@ namespace Gp
         {
             return Task.Run(() =>
             {
+                // Detection results are memoised per folder; drop them once per run so a steam_appid.txt
+                // written between runs is picked up while repeated lookups within a run stay cheap.
+                AppIdDetector.ClearLocalCache();
                 var results = new List<BatchItemOutcome>();
                 int n = (items == null ? 0 : items.Count);
 

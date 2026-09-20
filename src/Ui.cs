@@ -702,6 +702,10 @@ namespace Gp
         const int MaxLines = 1500;
         bool trimming;
 
+        /// <summary>Running count of the lines in the buffer. Maintaining it is what turns trimming from a
+        /// full-text scan per append into an O(1) check.</summary>
+        int lineCount;
+
         public LogView()
         {
             ReadOnly = true; BorderStyle = System.Windows.Forms.BorderStyle.None;
@@ -722,15 +726,28 @@ namespace Gp
                 case LogLevel.Dim: c = Ui.FromHex("#67707F"); break;
                 default: c = Ui.FromHex("#B9C1CE"); break;
             }
+            string text = msg + Environment.NewLine;
+            lineCount += CountLines(text);
             SelectionStart = TextLength;
             SelectionLength = 0;
             SelectionColor = c;
-            AppendText(msg + Environment.NewLine);
+            AppendText(text);
             TrimLines();
             SelectionColor = ForeColor;
             SelectionStart = TextLength;
             SelectionLength = 0;
             ScrollToCaret();
+        }
+
+        static int CountLines(string s)
+        {
+            int n = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (s[i] == '\r') { n++; if (i + 1 < s.Length && s[i + 1] == '\n') i++; }
+                else if (s[i] == '\n') n++;
+            }
+            return n;
         }
 
         protected override void OnTextChanged(EventArgs e)
@@ -739,37 +756,33 @@ namespace Gp
             TrimLines();
             base.OnTextChanged(e);
         }
+
         void TrimLines()
         {
             if (trimming) return;
-            var t = Text;
-            var starts = new List<int>();
-            starts.Add(0);
-            for (int i = 0; i < t.Length; i++)
+            // The buffer can be emptied from outside; trust the text over the counter when they disagree.
+            if (TextLength == 0) { lineCount = 0; return; }
+            if (lineCount <= MaxLines) return;
+
+            // Drop the oldest lines down to half the cap, in one pass. GetFirstCharIndexFromLine is O(1),
+            // so there is no need to walk the whole buffer looking for line breaks - which this used to do
+            // twice per appended line (AppendLine called it, and so did OnTextChanged).
+            int drop = lineCount - MaxLines / 2;
+            int cut = GetFirstCharIndexFromLine(drop);
+            if (cut <= 0) return;
+            int start = SelectionStart, end = start + SelectionLength;
+            trimming = true;
+            bool wasReadOnly = ReadOnly;
+            try
             {
-                if (t[i] == '\r')
-                {
-                    if (i + 1 < t.Length && t[i + 1] == '\n') i++;
-                    starts.Add(i + 1);
-                }
-                else if (t[i] == '\n') starts.Add(i + 1);
+                ReadOnly = false;
+                Select(0, cut);
+                SelectedText = "";
+                int newStart = Math.Max(0, start - cut);
+                Select(newStart, Math.Max(0, end - cut - newStart));
+                lineCount -= drop;
             }
-            if (starts.Count > MaxLines)
-            {
-                int cut = starts[starts.Count - MaxLines / 2];
-                int start = SelectionStart, end = start + SelectionLength;
-                trimming = true;
-                bool wasReadOnly = ReadOnly;
-                try
-                {
-                    ReadOnly = false;
-                    Select(0, cut);
-                    SelectedText = "";
-                    int newStart = Math.Max(0, start - cut);
-                    Select(newStart, Math.Max(0, end - cut - newStart));
-                }
-                finally { trimming = false; ReadOnly = wasReadOnly; }
-            }
+            finally { trimming = false; ReadOnly = wasReadOnly; }
         }
     }
 }

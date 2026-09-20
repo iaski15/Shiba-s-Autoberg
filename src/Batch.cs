@@ -549,9 +549,11 @@ namespace Gp
 
             var sub = Subtitle();
             int subMaxW = Width - Pad * 2;
-            if (g.MeasureString(sub, Ui.F(8.5f, false)).Width > subMaxW)
-                while (sub.Length > 1 && g.MeasureString(sub + "…", Ui.F(8.5f, false)).Width > subMaxW) sub = sub.Substring(0, sub.Length - 1);
-            TextRenderer.DrawText(g, sub, Ui.F(8.5f, false), new Point(Pad, 74), prefs.OnlineFix ? Ui.WarnC : Ui.MutedC, TextFormatFlags.NoPadding);
+            var subFont = Ui.F(8.5f, false);
+            // Ui.TruncMiddle binary-searches; the loop this replaced did a MeasureString plus a string
+            // allocation per character removed, on every repaint including every resize tick.
+            sub = Ui.TruncMiddle(g, sub, subFont, subMaxW);
+            TextRenderer.DrawText(g, sub, subFont, new Point(Pad, 74), prefs.OnlineFix ? Ui.WarnC : Ui.MutedC, TextFormatFlags.NoPadding);
         }
 
         // ---------------------------------------------------------- list management

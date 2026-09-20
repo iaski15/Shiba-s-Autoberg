@@ -722,6 +722,53 @@ static class TestMain
         }
         finally { Dpi.Scale = savedScale; }
 
+        Console.WriteLine("\n[appid directory scan]");
+        string appDir = Path.Combine(Path.GetTempPath(), "gp_selftest_appid_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            string gameDir = Path.Combine(appDir, "Game");
+            Directory.CreateDirectory(gameDir);
+            string gameExe = Path.Combine(gameDir, "game.exe");
+            File.WriteAllBytes(gameExe, new byte[] { 0x4D, 0x5A });
+
+            AppIdDetector.ClearLocalCache();
+            Check(!AppIdDetector.Detect(gameExe, "", false).Found, "no steam_appid.txt anywhere reports not found", null);
+
+            File.WriteAllText(Path.Combine(gameDir, "steam_appid.txt"), "440");
+            AppIdDetector.ClearLocalCache();
+            var beside = AppIdDetector.Detect(gameExe, "", false);
+            Check(beside.Found && beside.AppId == "440" && beside.Source == "steam_appid.txt",
+                  "steam_appid.txt beside the exe is found", beside.AppId);
+
+            // The scan is bounded on purpose - a stale copy buried in the tree must not be picked up, which
+            // is what used to cost a full game-tree walk per batch row.
+            File.Delete(Path.Combine(gameDir, "steam_appid.txt"));
+            string deep = Path.Combine(gameDir, "a", "b", "c", "d", "e");
+            Directory.CreateDirectory(deep);
+            File.WriteAllText(Path.Combine(deep, "steam_appid.txt"), "999");
+            AppIdDetector.ClearLocalCache();
+            Check(!AppIdDetector.Detect(gameExe, "", false).Found,
+                  "a steam_appid.txt past the bounded depth is not scanned", null);
+
+            string shallow = Path.Combine(gameDir, "Binaries", "Win64");
+            Directory.CreateDirectory(shallow);
+            File.WriteAllText(Path.Combine(shallow, "steam_appid.txt"), "730");
+            AppIdDetector.ClearLocalCache();
+            var near = AppIdDetector.Detect(gameExe, "", false);
+            Check(near.Found && near.AppId == "730", "a shallow subfolder is still scanned", near.AppId);
+
+            // A cached lookup must not survive an explicit clear.
+            File.Delete(Path.Combine(shallow, "steam_appid.txt"));
+            Check(AppIdDetector.Detect(gameExe, "", false).Found, "the memo returns the cached hit", null);
+            AppIdDetector.ClearLocalCache();
+            Check(!AppIdDetector.Detect(gameExe, "", false).Found, "clearing the memo re-reads the disk", null);
+        }
+        finally
+        {
+            AppIdDetector.ClearLocalCache();
+            try { Directory.Delete(appDir, true); } catch { }
+        }
+
         ReviewRegressions();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 

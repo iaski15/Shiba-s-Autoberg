@@ -271,6 +271,16 @@ For a 50-game library this is 50 independent full-tree walks. `FindSteamApiFiles
 and its immediate parent. A bounded 2–3 level walk would find >99% of cases at a fraction of the cost.
 Cache results per folder for the lifetime of the batch.
 
+> **Fixed.** `AppIdCandidateDirs` looks at the exe's folder first (the one Steam actually reads), then its
+> parents, then a shallow breadth-first descent bounded by **depth 3 and a hard cap of 400 directories**.
+> The full game-tree walk is gone from this path entirely.
+>
+> Results are memoised per exe folder, and `BatchPatcher.RunAsync` calls `ClearLocalCache()` once per run so
+> a `steam_appid.txt` written between runs is still picked up.
+>
+> Six assertions cover it, including the negative case that matters: a `steam_appid.txt` buried past the
+> depth bound is *not* found, which is the behaviour the bounding buys.
+
 ### 10. The interface-generation tool is picked from the dll *filename*
 
 `Core.cs:1012`:
@@ -411,6 +421,14 @@ Steamless run logs ~50 lines per game (`Core.cs:961`); a 20-game batch logs thou
 **Fix:** keep an integer line counter; only scan when `counter > MaxLines`, and then trim in one pass.
 Use `GetFirstCharIndexFromLine` instead of a manual scan. Consider `SuspendLayout` around batch drains.
 
+> **Fixed.** `LogView` keeps a running line count, so the common append is an integer comparison rather
+> than two full-text scans, and the trim itself uses `GetFirstCharIndexFromLine` — no walk of the buffer.
+> If the text is ever emptied from outside, the counter trusts the text over itself.
+>
+> The `SuspendLayout` suggestion is not taken: the log is a `RichTextBox`, where layout suspension does not
+> meaningfully batch `AppendText`, and the per-append cost is now dominated by the control's own text
+> insertion rather than by this code.
+
 ### 18. Quadratic string truncation inside `OnPaint`
 
 `BatchForm.OnPaint` (`Batch.cs:549-552`):
@@ -426,6 +444,9 @@ every resize tick). `Ui.TruncMiddle` (`Ui.cs:76-94`) already does a binary searc
 
 **Fix:** replace with `Ui.TruncMiddle(g, sub, Ui.F(8.5f, false), subMaxW)`.
 
+> **Fixed.** The loop is gone; the subtitle now goes through `Ui.TruncMiddle`, which binary-searches. The
+> font is also created once per paint instead of once per iteration.
+
 ### 19. Two full-window gradient fills on every main-window repaint
 
 `MainForm.OnPaint` (`MainForm.cs:1149-1150`) calls `AmbientGlow` twice, each building a `GraphicsPath` with
@@ -435,6 +456,13 @@ whole-window gradient rasterizations per paint, and the main form repaints on ev
 
 **Fix:** render the ambient glow once into a cached `Bitmap` keyed on size, and blit it. Or drop it — it is
 18/255 and 12/255 alpha, barely visible.
+
+> **Fixed, by caching rather than deleting.** `PaintAmbientGlow` renders both glows once per client size into
+> a bitmap and blits it, so a resize tick no longer costs two whole-window gradient rasterisations. The
+> bitmap is disposed with the form.
+>
+> Kept rather than dropped because at 150% DPI the window is now physically larger and the effect is more
+> visible than it was, not less.
 
 ### 20. ~20 MB of SHA-256 on every launch
 
@@ -662,7 +690,7 @@ narrower than the API's documented behaviour.
 | 3 | #5, #6, #10 — **done** | Correctness of the core value proposition (dll placement, unpack detection) |
 | 4 | #11 — **done** (arithmetic verified, appearance not) | Unblocks anyone on a HiDPI display |
 | 5 | #4, #8, #14 — **done** | Removes the "it just doesn't start" and "no output" failure classes |
-| 6 | #9, #17, #18, #19 | Performance, once correctness is settled |
+| 6 | #9, #17, #18, #19 — **done** | Performance, once correctness is settled |
 | 7 | #12, #13, #15, #16 | Robustness hardening |
 | 8 | #25–#43 | Cleanup, in any order |
 

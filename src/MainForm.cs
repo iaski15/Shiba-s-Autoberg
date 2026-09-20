@@ -1325,6 +1325,33 @@ namespace Gp
             }
         }
 
+        Bitmap glowCache;
+        Size glowCacheSize;
+
+        /// <summary>Both ambient glows are whole-client-rectangle gradient rasterisations, and this form
+        /// repaints on every resize tick, so rendering them inline was two full-window gradient fills per
+        /// frame. Render them once per size into a bitmap and blit it.</summary>
+        void PaintAmbientGlow(Graphics g)
+        {
+            if (glowCache == null || glowCacheSize != ClientSize)
+            {
+                if (glowCache != null) { glowCache.Dispose(); glowCache = null; }
+                if (ClientSize.Width > 0 && ClientSize.Height > 0)
+                {
+                    var bmp = new Bitmap(ClientSize.Width, ClientSize.Height);
+                    using (var bg = Graphics.FromImage(bmp))
+                    {
+                        var full = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
+                        AmbientGlow(bg, full, Width / 2f + 40f, 150f, 430f, Ui.Accent, 18);
+                        AmbientGlow(bg, full, (float)Width - 60f, Height - 210f, 400f, Ui.Accent2, 12);
+                    }
+                    glowCache = bmp;
+                    glowCacheSize = ClientSize;
+                }
+            }
+            if (glowCache != null) g.DrawImageUnscaled(glowCache, 0, 0);
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -1333,6 +1360,7 @@ namespace Gp
                 StopAutoTimer();
                 StopExitTimer();
                 CancelSelectionWork();
+                if (glowCache != null) { glowCache.Dispose(); glowCache = null; }
                 if (notePulse != null) { notePulse.Dispose(); notePulse = null; }
                 if (zoneTip != null) { zoneTip.Dispose(); zoneTip = null; }
                 if (cts != null) { try { cts.Dispose(); } catch { } cts = null; }
@@ -1347,8 +1375,7 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
 
-            AmbientGlow(g, ClientRectangle, Width / 2f + 40f, 150f, 430f, Ui.Accent, 18);
-            AmbientGlow(g, ClientRectangle, (float)Width - 60f, Height - 210f, 400f, Ui.Accent2, 12);
+            PaintAmbientGlow(g);
 
             // hero title in the brand gradient
             string title = "Patch a Steam game";
