@@ -463,6 +463,108 @@ static class TestMain
             try { Directory.Delete(fpDir, true); } catch { }
         }
 
+        Console.WriteLine("\n[rollback]");
+        string rbDir = Path.Combine(Path.GetTempPath(), "gp_selftest_rb_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(rbDir);
+        Recovery.JournalPathOverride = Path.Combine(rbDir, "journal.txt");
+        try
+        {
+            var keep = Path.Combine(rbDir, "keep.txt");
+            File.WriteAllText(keep, "original");
+            var w1 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(keep, "patched", w1);
+            Check(File.ReadAllText(keep) == "patched", "patch replaced the file", null);
+            var r1 = Recovery.RollbackWrites(w1, null);
+            Check(r1.Restored == 1 && r1.Failed == 0, "rollback restores a replaced file", r1.Summary);
+            Check(File.ReadAllText(keep) == "original", "restored bytes match the original", File.ReadAllText(keep));
+
+            var created = Path.Combine(rbDir, "created.txt");
+            var w2 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(created, "new file", w2);
+            Check(w2[0].PreviousHash == "absent", "a created file records an absent previous hash", w2[0].PreviousHash);
+            var r2 = Recovery.RollbackWrites(w2, null);
+            Check(r2.Deleted == 1 && !File.Exists(created), "rollback deletes a file the patch created", r2.Summary);
+
+            var edited = Path.Combine(rbDir, "edited.txt");
+            File.WriteAllText(edited, "v1");
+            var w3 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(edited, "v2", w3);
+            File.WriteAllText(edited, "user edited this after patching");
+            var r3 = Recovery.RollbackWrites(w3, null);
+            Check(r3.Skipped == 1 && r3.Restored == 0 && File.ReadAllText(edited) == "user edited this after patching",
+                  "rollback never clobbers a file edited after the patch", r3.Summary);
+
+            var lost = Path.Combine(rbDir, "lost.txt");
+            File.WriteAllText(lost, "before");
+            var w4 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(lost, "after", w4);
+            File.Delete(w4[0].RecoveryPath);
+            var r4 = Recovery.RollbackWrites(w4, null);
+            Check(r4.Failed == 1 && File.ReadAllText(lost) == "after",
+                  "a missing recovery copy fails cleanly and leaves the file alone", r4.Summary);
+
+            var twice = Path.Combine(rbDir, "twice.txt");
+            File.WriteAllText(twice, "one");
+            var w5 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(twice, "two", w5);
+            SafePersistence.WriteText(twice, "three", w5);
+            Recovery.RollbackWrites(w5, null);
+            Check(File.ReadAllText(twice) == "one", "rollback replays writes newest-first", File.ReadAllText(twice));
+
+            var exe = Path.Combine(rbDir, "game.exe");
+            File.WriteAllText(exe, "packed");
+            var verified = Path.Combine(rbDir, "verified-original.exe");
+            File.Copy(exe, verified);
+            var w6 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(exe, "unpacked", w6, verified);
+            Check(w6[0].ExternalRecovery && w6[0].RecoveryPath == Path.GetFullPath(verified),
+                  "an existing verified backup is reused instead of copied again", w6[0].RecoveryPath);
+            Check(!File.Exists(Path.Combine(w6[0].Area, "game.exe.previous")),
+                  "no second copy of the exe is left in the staging area", null);
+            var r6 = Recovery.RollbackWrites(w6, null);
+            Check(r6.Restored == 1 && File.ReadAllText(exe) == "packed",
+                  "rollback restores from the external backup", r6.Summary);
+            Check(File.ReadAllText(verified) == "packed", "rollback leaves the verified backup intact", null);
+
+            var journalled = Path.Combine(rbDir, "journalled.txt");
+            File.WriteAllText(journalled, "pre");
+            var w7 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(journalled, "post", w7);
+            Recovery.SaveJournal(w7, true);
+            var loaded = Recovery.LoadJournal(Recovery.JournalPath);
+            Check(loaded.Count == 1 && loaded[0].Completed && loaded[0].Destination == Path.GetFullPath(journalled),
+                  "the consolidated journal round-trips through disk", loaded.Count.ToString());
+            Check(loaded[0].PreviousHash == w7[0].PreviousHash && loaded[0].StagedHash == w7[0].StagedHash,
+                  "the journal keeps both hashes the undo needs", loaded[0].PreviousHash);
+            Check(Recovery.HasLastPatch(), "a finished patch reports as undoable", null);
+            var r7 = Recovery.RollbackLastPatch(null);
+            Check(r7.Restored == 1 && File.ReadAllText(journalled) == "pre",
+                  "undo works from the persisted journal after a restart", r7.Summary);
+            Recovery.ClearLastPatch();
+            Check(!Recovery.HasLastPatch(), "clearing the journal removes the undo offer", null);
+
+            var gcTarget = Path.Combine(rbDir, "gc.txt");
+            File.WriteAllText(gcTarget, "keep me");
+            var w8 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(gcTarget, "patched", w8);
+            Recovery.CollectStaging(w8);
+            Check(File.Exists(w8[0].RecoveryPath) && File.ReadAllText(w8[0].RecoveryPath) == "keep me",
+                  "collection keeps the recovery copy so undo still works", null);
+            Check(!File.Exists(w8[0].JournalPath), "collection drops the superseded per-write journal", null);
+
+            var empty = Recovery.Rollback(new List<RecoveryEntry>(), null);
+            Check(empty.Restored == 0 && empty.Failed == 0 && empty.Summary == "Nothing to undo.",
+                  "rolling back nothing is a no-op, not an error", empty.Summary);
+        }
+        finally
+        {
+            // Delete the redirected journal while the override is still in place – clearing it after
+            // restoring the override would delete the real application's pending undo record.
+            try { if (File.Exists(Recovery.JournalPath)) File.Delete(Recovery.JournalPath); } catch { }
+            Recovery.JournalPathOverride = null;
+            try { Directory.Delete(rbDir, true); } catch { }
+        }
+
         ReviewRegressions();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
         return fail == 0 ? 0 : 1;

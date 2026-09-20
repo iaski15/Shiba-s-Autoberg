@@ -18,6 +18,22 @@ namespace Gp
 
     public enum ExeArch { Unknown, X86, X64 }
 
+    /// <summary>Single source of truth for where the app keeps its own state. The
+    /// %APPDATA%\GoldbergPatcher path used to be duplicated across Core, Batch and MainForm.</summary>
+    public static class AppPaths
+    {
+        public static string StateDir
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher"); }
+        }
+
+        /// <summary>Undo records for the most recent patch run, kept outside the game folder so that
+        /// "Undo last patch" still works after the app is restarted.</summary>
+        public static string LastPatchDir { get { return Path.Combine(StateDir, "last-patch"); } }
+
+        public static string LastPatchJournal { get { return Path.Combine(LastPatchDir, "journal.txt"); } }
+    }
+
     public class PeInfo
     {
         public ushort Machine;
@@ -155,6 +171,24 @@ namespace Gp
         public string RecoveryPath;
         public string JournalPath;
         public bool Completed;
+
+        /// <summary>Hash of the content that was in place before this write, or "absent" when the
+        /// destination did not exist. This is what rollback restores.</summary>
+        public string PreviousHash = "";
+
+        /// <summary>Hash of the content this write installed.</summary>
+        public string StagedHash = "";
+
+        /// <summary>True when <see cref="RecoveryPath"/> is a pre-existing verified backup (the
+        /// goldberg_backup copy) rather than a copy taken inside the staging area. Such a path lives
+        /// outside the staging area and must never be garbage-collected as part of it.</summary>
+        public bool ExternalRecovery;
+
+        /// <summary>The per-write staging directory this record owns, derived from the journal path.</summary>
+        public string Area
+        {
+            get { return JournalPath.Length == 0 ? "" : Path.GetDirectoryName(JournalPath); }
+        }
     }
 
     public static class SafePersistence
@@ -198,8 +232,11 @@ namespace Gp
             }
         }
 
+        /// <param name="externalRecovery">Path to an already-verified copy of the current destination
+        /// content (the goldberg_backup original). When supplied, no second copy is taken inside the
+        /// staging area – the caller has already paid for one – and rollback restores from there.</param>
         public static FileWriteRecord Write(string path, Action<Stream> write, Action<string> validate = null,
-            List<FileWriteRecord> journal = null, Action<string> checkpoint = null)
+            List<FileWriteRecord> journal = null, Action<string> checkpoint = null, string externalRecovery = null)
         {
             path = Path.GetFullPath(path);
             return Locked(path, () =>
@@ -208,12 +245,16 @@ namespace Gp
                 string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(area);
                 string name = Path.GetFileName(path);
+                bool external = !string.IsNullOrEmpty(externalRecovery);
                 var record = new FileWriteRecord
                 {
                     Destination = path,
                     StagedPath = Path.Combine(area, name + ".staged-" + Guid.NewGuid().ToString("N").Substring(0, 8)),
-                    RecoveryPath = File.Exists(path) ? Path.Combine(area, name + ".previous") : "",
-                    JournalPath = Path.Combine(area, name + ".journal.txt")
+                    RecoveryPath = external
+                        ? Path.GetFullPath(externalRecovery)
+                        : (File.Exists(path) ? Path.Combine(area, name + ".previous") : ""),
+                    JournalPath = Path.Combine(area, name + ".journal.txt"),
+                    ExternalRecovery = external
                 };
                 if (journal != null) journal.Add(record);
                 try
@@ -225,17 +266,32 @@ namespace Gp
                     }
                     if (validate != null) validate(record.StagedPath);
                     if (checkpoint != null) checkpoint("staged");
-                    string oldHash = record.RecoveryPath.Length == 0 ? "absent" : Hash(path);
+                    // For a local recovery copy, File.Replace will move the destination's current
+                    // content there, so the destination is what we must hash. For an external recovery
+                    // the copy already exists and is what rollback will restore from.
+                    string oldHash = external
+                        ? Hash(record.RecoveryPath)
+                        : (record.RecoveryPath.Length == 0 ? "absent" : Hash(path));
+                    record.PreviousHash = oldHash;
+                    record.StagedHash = Hash(record.StagedPath);
                     var j = new StringBuilder();
                     j.AppendLine("destination=" + path);
                     j.AppendLine("staged=" + record.StagedPath);
                     j.AppendLine("recovery=" + record.RecoveryPath);
                     j.AppendLine("previous-sha256=" + oldHash);
-                    j.AppendLine("staged-sha256=" + Hash(record.StagedPath));
+                    j.AppendLine("staged-sha256=" + record.StagedHash);
+                    j.AppendLine("area=" + area);
                     j.AppendLine("state=prepared");
                     FlushJournal(record.JournalPath, j.ToString(), FileMode.CreateNew);
                     if (checkpoint != null) checkpoint("prepared");
-                    if (record.RecoveryPath.Length != 0)
+                    // Order matters: an external recovery source must never be handed to File.Replace as
+                    // its backup argument, or the verified original would be overwritten by whatever the
+                    // destination happened to contain.
+                    if (external && File.Exists(path))
+                        // null backup: the destination's previous content is deliberately discarded, it is
+                        // already preserved in the verified external backup.
+                        File.Replace(record.StagedPath, path, null);
+                    else if (!external && record.RecoveryPath.Length != 0 && File.Exists(path))
                         File.Replace(record.StagedPath, path, record.RecoveryPath);
                     else
                         File.Move(record.StagedPath, path);
@@ -255,7 +311,7 @@ namespace Gp
         }
 
         public static FileWriteRecord Copy(string source, string destination, List<FileWriteRecord> journal = null,
-            Action<string> validate = null)
+            Action<string> validate = null, string externalRecovery = null)
         {
             if (!File.Exists(source)) throw new FileNotFoundException("Source file for staged copy not found: " + source, source);
             string expected = Hash(source);
@@ -266,13 +322,14 @@ namespace Gp
             {
                 if (Hash(staged) != expected) throw new InvalidDataException("Staged copy hash mismatch: " + source);
                 if (validate != null) validate(staged);
-            }, journal);
+            }, journal, null, externalRecovery);
         }
 
-        public static FileWriteRecord WriteText(string path, string text, List<FileWriteRecord> journal = null)
+        public static FileWriteRecord WriteText(string path, string text, List<FileWriteRecord> journal = null,
+            string externalRecovery = null)
         {
             byte[] bytes = new UTF8Encoding(false).GetBytes(text);
-            return Write(path, stream => stream.Write(bytes, 0, bytes.Length), null, journal);
+            return Write(path, stream => stream.Write(bytes, 0, bytes.Length), null, journal, null, externalRecovery);
         }
     }
 
@@ -306,7 +363,8 @@ namespace Gp
             return !before.TryGetValue(path, out hash) || hash != SafePersistence.Hash(path);
         }
 
-        internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash)
+        internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash,
+            string externalRecovery = null)
         {
             if (!IsCurrent(path)) throw new IOException("No current invocation output: " + path);
             string expected = SafePersistence.Hash(path);
@@ -316,7 +374,7 @@ namespace Gp
                     throw new IOException("Executable or output changed during processing: " + input);
                 if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
                     throw new InvalidDataException("Unsupported unpacked executable architecture.");
-            });
+            }, externalRecovery);
             if (SafePersistence.Hash(path) == expected) File.Delete(path);
         }
     }
@@ -409,6 +467,320 @@ namespace Gp
         }
     }
 
+    /// <summary>One restorable step of a patch run, parsed from a journal. When
+    /// <see cref="PreviousHash"/> is "absent" the destination did not exist before the patch, so
+    /// undoing it means deleting the file.</summary>
+    public sealed class RecoveryEntry
+    {
+        public string Destination = "";
+        public string RecoveryPath = "";
+        public string PreviousHash = "";
+        public string StagedHash = "";
+        public string Area = "";
+        public bool Completed;
+    }
+
+    public sealed class RecoveryReport
+    {
+        public int Restored;
+        public int Deleted;
+        public int Skipped;
+        public int Failed;
+        public readonly List<string> Messages = new List<string>();
+
+        public bool ChangedAnything { get { return Restored > 0 || Deleted > 0; } }
+
+        public string Summary
+        {
+            get
+            {
+                if (Restored == 0 && Deleted == 0 && Skipped == 0 && Failed == 0) return "Nothing to undo.";
+                var parts = new List<string>();
+                if (Restored > 0) parts.Add(Restored + " restored");
+                if (Deleted > 0) parts.Add(Deleted + " removed");
+                if (Skipped > 0) parts.Add(Skipped + " left alone");
+                if (Failed > 0) parts.Add(Failed + " failed");
+                return string.Join(", ", parts) + ".";
+            }
+        }
+    }
+
+    /// <summary>Replays the journal that <see cref="SafePersistence"/> writes, in reverse, so a patch
+    /// that failed or was cancelled part-way can be undone instead of leaving the game half-patched.
+    /// The journal is mirrored into %APPDATA% so the undo survives a restart.</summary>
+    public static class Recovery
+    {
+        /// <summary>Test hook: redirects the undo journal away from the real application state
+        /// directory so a self-test run cannot disturb a pending undo.</summary>
+        internal static string JournalPathOverride;
+
+        public static string JournalPath
+        {
+            get { return JournalPathOverride ?? AppPaths.LastPatchJournal; }
+        }
+
+        public static bool HasLastPatch()
+        {
+            try { return LoadJournal(JournalPath).Any(e => e.Completed); }
+            catch { return false; }
+        }
+
+        public static List<RecoveryEntry> EntriesFrom(IEnumerable<FileWriteRecord> writes)
+        {
+            var list = new List<RecoveryEntry>();
+            if (writes == null) return list;
+            foreach (var w in writes)
+                list.Add(new RecoveryEntry
+                {
+                    Destination = w.Destination,
+                    RecoveryPath = w.RecoveryPath,
+                    PreviousHash = w.PreviousHash,
+                    StagedHash = w.StagedHash,
+                    Area = w.Area,
+                    Completed = w.Completed,
+                });
+            return list;
+        }
+
+        // ------------------------------------------------------------------ journal file
+
+        public static List<RecoveryEntry> LoadJournal(string path)
+        {
+            var list = new List<RecoveryEntry>();
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return list;
+                RecoveryEntry cur = null;
+                foreach (var raw in File.ReadAllLines(path))
+                {
+                    string line = raw.TrimEnd();
+                    if (line.Length == 0) continue;
+                    if (line == "--")
+                    {
+                        if (cur != null) list.Add(cur);
+                        cur = null;
+                        continue;
+                    }
+                    int i = line.IndexOf('=');
+                    if (i <= 0) continue;
+                    string k = line.Substring(0, i);
+                    string v = line.Substring(i + 1);
+                    if (k == "destination") { cur = new RecoveryEntry(); cur.Destination = v; continue; }
+                    if (cur == null) continue;
+                    switch (k)
+                    {
+                        case "recovery": cur.RecoveryPath = v; break;
+                        case "previous-sha256": cur.PreviousHash = v; break;
+                        case "staged-sha256": cur.StagedHash = v; break;
+                        case "area": cur.Area = v; break;
+                        case "state": cur.Completed = v == "completed"; break;
+                    }
+                }
+                if (cur != null) list.Add(cur);
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>Records the finished run so "Undo last patch" survives a restart. The previous
+        /// run's staging areas are pruned first, which bounds the litter to one run's worth.</summary>
+        public static void SaveJournal(IEnumerable<FileWriteRecord> writes, bool success)
+        {
+            try
+            {
+                var entries = EntriesFrom(writes);
+                PruneAreas(LoadJournal(JournalPath));
+                Directory.CreateDirectory(Path.GetDirectoryName(JournalPath));
+
+                var sb = new StringBuilder();
+                sb.AppendLine("patch=" + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                sb.AppendLine("success=" + (success ? "1" : "0"));
+                sb.AppendLine("count=" + entries.Count.ToString(CultureInfo.InvariantCulture));
+                foreach (var e in entries)
+                {
+                    sb.AppendLine("destination=" + e.Destination);
+                    sb.AppendLine("recovery=" + e.RecoveryPath);
+                    sb.AppendLine("previous-sha256=" + e.PreviousHash);
+                    sb.AppendLine("staged-sha256=" + e.StagedHash);
+                    sb.AppendLine("area=" + e.Area);
+                    sb.AppendLine("state=" + (e.Completed ? "completed" : "prepared"));
+                    sb.AppendLine("--");
+                }
+
+                string tmp = JournalPath + ".tmp";
+                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
+                File.Copy(tmp, JournalPath, true);
+                File.Delete(tmp);
+            }
+            catch { /* the undo journal is a convenience; never fail a patch over it */ }
+        }
+
+        public static void ClearLastPatch()
+        {
+            try { if (File.Exists(JournalPath)) File.Delete(JournalPath); } catch { }
+        }
+
+        // ------------------------------------------------------------------ rollback
+
+        public static RecoveryReport RollbackWrites(IEnumerable<FileWriteRecord> writes, Action<LogLevel, string> log)
+        {
+            return Rollback(EntriesFrom(writes), log);
+        }
+
+        public static RecoveryReport RollbackLastPatch(Action<LogLevel, string> log)
+        {
+            return Rollback(LoadJournal(JournalPath), log);
+        }
+
+        /// <summary>Undoes the given records newest-first. A destination that no longer matches what
+        /// the patch wrote is left alone rather than clobbered, so a file the user edited after
+        /// patching is never silently overwritten.</summary>
+        public static RecoveryReport Rollback(IEnumerable<RecoveryEntry> entries, Action<LogLevel, string> log)
+        {
+            var report = new RecoveryReport();
+            var list = new List<RecoveryEntry>(entries ?? new RecoveryEntry[0]);
+            list.Reverse();
+            foreach (var e in list)
+            {
+                if (!e.Completed) { report.Skipped++; continue; }
+                try
+                {
+                    bool exists = e.Destination.Length != 0 && File.Exists(e.Destination);
+
+                    if (exists)
+                    {
+                        string current = SafePersistence.Hash(e.Destination);
+                        if (current == e.PreviousHash) { report.Skipped++; continue; }   // already back
+                        if (e.StagedHash.Length != 0 && current != e.StagedHash)
+                        {
+                            report.Skipped++;
+                            report.Messages.Add(Path.GetFileName(e.Destination) + " changed after the patch – left it alone.");
+                            Say(log, LogLevel.Warn, "Not undoing " + Path.GetFileName(e.Destination) + " – it was modified after the patch.");
+                            continue;
+                        }
+                    }
+                    else if (e.PreviousHash == "absent") { report.Skipped++; continue; }
+
+                    if (e.PreviousHash == "absent")
+                    {
+                        File.Delete(e.Destination);
+                        report.Deleted++;
+                        Say(log, LogLevel.Ok, "Removed " + Path.GetFileName(e.Destination));
+                        continue;
+                    }
+
+                    if (!File.Exists(e.RecoveryPath))
+                    {
+                        report.Failed++;
+                        report.Messages.Add("Cannot restore " + Path.GetFileName(e.Destination) + " – its recovery copy is missing.");
+                        continue;
+                    }
+                    if (SafePersistence.Hash(e.RecoveryPath) != e.PreviousHash)
+                    {
+                        report.Failed++;
+                        report.Messages.Add("Cannot restore " + Path.GetFileName(e.Destination) + " – the recovery copy no longer matches its recorded hash.");
+                        continue;
+                    }
+
+                    RestoreFrom(e);
+                    report.Restored++;
+                    Say(log, LogLevel.Ok, "Restored " + Path.GetFileName(e.Destination));
+                }
+                catch (Exception ex)
+                {
+                    report.Failed++;
+                    report.Messages.Add("Could not undo " + Path.GetFileName(e.Destination) + ": " + ex.Message);
+                    Say(log, LogLevel.Warn, "Could not undo " + Path.GetFileName(e.Destination) + ": " + ex.Message);
+                }
+            }
+            return report;
+        }
+
+        static void Say(Action<LogLevel, string> log, LogLevel level, string message)
+        {
+            if (log != null) log(level, message);
+        }
+
+        /// <summary>Copies the recovery content over the destination through a temp file in the same
+        /// directory, so the swap stays on one volume and is verified before it replaces anything.</summary>
+        static void RestoreFrom(RecoveryEntry e)
+        {
+            string dir = Path.GetDirectoryName(e.Destination);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            string tmp = e.Destination + ".undo-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            try
+            {
+                File.Copy(e.RecoveryPath, tmp, true);
+                if (SafePersistence.Hash(tmp) != e.PreviousHash)
+                    throw new IOException("Undo copy failed hash verification.");
+                if (File.Exists(e.Destination)) File.Replace(tmp, e.Destination, null);
+                else File.Move(tmp, e.Destination);
+            }
+            finally
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
+        }
+
+        // ------------------------------------------------------------------ garbage collection
+
+        /// <summary>Deletes the scratch half of a finished run: the per-write journals are superseded
+        /// by the consolidated undo journal, and any leftover staging file is dead. The recovery copies
+        /// stay, because "Undo last patch" needs them.</summary>
+        public static void CollectStaging(IEnumerable<FileWriteRecord> writes)
+        {
+            foreach (var area in AreasOf(writes))
+            {
+                try
+                {
+                    foreach (var f in Directory.GetFiles(area, "*.journal.txt")) TryDelete(f);
+                    foreach (var f in Directory.GetFiles(area, "*.staged-*")) TryDelete(f);
+                    if (Directory.GetFileSystemEntries(area).Length == 0) Directory.Delete(area);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Removes a run's staging areas outright. Used once a rollback has already put
+        /// everything back and there is nothing left to undo.</summary>
+        public static void Discard(IEnumerable<FileWriteRecord> writes)
+        {
+            foreach (var area in AreasOf(writes))
+            {
+                try { if (Directory.Exists(area)) Directory.Delete(area, true); } catch { }
+            }
+        }
+
+        static IEnumerable<string> AreasOf(IEnumerable<FileWriteRecord> writes)
+        {
+            var result = new List<string>();
+            if (writes == null) return result;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var w in writes)
+            {
+                string area = w.Area;
+                if (area.Length != 0 && seen.Add(area)) result.Add(area);
+            }
+            return result;
+        }
+
+        static void PruneAreas(IEnumerable<RecoveryEntry> previous)
+        {
+            if (previous == null) return;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in previous)
+            {
+                if (!e.Completed || e.Area.Length == 0 || !seen.Add(e.Area)) continue;
+                try { if (Directory.Exists(e.Area)) Directory.Delete(e.Area, true); } catch { }
+            }
+        }
+
+        static void TryDelete(string path)
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
     public class PatchOptions
     {
         public string GameExe = "";
@@ -444,6 +816,11 @@ namespace Gp
         public bool NeedsAdmin;
         public bool Cancelled;
         public bool PartialChanges;
+
+        /// <summary>True when a failed or cancelled run had its already-applied writes undone, so the
+        /// game is back to its previous state.</summary>
+        public bool RolledBack;
+
         public List<FileWriteRecord> Writes = new List<FileWriteRecord>();
         public SettingsOutcome Settings = new SettingsOutcome();
     }
@@ -869,11 +1246,48 @@ namespace Gp
                 Log(LogLevel.Error, "✖ " + ex.Message);
             }
             res.PartialChanges = !res.Success && res.Writes.Any(w => w.Completed);
-            if (!res.Success && res.Writes.Count != 0)
+
+            // ---- undo a half-applied patch -------------------------------------
+            // A run that dies between two writes can leave a game that no longer launches. The journal
+            // already holds everything needed to put it back, so use it instead of telling the user to
+            // sort the recovery folders out by hand.
+            if (res.PartialChanges && o.Backup)
             {
-                res.Summary += res.PartialChanges ? " Partial changes remain; no automatic rollback was attempted." : " No destination writes completed.";
-                res.Summary += " Recovery records: " + string.Join(", ", res.Writes.Select(w => w.JournalPath).Distinct());
-                Log(LogLevel.Warn, res.Summary);
+                Log(LogLevel.Warn, "Patch did not finish – undoing the "
+                    + res.Writes.Count(w => w.Completed) + " change(s) that were already applied…");
+                var undo = Recovery.RollbackWrites(res.Writes, Log);
+                if (undo.Failed == 0)
+                {
+                    res.PartialChanges = false;
+                    res.RolledBack = true;
+                    res.Summary += " Already-applied changes were rolled back: " + undo.Summary;
+                    Log(LogLevel.Ok, "Undo complete – " + undo.Summary + " The game is back to its previous state.");
+                    Recovery.Discard(res.Writes);
+                    // Deliberately no ClearLastPatch here: the journal on disk still describes the
+                    // previous *successful* patch, whose recovery copies this run never touched.
+                }
+                else
+                {
+                    res.Summary += " Undo incomplete: " + undo.Summary;
+                    Log(LogLevel.Error, "Undo incomplete – " + undo.Summary
+                        + " The files that could not be reverted are listed below.");
+                    foreach (var m in undo.Messages) Log(LogLevel.Warn, "   " + m);
+                    Recovery.SaveJournal(res.Writes, false);   // keep the record so undo can be retried
+                }
+            }
+            else if (!res.Success && res.Writes.Count != 0)
+            {
+                res.Summary += res.PartialChanges
+                    ? " Partial changes remain (backups are off, so nothing was rolled back)."
+                    : " No destination writes completed.";
+            }
+
+            // ---- keep an undo record for the last good patch --------------------
+            if (res.Success && res.Writes.Count != 0)
+            {
+                Recovery.SaveJournal(res.Writes, true);
+                Recovery.CollectStaging(res.Writes);
+                Log(LogLevel.Dim, "Undo record saved – 'Undo last patch' can revert this run.");
             }
             return res;
         }
@@ -986,7 +1400,10 @@ namespace Gp
                 try
                 {
                     ct.ThrowIfCancellationRequested();
-                    outputs.CopyAndDelete(outPath, res.Writes, inputHash);
+                    // origBackup already holds a hash-verified copy of the packed exe, so the write
+                    // reuses it as the recovery source instead of storing a second copy of a file
+                    // that can be hundreds of megabytes.
+                    outputs.CopyAndDelete(outPath, res.Writes, inputHash, origBackup);
                 }
                 catch (IOException ex)
                 {
@@ -1677,7 +2094,7 @@ namespace Gp
         public bool LookupAppId = true;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher"); } }
+        static string Dir { get { return AppPaths.StateDir; } }
         static string File0 { get { return Path.Combine(Dir, "settings.ini"); } }
 
         public static AppSettings Load()
@@ -1732,7 +2149,11 @@ namespace Gp
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + EscKey(kv.Key) + "=" + kv.Value);
-                SafePersistence.WriteText(File0, sb.ToString());
+                var record = SafePersistence.WriteText(File0, sb.ToString());
+                // settings.ini is tiny and fully regenerable, so it needs no undo record. Without this
+                // the staging area (and a copy of the previous settings) leaks on every save – which
+                // happens on every game selection and every batch item.
+                Recovery.Discard(new[] { record });
                 return true;
             }
             catch (Exception ex)

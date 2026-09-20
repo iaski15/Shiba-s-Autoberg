@@ -655,6 +655,17 @@ namespace Gp
                     autoTimerTask = AutoPatchAsync();
                 }
             }
+
+            // The undo journal lives outside the game folder, so a patch from an earlier session can
+            // still be reverted. Skip the offer in headless auto mode so CLI runs stay unattended.
+            if (!startup.Auto && Recovery.HasLastPatch())
+            {
+                lastActions = new[] { "Undo patch" };
+                banner.Show(Banner.BannerKind.Warn,
+                    "A previous patch can still be undone.\nChoose 'Undo patch' to restore the files it replaced.", lastActions);
+                ShowBannerLayout(true);
+                statusBar.Set("The last patch can be undone", Ui.WarnC);
+            }
         }
 
         Task AutoPatchAsync()
@@ -978,6 +989,7 @@ namespace Gp
                 progress.SetValue(100);
                 var actions = new List<string> { "Open folder" };
                 if (!string.IsNullOrEmpty(res.FinalExe) && File.Exists(res.FinalExe)) actions.Add("Play game");
+                if (Recovery.HasLastPatch()) actions.Add("Undo patch");
                 lastActions = actions.ToArray();
                 banner.Show(Banner.BannerKind.Success, res.Summary, lastActions);
                 ShowBannerLayout(true);
@@ -989,15 +1001,19 @@ namespace Gp
                 lastActions = new string[0];
                 banner.Show(Banner.BannerKind.Warn, res.Summary + "\nSee the log below for details.", new string[0]);
                 ShowBannerLayout(true);
-                statusBar.Set(res.PartialChanges ? "Cancelled – partial changes remain" : "Cancelled", Ui.WarnC);
+                statusBar.Set(res.PartialChanges ? "Cancelled – partial changes remain"
+                    : res.RolledBack ? "Cancelled – changes undone" : "Cancelled", Ui.WarnC);
             }
             else
             {
                 progress.SetValue(0);
-                lastActions = res.NeedsAdmin ? new[] { "Retry as admin" } : new string[0];
+                var failedActions = new List<string>();
+                if (res.NeedsAdmin) failedActions.Add("Retry as admin");
+                if (Recovery.HasLastPatch()) failedActions.Add("Undo patch");
+                lastActions = failedActions.ToArray();
                 banner.Show(Banner.BannerKind.Error, res.Summary + "\nSee the log below for details.", lastActions);
                 ShowBannerLayout(true);
-                statusBar.Set("Failed", Ui.ErrC);
+                statusBar.Set(res.RolledBack ? "Failed – changes undone" : "Failed", Ui.ErrC);
             }
 
             if (startup.ExitWhenDone)
@@ -1052,6 +1068,94 @@ namespace Gp
                     }
                     catch { }
                     break;
+                case "Undo patch":
+                    StartUndo();
+                    break;
+            }
+        }
+
+        // ---------------------------------------------------------- undo last patch
+
+        /// <summary>Replays the persisted undo journal so the game goes back to how it was before the
+        /// last patch. Runs off the UI thread; the log lines are collected and flushed in one go.</summary>
+        void StartUndo()
+        {
+            if (running || closing || IsDisposed) return;
+            if (!Recovery.HasLastPatch())
+            {
+                statusBar.Set("There is nothing to undo", Ui.MutedC);
+                return;
+            }
+
+            running = true;
+            banner.HideBanner();
+            ShowBannerLayout(false);
+            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
+            progress.SetValue(10);
+            statusBar.Pulse = true;
+            statusBar.Set("Undoing the last patch…", Ui.WarnC);
+
+            Task.Run(delegate
+            {
+                var lines = new List<PatchLogEntry>();
+                Action<LogLevel, string> sink = delegate(LogLevel level, string message)
+                {
+                    lines.Add(new PatchLogEntry { Time = DateTime.Now, Level = level, Message = message });
+                };
+                RecoveryReport report;
+                try
+                {
+                    report = Recovery.RollbackLastPatch(sink);
+                    // Keep the journal when part of the undo failed, so it can be retried.
+                    if (report.Failed == 0) Recovery.ClearLastPatch();
+                }
+                catch (Exception ex)
+                {
+                    report = new RecoveryReport();
+                    report.Failed++;
+                    report.Messages.Add(ex.Message);
+                }
+                lines.Add(new PatchLogEntry
+                {
+                    Time = DateTime.Now,
+                    Level = report.Failed == 0 ? LogLevel.Ok : LogLevel.Warn,
+                    Message = "Undo finished: " + report.Summary
+                });
+                UiInvoke(delegate
+                {
+                    foreach (var line in lines) Log(line.Level, line.Message);
+                    OnUndoDone(report);
+                });
+            });
+        }
+
+        void OnUndoDone(RecoveryReport report)
+        {
+            running = false;
+            statusBar.Pulse = false;
+            progress.SetValue(0);
+            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = !closing;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = !closing;
+            appIdBox.Enabled = !closing && !tOnlineFix.Checked;
+            lastActions = new string[0];
+
+            if (report.Failed == 0 && report.ChangedAnything)
+            {
+                banner.Show(Banner.BannerKind.Success,
+                    "Undone – " + report.Summary + "\nThe game is back to its previous state.", new string[0]);
+                ShowBannerLayout(true);
+                statusBar.Set("Undone – " + report.Summary, Ui.OkC);
+            }
+            else
+            {
+                string detail = report.Messages.Count > 0 ? "\n" + string.Join("\n", report.Messages.ToArray()) : "";
+                // A partial undo keeps its journal, so offer to retry rather than leaving a dead end.
+                lastActions = report.Failed > 0 && Recovery.HasLastPatch() ? new[] { "Undo patch" } : new string[0];
+                banner.Show(report.Failed > 0 ? Banner.BannerKind.Error : Banner.BannerKind.Warn,
+                    "Undo finished: " + report.Summary + detail, lastActions);
+                ShowBannerLayout(true);
+                statusBar.Set("Undo finished – " + report.Summary, report.Failed > 0 ? Ui.ErrC : Ui.WarnC);
             }
         }
 

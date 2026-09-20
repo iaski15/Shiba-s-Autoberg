@@ -56,6 +56,14 @@ branches in `PatchRunner.Run` when `Backup` is on, and expose a "Undo last patch
 persisted journal. The `_selftest` already asserts the journal format (`TestMain.cs:433-436`) so the contract
 is testable.
 
+> **Fixed.** `Recovery.Rollback` replays the records newest-first, verifying the recovery copy against
+> `previous-sha256` before it replaces anything, and *refusing* to touch a destination whose current hash no
+> longer matches `staged-sha256` (so a file the user edited after patching is never clobbered — the risk
+> register's scenario). `PatchRunner.Run` calls it whenever a run ends with completed writes and `Backup` is
+> on, cancellation included. The journal is mirrored to `%APPDATA%\GoldbergPatcher\last-patch\journal.txt`, and
+> the banner offers **Undo patch** after a patch *and* on startup, so the undo survives a restart. The
+> self-test grew a `[rollback]` section covering all of the above.
+
 ### 2. Every write permanently litters the target folder with `.gp-recovery` trees
 
 `SafePersistence.Write` (`Core.cs:207-217`) creates, for **every single file it touches**:
@@ -82,6 +90,13 @@ garbage at a much higher rate.
 (keep it only on failure). Add a startup sweep that removes `.gp-recovery` folders whose journal says
 `state=completed` and are older than N days, and prune `%APPDATA%\GoldbergPatcher\` on the same rule.
 
+> **Fixed.** On success the staging files and the per-write journals are dropped (`Recovery.CollectStaging`) —
+> they are superseded by the consolidated undo journal — while the `.previous` copies stay, because "Undo
+> last patch" needs them. Growth is bounded to **one run's worth** instead of unbounded: `Recovery.SaveJournal`
+> prunes the previous run's areas as it records the new one. `AppSettings.Save` no longer leaks at all — it
+> discards its staging area immediately, since a regenerable settings file needs no undo record.
+> Not done: the time-based sweep for folders orphaned by a crash before the journal was written.
+
 ### 3. The original game exe is stored twice on every unpack
 
 `TryUnpack` (`Core.cs:985-989`) backs the exe up via `OriginalBackups.Preserve` into
@@ -95,6 +110,13 @@ the old file as `recovery`. Two full copies of a multi-hundred-MB executable.
 **Fix:** pass a flag through `SafePersistence.Copy` to suppress the recovery copy when the caller has already
 preserved the original (or when `Backup` is off). Better: reuse the `goldberg_backup` copy as the recovery
 source and skip the second copy entirely.
+
+> **Fixed, by the second route.** `SafePersistence.Write`/`Copy`/`WriteText` take an optional
+> `externalRecovery`. When the caller already holds a verified original — `TryUnpack` passes the
+> `goldberg_backup` path — no copy is taken into the staging area and the replace runs as
+> `File.Replace(staged, path, null)`. The journal records that external path as `recovery=`, so rollback
+> restores from it. The replace is ordered so an external recovery source can never be handed to
+> `File.Replace` as its *backup* argument, which would have overwritten the verified original.
 
 ### 4. "Self-contained exe" requires a writable application directory
 
@@ -513,7 +535,7 @@ narrower than the API's documented behaviour.
 
 | Order | Items | Rationale |
 | --- | --- | --- |
-| 1 | #1, #2, #3 | Data safety and disk hygiene; all three live in `SafePersistence` and can be done together |
+| 1 | #1, #2, #3 — **done** | Data safety and disk hygiene; all three live in `SafePersistence` and can be done together |
 | 2 | #21, #20 | Largest user-visible win per line changed (8.4 MB exe, faster start) |
 | 3 | #5, #6, #10 | Correctness of the core value proposition (dll placement, unpack detection) |
 | 4 | #11 | Unblocks anyone on a HiDPI display |

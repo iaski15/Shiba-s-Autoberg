@@ -368,6 +368,28 @@ once you are rebuilding PE images yourself, a failed patch is much likelier to l
 Do this **before** §5 ships to anyone but you. An in-process unpacker writing a bad image with no rollback is
 worse than a child process writing a good one.
 
+> **Status: done.** All four items landed together.
+>
+> 1. `Recovery.Rollback` replays records newest-first, verifies the recovery copy against `previous-sha256`,
+>    and restores or deletes. It refuses to touch a destination whose current hash no longer matches
+>    `staged-sha256` — the risk register's "rollback restores a file the user has since modified" case.
+> 2. `PatchRunner.Run` calls it whenever a run ends with completed writes and `Backup` is on. This includes
+>    **cancellation**, not just exceptions: a cancelled patch used to leave the game half-patched too.
+> 3. The journal is mirrored to `%APPDATA%\GoldbergPatcher\last-patch\journal.txt` via the new
+>    `AppPaths.StateDir`, and the banner offers **Undo patch** after a patch and on startup — so it survives a
+>    restart as intended. A partial undo keeps its journal and re-offers the action instead of dead-ending.
+> 4. Success drops the staging files and per-write journals and keeps only the `.previous` copies, which are
+>    pruned when the next run records its own journal. Litter is bounded to one run, not unbounded. The exe is
+>    no longer stored twice: `Write` takes an `externalRecovery` and reuses the `goldberg_backup` original.
+>    `AppSettings.Save` discards its staging area outright.
+>
+> One deliberate deviation from the literal plan: §10.4 says "garbage-collect `.gp-recovery` on success",
+> but deleting the recovery copies on success would make §10.3's undo-after-restart impossible. The scratch
+> half is collected on success; the recovery copies are kept for exactly one run.
+>
+> Left undone: the time-based sweep for areas orphaned by a crash between the last write and the journal
+> write. `Recovery.CollectStaging`/`PruneAreas` are the hooks if you want it.
+
 ---
 
 ## 11. Phase 8 — Test matrix & CI
@@ -423,7 +445,7 @@ hunt in `build.ps1` is the main reason there is no CI today — §9.1 removes it
 | # | Phase | Depends on | Rough size |
 | --- | --- | --- | --- |
 | 0 | §1.1 write `docs/PERMISSIONS.md` + `THIRD-PARTY-NOTICES.md` | — | trivial — do it first |
-| 1 | §10 rollback + journal GC | — | medium — independent, and the highest-value fix in the repo |
+| 1 | §10 rollback + journal GC — **done** | — | medium — independent, and the highest-value fix in the repo |
 | 2 | §9.2 payload compression | — | small — biggest visible win per line changed |
 | 3 | §4 vendor the Steamless fork, build it | 0 | small |
 | 4 | §5 in-process unpacking | 1, 3 | **medium — the main event** |
@@ -437,6 +459,15 @@ hunt in `build.ps1` is the main reason there is no CI today — §9.1 removes it
 
 Steps 1, 2 and 3 are independent and deliver value immediately. Step 4 is where the project actually lives
 or dies — do not start it before step 1 is done.
+
+**Correction to the sequencing above.** Read as a dependency graph, the table has **two co-critical chains,
+each three edges long**: §1.1→§4→§5→§9.3 and §9.2→§9.1→§7.3→§9.3. Step 4 (§5) is the highest-*risk* step,
+but it is not uniquely on the critical path — the other chain runs entirely through the .NET 8 port. Genuine
+slack: §10 (now done), §7.1, §8 and §11 can each slip without delaying the end. Only §9.3 is downstream of
+both chains, which makes it the real convergence point.
+
+`optimizations.md`'s own order-of-work table also omits four items entirely — **#7** (a P0 *and* a hard
+prerequisite for §9.1), **#22**, **#23** and **#24**. They belong in a row of their own.
 
 ---
 
