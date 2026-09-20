@@ -93,5 +93,10 @@ Write-Host "--- last_run.log tail (written by GUI runs only - --batch logs to th
 $logFile = Join-Path $stateDir 'last_run.log'
 if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Tail 6 | ForEach-Object { Write-Host $_ } }
 
-if ($failures.Count -eq 0) { Remove-Item -LiteralPath $live -Recurse -Force -ErrorAction SilentlyContinue }
+if ($failures.Count -eq 0) {
+    # Leave no trace: the run left an undo journal pointing at this throwaway game, and the app would
+    # otherwise offer to "undo" a patch whose files are already gone.
+    Remove-Item -LiteralPath $live -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue
+}
 exit $failures.Count
