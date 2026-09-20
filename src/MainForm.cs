@@ -69,6 +69,50 @@ namespace Gp
         static extern bool SetProcessDpiAwarenessContext(IntPtr value);
         [DllImport("user32.dll")]
         static extern bool SetProcessDPIAware();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool AttachConsole(uint processId);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr GetStdHandle(int stdHandle);
+
+        const uint AttachParentProcess = 0xFFFFFFFF;
+        const int StdOutputHandle = -11;
+        const int StdErrorHandle = -12;
+
+        /// <summary>The app is built /target:winexe, so when a shell starts it the process has no console
+        /// of its own and every Console.WriteLine from the documented CLI modes is discarded - the batch
+        /// engine was effectively undebuggable from a command line. Attach to the parent's console and
+        /// reopen the streams. Handles that the parent already redirected (a pipe) are valid and are left
+        /// exactly as they are, so piping the output keeps working.</summary>
+        static void AttachParentConsole()
+        {
+            try
+            {
+                IntPtr stdout = GetStdHandle(StdOutputHandle);
+                IntPtr stderr = GetStdHandle(StdErrorHandle);
+                bool stdoutValid = stdout != IntPtr.Zero && stdout != (IntPtr)(-1);
+                bool stderrValid = stderr != IntPtr.Zero && stderr != (IntPtr)(-1);
+                if (stdoutValid && stderrValid) return;
+                if (!AttachConsole(AttachParentProcess)) return;
+                if (!stdoutValid)
+                    Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+                if (!stderrValid)
+                    Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+            }
+            catch { }
+        }
+
+        /// <summary>Appends a crash to errors.log with the full stack. Used by every unhandled-exception
+        /// path so a failure off the UI thread leaves a trace instead of vanishing.</summary>
+        internal static void LogFatal(string context, Exception ex)
+        {
+            try
+            {
+                Directory.CreateDirectory(AppPaths.StateDir);
+                File.AppendAllText(Path.Combine(AppPaths.StateDir, "errors.log"),
+                    DateTime.Now + "  [" + context + "]" + Environment.NewLine + ex + Environment.NewLine + Environment.NewLine);
+            }
+            catch { }
+        }
 
         [STAThread]
         static void Main(string[] args)
@@ -76,6 +120,9 @@ namespace Gp
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
             Ui.InitializeScale();
+
+            // Any of the CLI modes may be run from a shell that gave this process no console.
+            if (args != null && args.Length > 0) AttachParentConsole();
 
             StartupArgs sa;
             try { sa = StartupArgs.Parse(args); }
@@ -114,15 +161,20 @@ namespace Gp
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += (s, e) =>
             {
-                try
-                {
-                    var dir = AppPaths.StateDir;
-                    Directory.CreateDirectory(dir);
-                    File.AppendAllText(Path.Combine(dir, "errors.log"),
-                        DateTime.Now + "\n" + e.Exception + "\n\n");
-                }
-                catch { }
+                LogFatal("UI thread", e.Exception);
                 MessageBox.Show(e.Exception.Message, "Goldberg Patcher – unexpected error");
+            };
+            // Without these two, an exception on a background thread or an unobserved task fault kills the
+            // process with no errors.log entry and no message at all - the batch and scan paths both run
+            // off the UI thread, so this is reachable in normal use.
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                LogFatal("AppDomain (terminating)", e.ExceptionObject as Exception);
+            };
+            TaskScheduler.UnobservedTaskException += (s, e) =>
+            {
+                LogFatal("Unobserved task", e.Exception);
+                e.SetObserved();
             };
             Application.Run(new MainForm(sa));
         }
@@ -156,8 +208,7 @@ namespace Gp
                 errors.AddRange(Tools.Missing());
                 message = errors.Count > 0 ? "Payload initialization failed: " + string.Join("; ", errors)
                     : "Payload verified: " + Payload.Count + " bundled files, " + restored + " restored"
-                      + (Payload.LastPassHashed ? " (hashed)." : " (cached).");
-                return errors.Count == 0;
+                      + (Payload.LastPassHashed ? " (hashed)." : " (cached).");                return errors.Count == 0;
             }
             catch (Exception ex) { message = "Payload initialization failed: " + ex.Message; return false; }
         }

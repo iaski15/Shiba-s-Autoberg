@@ -83,32 +83,40 @@ Test-Artifact 'recovery copy retained for undo' ($previous.Count -ge 1) ("found 
 
 # ---------------------------------------------------------------- compressed payload
 
-# The payload is deflated at build time, so a repair has to inflate it back correctly. This file is small
-# and compresses well, which makes it a fast stand-in for the multi-megabyte emulator dlls.
-$payloadFile = Join-Path $PSScriptRoot 'steamless\Plugins\Steamless.API.dll'
-$payloadHash = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash
+# The payload is deflated at build time, so a repair has to inflate it back correctly. It also lives in
+# %LOCALAPPDATA% rather than beside the exe (optimizations #4) and is scoped by payload build id, so find
+# the newest extracted tree instead of assuming a path.
+$payloadBase = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'GoldbergPatcher\payload'
+$payloadDir = Get-ChildItem -LiteralPath $payloadBase -Directory -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$payloadFile = if ($payloadDir) { Join-Path $payloadDir.FullName 'steamless\Plugins\Steamless.API.dll' } else { '' }
+$payloadPresent = ($payloadFile.Length -gt 0) -and (Test-Path -LiteralPath $payloadFile)
+Test-Artifact 'the payload was extracted under %LOCALAPPDATA%' $payloadPresent $payloadFile
 
 $verifyCode = Invoke-Patcher '--verify-payload'
 Test-Artifact '--verify-payload reports the bundled files intact' ($verifyCode -eq 0) ("exit " + $verifyCode)
 
-# Remove it so the app has to put it back. Some environments route Remove-Item through a guarded
-# recycle-bin path that can fail on files outside %TEMP%, so fall back to truncating it - which takes
-# the same repair branch in the app.
-$removed = $false
-try { Remove-Item -LiteralPath $payloadFile -Force -ErrorAction Stop; $removed = $true } catch { }
-if (-not $removed) { [IO.File]::WriteAllBytes($payloadFile, (New-Object byte[] 0)) }
-$null = Invoke-Patcher '--verify-payload'
-$restoredOk = (Test-Path -LiteralPath $payloadFile) -and ((Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash)
-Test-Artifact ('a ' + $(if ($removed) { 'deleted' } else { 'truncated' }) + ' payload file is inflated back byte-identical') $restoredOk $payloadFile
+if ($payloadPresent) {
+    $payloadHash = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash
 
-# Corrupt it in place without changing its length, then take the *normal* startup path (not
-# --verify-payload) so the size-and-timestamp cache is what has to notice.
-$bytes = [IO.File]::ReadAllBytes($payloadFile)
-$bytes[1000] = [byte]($bytes[1000] -bxor 0xFF)
-[IO.File]::WriteAllBytes($payloadFile, $bytes)
-$null = Invoke-Patcher $batchArgs
-$repairedOk = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash
-Test-Artifact 'a same-length corruption is detected and repaired on the normal path' $repairedOk $payloadFile
+    # Remove it so the app has to put it back. Some environments route Remove-Item through a guarded
+    # recycle-bin path that can fail, so fall back to truncating it - the same repair branch in the app.
+    $removed = $false
+    try { Remove-Item -LiteralPath $payloadFile -Force -ErrorAction Stop; $removed = $true } catch { }
+    if (-not $removed) { [IO.File]::WriteAllBytes($payloadFile, (New-Object byte[] 0)) }
+    $null = Invoke-Patcher '--verify-payload'
+    $restoredOk = (Test-Path -LiteralPath $payloadFile) -and ((Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash)
+    Test-Artifact ('a ' + $(if ($removed) { 'deleted' } else { 'truncated' }) + ' payload file is inflated back byte-identical') $restoredOk $payloadFile
+
+    # Corrupt it in place without changing its length, then take the *normal* startup path (not
+    # --verify-payload) so the size-and-timestamp cache is what has to notice.
+    $bytes = [IO.File]::ReadAllBytes($payloadFile)
+    $bytes[1000] = [byte]($bytes[1000] -bxor 0xFF)
+    [IO.File]::WriteAllBytes($payloadFile, $bytes)
+    $null = Invoke-Patcher $batchArgs
+    $repairedOk = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash
+    Test-Artifact 'a same-length corruption is detected and repaired on the normal path' $repairedOk $payloadFile
+}
 
 Write-Host ""
 if ($failures.Count -eq 0) {

@@ -144,6 +144,18 @@ So running `Goldberg Patcher.exe` from `C:\Program Files\`, a read-only share, a
 This also fixes the stale-payload problem: a file removed from the manifest in a newer build currently
 stays on disk forever, and Steamless will keep loading the stale plugin.
 
+> **Fixed.** `Payload.Root` is `%LOCALAPPDATA%\GoldbergPatcher\payload\<manifest hash>` and `Tools.BaseDir`
+> now returns it, so every derived tool path follows. Two deliberate details: it is **Local**, not Roaming —
+> this is tens of megabytes of cache and has no business travelling in a roaming profile; and it is scoped
+> by the manifest's own hash, so a file dropped from the manifest in a newer build cannot linger and be
+> loaded as a stale plugin. That is the second half of this item, fixed by construction rather than by a
+> cleanup pass. If the folder cannot be created it falls back to the application directory, and a binary
+> with no embedded payload (the self-test host) keeps looking beside itself, which is where its tool files
+> actually are.
+>
+> `--verify-payload` now reports the extracted folder's contents, and the live test asserts the payload
+> lands under `%LOCALAPPDATA%` and still repairs itself there.
+
 ### 5. The installed dll name is chosen from the CPU architecture, not from what the exe imports
 
 `InstallGoldbergDlls` (`Core.cs:1138-1170`) picks `steam_api64.dll` vs `steam_api.dll` from `ExeArch` and
@@ -239,6 +251,12 @@ discarded. The documented batch engine is effectively un-debuggable from a shell
 
 **Fix:** call `AttachConsole(ATTACH_PARENT_PROCESS)` when `args.Length > 0` and reopen
 `Console.Out`/`Console.Error` on it. Or ship a small companion console exe.
+
+> **Fixed.** `AttachParentConsole` runs before argument parsing whenever any CLI flag is present, and
+> reopens the streams only for handles that are genuinely invalid. That guard matters: when the parent
+> redirected its handles — a pipe, which is how the test harness invokes it — they already work, and
+> blindly replacing them would have broken the case that was already fine. Verified both ways:
+> `--verify-payload` and the argument-error path both print through a pipe and from a console.
 
 ### 9. Batch AppID detection rescans the whole install tree once per game
 
@@ -347,6 +365,16 @@ re-acquisition, or split into `LockedCore` (assumes held) and `Locked` (acquires
   silently
 
 **Fix:** register both, write to `errors.log` with a full stack trace, and show a non-blocking status.
+
+> **Fixed.** `AppDomain.CurrentDomain.UnhandledException` and `TaskScheduler.UnobservedTaskException` are
+> both wired to `Program.LogFatal`, which appends the full stack to `errors.log`. The existing
+> `Application.ThreadException` handler now goes through the same helper instead of duplicating the file
+> write. The task handler calls `SetObserved()` so a faulted batch item cannot escalate to a process kill on
+> finalisation. This is reachable in normal use: the batch engine and the AppID scan both run off the UI
+> thread.
+>
+> Not done: a non-blocking status indicator. A background crash is now *recorded*; the user still finds out
+> by looking at `errors.log` or by the affected operation failing.
 
 ### 15. `TryGenerateInterfaces` spawns a process with no output redirection
 
@@ -633,7 +661,7 @@ narrower than the API's documented behaviour.
 | 2 | #21, #20 — **done** | Largest user-visible win per line changed (8.4 MB exe, faster start) |
 | 3 | #5, #6, #10 — **done** | Correctness of the core value proposition (dll placement, unpack detection) |
 | 4 | #11 — **done** (arithmetic verified, appearance not) | Unblocks anyone on a HiDPI display |
-| 5 | #4, #8, #14 | Removes the "it just doesn't start" and "no output" failure classes |
+| 5 | #4, #8, #14 — **done** | Removes the "it just doesn't start" and "no output" failure classes |
 | 6 | #9, #17, #18, #19 | Performance, once correctness is settled |
 | 7 | #12, #13, #15, #16 | Robustness hardening |
 | 8 | #25–#43 | Cleanup, in any order |

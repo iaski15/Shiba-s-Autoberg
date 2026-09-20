@@ -1109,7 +1109,9 @@ namespace Gp
     /// <summary>Resolves bundled tool paths relative to this app's folder.</summary>
     public static class Tools
     {
-        public static string BaseDir { get { return AppDomain.CurrentDomain.BaseDirectory; } }
+        /// <summary>Root of the extracted payload. Everything below hangs off this, so pointing it at
+        /// %LOCALAPPDATA% is what lets the app run from a read-only application directory.</summary>
+        public static string BaseDir { get { return Payload.Root; } }
         public static string SteamlessCli { get { return Path.Combine(BaseDir, @"steamless\Steamless.CLI.exe"); } }
         public static string SteamlessDir { get { return Path.Combine(BaseDir, "steamless"); } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
@@ -1156,7 +1158,50 @@ namespace Gp
 
         /// <summary>Cache of a verified payload: records the manifest it was built from plus each file's
         /// size and write time. Next to the payload it describes, so it travels with the install.</summary>
-        static string StampPath { get { return Path.Combine(Tools.BaseDir, ".payload-ok"); } }
+        static string StampPath { get { return Path.Combine(Root, ".payload-ok"); } }
+
+        /// <summary>Identity of the embedded payload: the manifest's own hash. Extraction is scoped by it,
+        /// so a file dropped from the manifest in a newer build cannot linger from an older one.</summary>
+        public static string BuildId
+        {
+            get
+            {
+                string h = ManifestHash();
+                return h.Length >= 16 ? h.Substring(0, 16) : "unbuilt";
+            }
+        }
+
+        static string root;
+
+        /// <summary>Where the extracted payload lives. %LOCALAPPDATA% by preference, not the application
+        /// directory: a binary advertised as "one file is all you need" cannot demand a writable
+        /// application directory, and Program Files, a read-only share or an archive-mount path would
+        /// otherwise make the app refuse to start at all. Deliberately Local rather than Roaming - this is
+        /// tens of megabytes of cache and has no business being copied around by a roaming profile. Falls
+        /// back to the application directory only if that location cannot be created.</summary>
+        public static string Root
+        {
+            get
+            {
+                if (root != null) return root;
+                // A binary with no embedded payload - the self-test host is built without one - has nothing
+                // to extract, so it keeps looking beside itself where its tool files actually live.
+                if (Count == 0) { root = AppDomain.CurrentDomain.BaseDirectory; return root; }
+                try
+                {
+                    string preferred = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "GoldbergPatcher", "payload", BuildId);
+                    Directory.CreateDirectory(preferred);
+                    root = preferred;
+                }
+                catch
+                {
+                    root = AppDomain.CurrentDomain.BaseDirectory;
+                }
+                return root;
+            }
+        }
 
         sealed class Stamp { public long Length; public long Ticks; }
 
@@ -1248,7 +1293,7 @@ namespace Gp
                 sb.AppendLine("manifest=" + manifestHash);
                 foreach (var e in entries)
                 {
-                    var fi = new FileInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, e.Rel));
+                    var fi = new FileInfo(Path.Combine(Root, e.Rel));
                     if (!fi.Exists) continue;
                     sb.AppendLine(e.Rel + "|" + fi.Length.ToString(CultureInfo.InvariantCulture)
                         + "|" + fi.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture));
@@ -1292,7 +1337,7 @@ namespace Gp
             {
                 try
                 {
-                    string dst = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, e.Rel);
+                    string dst = Path.Combine(Root, e.Rel);
                     using (var src = asm.GetManifestResourceStream(e.Res))
                     {
                         if (src == null) { LastErrors.Add(e.Rel + ": embedded resource missing"); continue; }
