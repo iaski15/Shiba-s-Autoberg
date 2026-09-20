@@ -8,6 +8,21 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $src = Join-Path $root 'src'
 
+# DeflateStream, used to shrink the embedded payload.
+Add-Type -AssemblyName System.IO.Compression
+
+function Compress-File([string]$source, [string]$destination) {
+    # $input/$output are reserved automatic variables in PowerShell - do not use those names here.
+    $inStream = [IO.File]::OpenRead($source)
+    try {
+        $outStream = [IO.File]::Create($destination)
+        try {
+            $deflate = New-Object System.IO.Compression.DeflateStream($outStream, [System.IO.Compression.CompressionLevel]::Optimal)
+            try { $inStream.CopyTo($deflate) } finally { $deflate.Dispose() }
+        } finally { $outStream.Dispose() }
+    } finally { $inStream.Dispose() }
+}
+
 # ---- locate Roslyn csc ----
 $csc = $CompilerPath
 if (-not $csc) {
@@ -71,28 +86,52 @@ $pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'rele
 Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
 $payRes = @()
+$payTemp = @()
 $i = 0
+$rawTotal = 0
+$embeddedTotal = 0
 $manLines = @()
 foreach ($rel in $pay) {
     $full = Join-Path $root $rel
     if (-not (Test-Path -LiteralPath $full)) { throw "payload file missing: $rel" }
     $rn = 'gppay.{0:D4}' -f $i
-    # Third field is the SHA256 so Payload.ExtractMissing can repair same-size corrupted files.
+    # The manifest hash is always of the UNCOMPRESSED bytes, so verification logic is unchanged.
     $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
-    $manLines += "$rn|$rel|$hash"
-    $payRes += "/res:`"$full`",$rn"
+    $rawLen = (Get-Item -LiteralPath $full).Length
+
+    # Deflate to a scratch file and keep whichever is smaller - deflating a tiny file can make it bigger.
+    $tmp = Join-Path $env:TEMP ('gp_pay_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.bin')
+    Compress-File $full $tmp
+    $compLen = (Get-Item -LiteralPath $tmp).Length
+    if ($compLen -lt $rawLen) {
+        $embed = $tmp
+        $mode = 'deflate'
+        $payTemp += $tmp
+        $embeddedTotal += $compLen
+    } else {
+        Remove-Item -LiteralPath $tmp -Force
+        $embed = $full
+        $mode = 'raw'
+        $embeddedTotal += $rawLen
+    }
+    $rawTotal += $rawLen
+    # res|relative path|sha256 of the uncompressed bytes|uncompressed length|deflate|raw
+    $manLines += "$rn|$rel|$hash|$rawLen|$mode"
+    $payRes += "/res:`"$embed`",$rn"
     $i++
 }
 $manTmp = Join-Path $env:TEMP ('gp_manifest_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
 # UTF-8 without BOM – the old Ascii encoding would corrupt non-ASCII paths in the manifest.
 [IO.File]::WriteAllLines($manTmp, $manLines, (New-Object System.Text.UTF8Encoding($false)))
 $payRes += "/res:`"$manTmp`",gppay.manifest"
-Write-Host ("payload files: " + $i)
+Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTotal / 1MB, 2) + " MB (raw " + [math]::Round($rawTotal / 1MB, 2) + " MB)")
 
 # ---- main app (windowed, self-contained) ----
 try {
     Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
 } finally {
+    # The deflated payload copies are only needed while the compiler reads them.
+    foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
 }
 

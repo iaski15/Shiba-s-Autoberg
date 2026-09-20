@@ -342,6 +342,23 @@ the **uncompressed** bytes so verification logic is unchanged.
 
 Note the third row stops mattering once §5 lands — the Steamless CLI is no longer a payload file at all.
 
+> **Status: done, and better than predicted.** `build.ps1` deflates each payload file to a scratch copy and
+> embeds whichever of the two is smaller, so a file that does not compress is still stored raw. The manifest
+> grew to `res|path|sha256|uncompressedLength|deflate|raw`; the hash remains the hash of the **uncompressed**
+> bytes, so the verification logic is unchanged as this section requires.
+>
+> Measured: payload **21.65 MB → 7.37 MB**, exe **21.82 MB → 7.54 MB** (65%), against the ~8.4 MB predicted
+> above. The difference is the ~40 `steam_settings` files, which this estimate did not include — the
+> controller glyph PNGs compress well too.
+>
+> `Payload.ExtractCore` inflates and then validates both the inflated length and the manifest hash *before*
+> the file is allowed to replace anything, so a truncated or mis-inflated resource can never be written.
+> `--verify-payload` forces a full hash pass (exit 0 = intact, 1 = missing or corrupt).
+>
+> §9.2's companion item — #20, the launch-time hashing — turned out to be worth far less than the review
+> implied: hashing all 41.9 MB of payload takes **78 ms** on this machine. It is implemented (a `.payload-ok`
+> size-and-timestamp stamp, invalidated whenever the manifest changes) but the compression above is the win.
+
 ### 9.3 Shrink the payload itself
 
 - Drop `ExamplePlugin.dll` / `ExamplePlugin.zip` (`build.ps1:67`) — it is Steamless' sample plugin and should
@@ -449,7 +466,7 @@ hunt in `build.ps1` is the main reason there is no CI today — §9.1 removes it
 | --- | --- | --- | --- |
 | 0 | §1.1 write `docs/PERMISSIONS.md` + `THIRD-PARTY-NOTICES.md` | — | trivial — do it first |
 | 1 | §10 rollback + journal GC — **done** | — | medium — independent, and the highest-value fix in the repo |
-| 2 | §9.2 payload compression | — | small — biggest visible win per line changed |
+| 2 | §9.2 payload compression — **done** | — | small — biggest visible win per line changed |
 | 3 | §4 vendor the Steamless fork, build it | 0 | small |
 | 4 | §5 in-process unpacking | 1, 3 | **medium — the main event** |
 | 5 | §7.1 GSE from source | 0 | small |

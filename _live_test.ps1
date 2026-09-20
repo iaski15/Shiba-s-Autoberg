@@ -1,18 +1,42 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-# Live end-to-end check: patch a throwaway game in %TEMP% and verify the artifacts on disk.
+# Live end-to-end check: patch a throwaway game in %TEMP%, verify the artifacts on disk, then verify the
+# compressed payload can repair itself.
 #
 # Notes on why this is written the way it is:
 #  * The patcher is a /target:winexe app, so `& ".\Goldberg Patcher.exe"` returns immediately and never
-#    sets $LASTEXITCODE. Start-Process -Wait is the only reliable way to get its exit code.
+#    sets $LASTEXITCODE. Process.Start + WaitForExit is the only reliable way to get its exit code.
+#  * Process.Start is used rather than Start-Process, which rebuilds the environment into a
+#    case-insensitive dictionary and throws "Item has already been added" when the parent environment
+#    contains the same variable in two cases (e.g. both http_proxy and HTTP_PROXY).
 #  * --batch is used rather than the GUI flags (--exe/--appid/--auto) because the GUI path restores its
 #    options from settings.ini, so an online-fix setting left on would silently change what is tested.
 #    --batch pins OnlineFix=false and always exercises the dll replacement path.
 #  * $env:APPDATA is not guaranteed to be set, so the state directory is resolved through the shell API.
 
+$patcher = Join-Path $PSScriptRoot 'Goldberg Patcher.exe'
 $stateDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'GoldbergPatcher'
 $journal = Join-Path $stateDir 'last-patch\journal.txt'
+$failures = New-Object System.Collections.Generic.List[string]
+
+function Test-Artifact([string]$name, [bool]$ok, [string]$detail) {
+    if ($ok) { Write-Host ("  PASS  " + $name) }
+    else { Write-Host ("  FAIL  " + $name + "   -> " + $detail); $script:failures.Add($name) }
+}
+
+function Invoke-Patcher([string]$arguments) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $patcher
+    $psi.Arguments = $arguments
+    $psi.WorkingDirectory = $PSScriptRoot
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.WaitForExit()
+    return $proc.ExitCode
+}
+
+# ---------------------------------------------------------------- patch a throwaway game
 
 $live = Join-Path $env:TEMP 'gp_live'
 if (Test-Path -LiteralPath $live) { Remove-Item -LiteralPath $live -Recurse -Force }
@@ -23,38 +47,13 @@ Copy-Item -LiteralPath '.\steamless\Plugins\Steamless.Unpacker.Variant31.x86.dll
 $originalHash = (Get-FileHash -LiteralPath (Join-Path $game 'steam_api.dll') -Algorithm SHA256).Hash
 
 $exe = Join-Path $game 'hl2.exe'
+$batchArgs = '--batch "' + $exe + '|220"'
 Write-Host ("test game: " + $exe)
 
-$patcher = Join-Path $PSScriptRoot 'Goldberg Patcher.exe'
 $journalBefore = if (Test-Path -LiteralPath $journal) { (Get-Item -LiteralPath $journal).LastWriteTimeUtc } else { [DateTime]::MinValue }
-
-# Process.Start is used instead of Start-Process on purpose: Start-Process rebuilds the environment into
-# a case-insensitive dictionary and throws "Item has already been added" when the parent environment
-# contains the same variable in two cases (e.g. both http_proxy and HTTP_PROXY).
 $code = -1
-try {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $patcher
-    $psi.Arguments = '--batch "' + $exe + '|220"'
-    $psi.WorkingDirectory = $PSScriptRoot
-    $psi.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $proc.WaitForExit()
-    $code = $proc.ExitCode
-} catch {
-    Write-Host ("invocation failed: " + $_.Exception.GetType().Name + ": " + $_.Exception.Message)
-    $code = 99
-}
+try { $code = Invoke-Patcher $batchArgs } catch { Write-Host ("invocation failed: " + $_.Exception.Message); $code = 99 }
 Write-Host ("EXIT=" + $code)
-
-# ---------------------------------------------------------------- assertions
-$failures = New-Object System.Collections.Generic.List[string]
-
-function Test-Artifact([string]$name, [bool]$ok, [string]$detail) {
-    if ($ok) { Write-Host ("  PASS  " + $name) }
-    else { Write-Host ("  FAIL  " + $name + "   -> " + $detail); $script:failures.Add($name) }
-}
-
 if ($code -ne 0) { $failures.Add("exit code $code") }
 
 $appidFile = Join-Path $game 'steam_appid.txt'
@@ -81,6 +80,35 @@ Test-Artifact 'undo journal rewritten by this run' $journalOk $journal
 # The recovery copy is what "Undo last patch" restores from - it must survive the collection pass.
 $previous = @(Get-ChildItem -LiteralPath $game -Recurse -File -Filter '*.previous' -ErrorAction SilentlyContinue)
 Test-Artifact 'recovery copy retained for undo' ($previous.Count -ge 1) ("found " + $previous.Count)
+
+# ---------------------------------------------------------------- compressed payload
+
+# The payload is deflated at build time, so a repair has to inflate it back correctly. This file is small
+# and compresses well, which makes it a fast stand-in for the multi-megabyte emulator dlls.
+$payloadFile = Join-Path $PSScriptRoot 'steamless\Plugins\Steamless.API.dll'
+$payloadHash = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash
+
+$verifyCode = Invoke-Patcher '--verify-payload'
+Test-Artifact '--verify-payload reports the bundled files intact' ($verifyCode -eq 0) ("exit " + $verifyCode)
+
+# Remove it so the app has to put it back. Some environments route Remove-Item through a guarded
+# recycle-bin path that can fail on files outside %TEMP%, so fall back to truncating it - which takes
+# the same repair branch in the app.
+$removed = $false
+try { Remove-Item -LiteralPath $payloadFile -Force -ErrorAction Stop; $removed = $true } catch { }
+if (-not $removed) { [IO.File]::WriteAllBytes($payloadFile, (New-Object byte[] 0)) }
+$null = Invoke-Patcher '--verify-payload'
+$restoredOk = (Test-Path -LiteralPath $payloadFile) -and ((Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash)
+Test-Artifact ('a ' + $(if ($removed) { 'deleted' } else { 'truncated' }) + ' payload file is inflated back byte-identical') $restoredOk $payloadFile
+
+# Corrupt it in place without changing its length, then take the *normal* startup path (not
+# --verify-payload) so the size-and-timestamp cache is what has to notice.
+$bytes = [IO.File]::ReadAllBytes($payloadFile)
+$bytes[1000] = [byte]($bytes[1000] -bxor 0xFF)
+[IO.File]::WriteAllBytes($payloadFile, $bytes)
+$null = Invoke-Patcher $batchArgs
+$repairedOk = (Get-FileHash -LiteralPath $payloadFile -Algorithm SHA256).Hash -eq $payloadHash
+Test-Artifact 'a same-length corruption is detected and repaired on the normal path' $repairedOk $payloadFile
 
 Write-Host ""
 if ($failures.Count -eq 0) {

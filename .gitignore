@@ -1,1 +1,5 @@
 AGENTS.md
+
+# Payload verification cache, written next to the exe at runtime.
+.payload-ok
+.payload-ok.tmp

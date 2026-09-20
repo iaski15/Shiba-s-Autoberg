@@ -20,10 +20,14 @@ namespace Gp
         public string AppId = "";
         public bool Auto;
         public bool ExitWhenDone;
+
+        /// <summary>Ignore the payload verification cache and hash every bundled file.</summary>
+        public bool VerifyPayload;
+
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\"\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).";
+        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\"\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -46,6 +50,7 @@ namespace Gp
                 }
                 else if (s == "--auto") r.Auto = true;
                 else if (s == "--exit-when-done") r.ExitWhenDone = true;
+                else if (s == "--verify-payload") r.VerifyPayload = true;
                 else throw new ArgumentException("Unknown argument: " + s);
             }
             if (r.Batch.Length > 0 && (r.Exe.Length > 0 || r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
@@ -80,7 +85,7 @@ namespace Gp
                 return;
             }
             string initialization;
-            if (!InitializePayload(out initialization))
+            if (!InitializePayload(out initialization, sa.VerifyPayload))
             {
                 Console.Error.WriteLine(initialization);
                 if (args == null || args.Length == 0) MessageBox.Show(initialization, "Setup incomplete");
@@ -88,6 +93,15 @@ namespace Gp
                 return;
             }
             sa.Initialization = initialization;
+
+            // --verify-payload on its own is a payload check, not a patch: report and stop.
+            if (sa.VerifyPayload && sa.Batch.Length == 0 && sa.Exe.Length == 0)
+            {
+                Console.WriteLine(initialization);
+                Environment.ExitCode = Payload.LastErrors != null && Payload.LastErrors.Count > 0 ? 1 : 0;
+                return;
+            }
+
             SweepStaleRecovery();
             if (sa.Batch.Length > 0)
             {
@@ -131,16 +145,17 @@ namespace Gp
             catch { }
         }
 
-        internal static bool InitializePayload(out string message)
+        internal static bool InitializePayload(out string message, bool forceVerify = false)
         {
             try
             {
-                int restored = Payload.Count > 0 ? Payload.ExtractMissing().Count : 0;
+                int restored = Payload.Count > 0 ? Payload.ExtractMissing(forceVerify).Count : 0;
                 var errors = new List<string>();
                 if (Payload.LastErrors != null) errors.AddRange(Payload.LastErrors);
                 errors.AddRange(Tools.Missing());
                 message = errors.Count > 0 ? "Payload initialization failed: " + string.Join("; ", errors)
-                    : "Payload verified: " + Payload.Count + " bundled files, " + restored + " restored.";
+                    : "Payload verified: " + Payload.Count + " bundled files, " + restored + " restored"
+                      + (Payload.LastPassHashed ? " (hashed)." : " (cached).");
                 return errors.Count == 0;
             }
             catch (Exception ex) { message = "Payload initialization failed: " + ex.Message; return false; }
@@ -148,6 +163,7 @@ namespace Gp
 
         static int RunBatchCli(StartupArgs sa)
         {
+            if (!string.IsNullOrEmpty(sa.Initialization)) Console.WriteLine(sa.Initialization);
             var items = new List<BatchInput>();
             int invalid = 0;
             foreach (var raw in (sa.Batch ?? "").Split(';'))

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -1028,11 +1029,38 @@ namespace Gp
     /// hash-verified so a same-size corrupted file is repaired instead of kept.</summary>
     public static class Payload
     {
-        class Entry { public string Res; public string Rel; public string Hash; }
+        class Entry
+        {
+            public string Res;
+            public string Rel;
+            public string Hash;
+
+            /// <summary>Size of the file as embedded *before* deflating, or -1 for a legacy manifest
+            /// that predates compression and carries no length.</summary>
+            public long Length = -1;
+
+            public bool Deflated;
+        }
         static List<Entry> entries;
 
         /// <summary>Per-file failures from the last ExtractMissing() call (empty when everything worked).</summary>
         public static List<string> LastErrors { get; private set; }
+
+        /// <summary>True when the last pass could not use the fast path and had to hash files.</summary>
+        public static bool LastPassHashed { get; private set; }
+
+        /// <summary>Cache of a verified payload: records the manifest it was built from plus each file's
+        /// size and write time. Next to the payload it describes, so it travels with the install.</summary>
+        static string StampPath { get { return Path.Combine(Tools.BaseDir, ".payload-ok"); } }
+
+        sealed class Stamp { public long Length; public long Ticks; }
+
+        static string ToHex(byte[] bytes)
+        {
+            var sb = new StringBuilder(bytes.Length * 2);
+            foreach (var b in bytes) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
 
         static void Load()
         {
@@ -1051,17 +1079,81 @@ namespace Gp
                             line = line.TrimStart('\uFEFF');
                             var parts = line.Split('|');
                             if (parts.Length < 2 || parts[0].Length == 0) continue;
-                            entries.Add(new Entry
+                            var e = new Entry { Res = parts[0], Rel = parts[1] };
+                            if (parts.Length >= 3 && parts[2].Length > 0) e.Hash = parts[2]; // tolerate legacy hash-less manifests
+                            if (parts.Length >= 4)
                             {
-                                Res = parts[0],
-                                Rel = parts[1],
-                                Hash = parts.Length >= 3 ? parts[2] : null, // tolerate legacy hash-less manifests
-                            });
+                                long len;
+                                if (long.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out len) && len >= 0)
+                                    e.Length = len;
+                            }
+                            e.Deflated = parts.Length >= 5 && string.Equals(parts[4], "deflate", StringComparison.OrdinalIgnoreCase);
+                            entries.Add(e);
                         }
                     }
                 }
             }
             catch { entries = new List<Entry>(); }
+        }
+
+        /// <summary>Hash of the manifest resource itself: any change to the embedded payload changes it,
+        /// which is what invalidates a stale <see cref="StampPath"/>.</summary>
+        static string ManifestHash()
+        {
+            try
+            {
+                using (var s = typeof(Payload).Assembly.GetManifestResourceStream("gppay.manifest"))
+                {
+                    if (s == null) return "";
+                    using (var sha = SHA256.Create()) return ToHex(sha.ComputeHash(s));
+                }
+            }
+            catch { return ""; }
+        }
+
+        static Dictionary<string, Stamp> ReadStamp(string manifestHash)
+        {
+            var map = new Dictionary<string, Stamp>(StringComparer.OrdinalIgnoreCase);
+            if (manifestHash.Length == 0) return map;
+            try
+            {
+                if (!File.Exists(StampPath)) return map;
+                var lines = File.ReadAllLines(StampPath);
+                if (lines.Length == 0 || lines[0] != "manifest=" + manifestHash) return map;
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    var p = lines[i].Split('|');
+                    if (p.Length < 3) continue;
+                    long len, ticks;
+                    if (!long.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out len)) continue;
+                    if (!long.TryParse(p[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks)) continue;
+                    map[p[0]] = new Stamp { Length = len, Ticks = ticks };
+                }
+            }
+            catch { map.Clear(); }
+            return map;
+        }
+
+        static void WriteStamp(string manifestHash)
+        {
+            if (manifestHash.Length == 0) return;
+            try
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("manifest=" + manifestHash);
+                foreach (var e in entries)
+                {
+                    var fi = new FileInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, e.Rel));
+                    if (!fi.Exists) continue;
+                    sb.AppendLine(e.Rel + "|" + fi.Length.ToString(CultureInfo.InvariantCulture)
+                        + "|" + fi.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture));
+                }
+                string tmp = StampPath + ".tmp";
+                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
+                File.Copy(tmp, StampPath, true);
+                File.Delete(tmp);
+            }
+            catch { /* a cache, not a requirement: failing to write it just means hashing next launch */ }
         }
 
         /// <summary>Number of files embedded at build time (0 when built without payload).</summary>
@@ -1071,15 +1163,26 @@ namespace Gp
         /// Returns the relative paths that were restored; failures land in LastErrors.</summary>
         public static List<string> ExtractMissing()
         {
-            return SafePersistence.Locked(Path.Combine(Tools.BaseDir, "payload-extraction"), ExtractCore);
+            return ExtractMissing(false);
         }
 
-        static List<string> ExtractCore()
+        /// <param name="forceVerify">Ignore the stamp and hash every file, even ones that look unchanged.</param>
+        public static List<string> ExtractMissing(bool forceVerify)
+        {
+            return SafePersistence.Locked(Path.Combine(Tools.BaseDir, "payload-extraction"), () => ExtractCore(forceVerify));
+        }
+
+        static List<string> ExtractCore(bool forceVerify)
         {
             if (entries == null) Load();
             var written = new List<string>();
             LastErrors = new List<string>();
+            LastPassHashed = false;
             var asm = typeof(Payload).Assembly;
+            string manifestHash = ManifestHash();
+            var stamp = forceVerify ? new Dictionary<string, Stamp>(StringComparer.OrdinalIgnoreCase) : ReadStamp(manifestHash);
+            bool stampUsable = stamp.Count > 0;
+
             foreach (var e in entries)
             {
                 try
@@ -1088,15 +1191,50 @@ namespace Gp
                     using (var src = asm.GetManifestResourceStream(e.Res))
                     {
                         if (src == null) { LastErrors.Add(e.Rel + ": embedded resource missing"); continue; }
-                        bool intact = File.Exists(dst)
-                            && new FileInfo(dst).Length == src.Length
-                            && (e.Hash == null || Sha256Matches(dst, e.Hash));
+                        long expected = e.Length >= 0 ? e.Length : src.Length;   // legacy manifest: resource is raw
+
+                        // Fast path. A file whose size and write time are both exactly what the stamp
+                        // recorded cannot have been rewritten since it was verified, so skip the hash.
+                        Stamp known;
+                        if (stampUsable && stamp.TryGetValue(e.Rel, out known))
+                        {
+                            var fi = new FileInfo(dst);
+                            if (fi.Exists && fi.Length == known.Length && fi.Length == expected
+                                && fi.LastWriteTimeUtc.Ticks == known.Ticks)
+                                continue;
+                        }
+
+                        bool intact = File.Exists(dst) && new FileInfo(dst).Length == expected;
+                        if (intact && e.Hash != null)
+                        {
+                            LastPassHashed = true;
+                            intact = Sha256Matches(dst, e.Hash);
+                        }
                         if (intact) continue;
+
+                        // Repair. Inflate when the build deflated the resource, then verify the result
+                        // before it is allowed to replace anything.
                         Directory.CreateDirectory(Path.GetDirectoryName(dst));
                         var tempPath = dst + ".tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
-                        using (var f = File.Create(tempPath)) src.CopyTo(f);
-                        File.Copy(tempPath, dst, true);
-                        try { File.Delete(tempPath); } catch { }
+                        try
+                        {
+                            using (var f = File.Create(tempPath))
+                            {
+                                if (e.Deflated)
+                                {
+                                    using (var inflate = new DeflateStream(src, CompressionMode.Decompress))
+                                        inflate.CopyTo(f);
+                                }
+                                else src.CopyTo(f);
+                            }
+                            long got = new FileInfo(tempPath).Length;
+                            if (e.Length >= 0 && got != e.Length)
+                                throw new InvalidDataException("Restored size " + got + " does not match the manifest (" + e.Length + ").");
+                            if (e.Hash != null && !Sha256Matches(tempPath, e.Hash))
+                                throw new InvalidDataException("Restored payload failed its hash check.");
+                            File.Copy(tempPath, dst, true);
+                        }
+                        finally { try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { } }
                     }
                     written.Add(e.Rel);
                 }
@@ -1105,6 +1243,10 @@ namespace Gp
                     LastErrors.Add(e.Rel + ": " + ex.Message);
                 }
             }
+
+            // Refresh the stamp when it was unusable (first run, or a new build) or when something was
+            // restored. A clean pass against a valid stamp needs no rewrite.
+            if (LastErrors.Count == 0 && (!stampUsable || written.Count > 0)) WriteStamp(manifestHash);
             return written;
         }
 
@@ -1113,13 +1255,8 @@ namespace Gp
             try
             {
                 using (var s = File.OpenRead(path))
-                using (var sha = System.Security.Cryptography.SHA256.Create())
-                {
-                    var hash = sha.ComputeHash(s);
-                    var sb = new StringBuilder(hash.Length * 2);
-                    foreach (var b in hash) sb.Append(b.ToString("x2"));
-                    return string.Equals(sb.ToString(), expectedHex, StringComparison.OrdinalIgnoreCase);
-                }
+                using (var sha = SHA256.Create())
+                    return string.Equals(ToHex(sha.ComputeHash(s)), expectedHex, StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; } // unreadable → treat as corrupt so the caller rewrites it
         }

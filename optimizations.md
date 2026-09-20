@@ -364,6 +364,21 @@ exactly the case for the two ~9–11 MB emulator dlls. So every start hashes ~20
 and skip per-file hashing when the stamp matches. Re-verify on demand (a `--verify-payload` flag) and after
 any file's mtime changes.
 
+> **Fixed.** `.payload-ok` records the manifest's own hash plus each file's size and write time. A file whose
+> size *and* write time both match the stamp is skipped without hashing; anything else is hashed as before,
+> and a repair rewrites the stamp. The stamp is invalidated automatically whenever the manifest changes, so
+> it can never describe a different build. `--verify-payload` ignores it and hashes everything (exit 0 =
+> intact, 1 = missing or corrupt).
+>
+> **Measured, and it is smaller than this item implies.** Hashing all 88 payload files (41.9 MB) takes
+> **78 ms**, of which the two emulator dlls are 15 ms — SHA-256 runs at roughly 1.3 GB/s. The volume figure
+> above is accurate; the user-visible cost is tens of milliseconds, and only the first launch after an
+> install pays it. The real win in this row is #21.
+>
+> Residual trade-off, stated plainly: a file whose length *and* write time are both preserved across a
+> same-length overwrite would pass the fast path. That is not a realistic corruption mode (a partial write
+> changes the length; any rewrite changes the write time) and `--verify-payload` covers it.
+
 ### 21. Compress the embedded payload — measured 21.8 MB → ~8.4 MB
 
 Measured on the actual binaries in this repo:
@@ -382,6 +397,20 @@ behavioural change. PE files compress well because of their zero-filled section 
 
 **Fix:** `DeflateStream`/`GZipStream` per resource in `build.ps1` + inflate in `Payload.ExtractCore`.
 Keep the manifest SHA-256 as the *uncompressed* hash so verification is unchanged.
+
+> **Fixed — and it came in better than this estimate.** `build.ps1` deflates each payload file to a scratch
+> copy and embeds whichever is smaller, recording `res|path|sha256|uncompressedLength|deflate|raw` in the
+> manifest. The hash stays the hash of the uncompressed bytes, so verification is untouched; the extract path
+> inflates and then checks both the inflated length and that hash before the file is allowed to replace
+> anything.
+>
+> Measured on the current build: payload **21.65 MB → 7.37 MB**, and the shipped exe
+> **21.82 MB → 7.54 MB — a 65% reduction**, against this item's 8.4 MB prediction. The extra comes from the
+> ~40 `steam_settings` files, which this estimate did not count: the controller glyph PNGs deflate well too.
+>
+> Two details worth keeping: the "keep whichever is smaller" rule means a payload file that does not compress
+> is still embedded raw, and a build whose manifest changes invalidates the verification stamp of #20 by
+> construction.
 
 ### 22. `Ui.RoundPath` allocates a `GraphicsPath` per fill and per stroke
 
@@ -548,7 +577,7 @@ narrower than the API's documented behaviour.
 | Order | Items | Rationale |
 | --- | --- | --- |
 | 1 | #1, #2, #3 — **done** | Data safety and disk hygiene; all three live in `SafePersistence` and can be done together |
-| 2 | #21, #20 | Largest user-visible win per line changed (8.4 MB exe, faster start) |
+| 2 | #21, #20 — **done** | Largest user-visible win per line changed (8.4 MB exe, faster start) |
 | 3 | #5, #6, #10 | Correctness of the core value proposition (dll placement, unpack detection) |
 | 4 | #11 | Unblocks anyone on a HiDPI display |
 | 5 | #4, #8, #14 | Removes the "it just doesn't start" and "no output" failure classes |
