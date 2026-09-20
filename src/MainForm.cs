@@ -75,6 +75,7 @@ namespace Gp
         {
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
+            Ui.InitializeScale();
 
             StartupArgs sa;
             try { sa = StartupArgs.Parse(args); }
@@ -287,7 +288,7 @@ namespace Gp
         {
             base.OnResize(e);
             if (box == null) return;
-            box.SetBounds(12, (Height - box.PreferredHeight) / 2, Width - 24, box.PreferredHeight);
+            box.SetBounds(Ui.S(12), (Height - box.PreferredHeight) / 2, Width - Ui.S(24), box.PreferredHeight);
         }
         protected override void OnEnabledChanged(EventArgs e) { box.Enabled = Enabled; Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnClick(EventArgs e) { box.Focus(); base.OnClick(e); }
@@ -404,6 +405,12 @@ namespace Gp
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
+            // The process opts into PerMonitorV2 DPI awareness, so without this the fixed-pixel layout stays
+            // put while the point-sized fonts grow: clipped labels and a window that is tiny on a HiDPI
+            // panel. AutoScaleMode.Dpi makes WinForms scale every control's bounds by the same factor
+            // Ui.Scale uses for the hand-positioned paint geometry.
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(820, 780);
             BackColor = Ui.Bg;
             Text = "Goldberg Patcher";
@@ -615,13 +622,16 @@ namespace Gp
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         Rectangle LogBounds()
         {
-            int top = banner.Visible ? 654 : 596;
-            return new Rectangle(Pad, top, ClientSize.Width - Pad * 2, ClientSize.Height - top - 40);
+            // Scaled explicitly: WinForms' auto-scale sizes the controls once at load, but this runs again on
+            // every resize and banner toggle, so the constants here have to be scaled by hand to match.
+            int pad = Ui.S(Pad);
+            int top = Ui.S(banner.Visible ? 654 : 596);
+            return new Rectangle(pad, top, ClientSize.Width - pad * 2, ClientSize.Height - top - Ui.S(40));
         }
         void RecalcLog()
         {
             logCard.Bounds = LogBounds();
-            log.SetBounds(12, 12, logCard.Width - 24, logCard.Height - 24);
+            log.SetBounds(Ui.S(12), Ui.S(12), logCard.Width - Ui.S(24), logCard.Height - Ui.S(24));
         }
 
         protected override CreateParams CreateParams

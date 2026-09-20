@@ -701,6 +701,27 @@ static class TestMain
             try { Directory.Delete(rbDir, true); } catch { }
         }
 
+        Console.WriteLine("\n[dpi scaling]");
+        float savedScale = Dpi.Scale;
+        try
+        {
+            Dpi.Scale = 1f;
+            Check(Dpi.S(100) == 100 && Dpi.S(24) == 24, "scale 1.0 is the identity", Dpi.S(100).ToString());
+            Check(Dpi.S(0) == 0, "scale leaves zero alone", Dpi.S(0).ToString());
+
+            Dpi.Scale = 1.5f;
+            Check(Dpi.S(100) == 150 && Dpi.S(24) == 36, "scale 1.5 multiplies", Dpi.S(100).ToString());
+            Check(Dpi.S(9) == 14, "scale rounds rather than truncates", Dpi.S(9).ToString());
+            Check(Math.Abs(Dpi.S(1.5f) - 2.25f) < 0.001f, "float overload scales", Dpi.S(1.5f).ToString());
+            Check(Math.Abs(Dpi.S(new System.Drawing.PointF(10f, 20f)).Y - 30f) < 0.001f,
+                  "PointF overload scales", null);
+            Check(Dpi.S(new System.Drawing.Point(10, 20)).Y == 30, "Point overload scales", null);
+
+            Dpi.Scale = 2f;
+            Check(Dpi.S(7) == 14 && Dpi.S(820) == 1640, "scale 2.0 multiplies", Dpi.S(820).ToString());
+        }
+        finally { Dpi.Scale = savedScale; }
+
         ReviewRegressions();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 

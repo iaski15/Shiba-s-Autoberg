@@ -19,6 +19,35 @@ namespace Gp
 
     public enum ExeArch { Unknown, X86, X64 }
 
+    /// <summary>Display scale relative to 96 DPI, for the hand-positioned paint geometry that WinForms'
+    /// own auto-scaling cannot reach. Lives here rather than in Ui.cs so the self-test - which compiles
+    /// Core.cs and TestMain.cs only - can cover it.</summary>
+    public static class Dpi
+    {
+        public static float Scale = 1f;
+
+        public static void Initialize()
+        {
+            try
+            {
+                using (var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero)) Scale = g.DpiX / 96f;
+            }
+            catch { Scale = 1f; }
+            if (Scale < 0.5f || Scale > 4f) Scale = 1f;   // nonsense DPI: fall back rather than distort
+        }
+
+        public static int S(int px) { return (int)Math.Round(px * Scale); }
+        public static float S(float px) { return px * Scale; }
+        public static System.Drawing.PointF S(System.Drawing.PointF p)
+        {
+            return new System.Drawing.PointF(p.X * Scale, p.Y * Scale);
+        }
+        public static System.Drawing.Point S(System.Drawing.Point p)
+        {
+            return new System.Drawing.Point((int)Math.Round(p.X * Scale), (int)Math.Round(p.Y * Scale));
+        }
+    }
+
     /// <summary>Single source of truth for where the app keeps its own state. The
     /// %APPDATA%\GoldbergPatcher path used to be duplicated across Core, Batch and MainForm.</summary>
     public static class AppPaths

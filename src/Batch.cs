@@ -152,9 +152,9 @@ namespace Gp
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            removeRect = new Rectangle(Width - 32, Height / 2 - 12, 24, 24);
+            removeRect = new Rectangle(Width - Ui.S(32), Height / 2 - Ui.S(12), Ui.S(24), Ui.S(24));
             if (removeButton != null) removeButton.Bounds = removeRect;
-            if (idBox != null) idBox.SetBounds(Width - 32 - 8 - 106, (Height - 30) / 2, 106, 30);
+            if (idBox != null) idBox.SetBounds(Width - Ui.S(32) - Ui.S(8) - Ui.S(106), (Height - Ui.S(30)) / 2, Ui.S(106), Ui.S(30));
         }
 
         protected override void OnMouseLeave(EventArgs e) { hoverRemove = false; Invalidate(); base.OnMouseLeave(e); }
@@ -190,19 +190,19 @@ namespace Gp
             if (state == RowState.Patching || state == RowState.Detecting)
                 using (var p = new Pen(Color.FromArgb(90, col.R, col.G, col.B), 1.5f)) g.DrawEllipse(p, 11, Height / 2 - 7, 14, 14);
 
-            int textMaxW = Math.Max(0, idBox.Left - 12 - 32);
+            int textMaxW = Math.Max(0, idBox.Left - Ui.S(12) - Ui.S(32));
             if (textMaxW > 0)
             {
                 var flags = TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
                 TextRenderer.DrawText(g, Path.GetFileName(ExePath), Ui.F(9.5f, true),
-                    new Rectangle(32, 7, textMaxW, 18), Ui.TextC, flags);
-                TextRenderer.DrawText(g, statusText, Ui.F(8f, false), new Rectangle(32, 30, textMaxW, 16), col, flags);
+                    new Rectangle(Ui.S(32), Ui.S(7), textMaxW, Ui.S(18)), Ui.TextC, flags);
+                TextRenderer.DrawText(g, statusText, Ui.F(8f, false), new Rectangle(Ui.S(32), Ui.S(30), textMaxW, Ui.S(16)), col, flags);
             }
 
             // appid box chrome (the TextBox itself paints on top)
             var br = idBox.Bounds;
-            Ui.FillRound(g, Rectangle.Inflate(br, -2, -2), 8, Ui.Surface2);
-            Ui.StrokeRound(g, Rectangle.Inflate(br, -2, -2), 8, Ui.BorderC, 1f);
+            Ui.FillRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.Surface2);
+            Ui.StrokeRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.BorderC, 1f);
 
             // remove button
             using (var b = new SolidBrush(hoverRemove && !Locked ? Ui.Accent : Ui.MutedC))
@@ -409,6 +409,8 @@ namespace Gp
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(800, 672);
             BackColor = Ui.Bg;
             Text = "Goldberg Patcher – batch";
@@ -626,10 +628,13 @@ namespace Gp
 
         void LayoutRows()
         {
-            int w = Math.Max(200, rowsPanel.ClientSize.Width);
+            // Rows are created at runtime, long after WinForms' one-off auto-scale pass, so every constant
+            // here has to be scaled by hand or the list collapses to design-size rows in a scaled panel.
+            int rowH = Ui.S(RowH);
+            int w = Math.Max(Ui.S(200), rowsPanel.ClientSize.Width);
             for (int i = 0; i < rows.Count; i++)
-                rows[i].SetBounds(0, i * RowH, w, RowH);
-            emptyHint.Bounds = new Rectangle(8, 96, w - 16, 40);
+                rows[i].SetBounds(0, i * rowH, w, rowH);
+            emptyHint.Bounds = new Rectangle(Ui.S(8), Ui.S(96), w - Ui.S(16), Ui.S(40));
             emptyHint.Visible = rows.Count == 0;
         }
 

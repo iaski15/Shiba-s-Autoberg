@@ -291,6 +291,25 @@ At 100% it looks exactly as designed — which is presumably the only configurat
 `ScaleFactor = DeviceDpi / 96f`. The second is more work but is the right answer, and the layout constants
 are already concentrated at the top of each form.
 
+> **Fixed, with one honest caveat.** Both forms now set `AutoScaleMode.Dpi` with
+> `AutoScaleDimensions(96, 96)`, so WinForms scales every control's bounds by the display factor, and the
+> hand-positioned paint geometry goes through `Dpi.S()` (which `Ui.S()` forwards to) so it scales in step.
+> Fonts needed no help: they are created in points and GDI+ already maps those through the device DPI, which
+> is exactly why the layout had to catch up.
+>
+> The part that needed real care: WinForms' auto-scale is a **one-off pass at load**. Anything that lays out
+> later — `RecalcLog` on every resize and banner toggle, `LayoutRows` for the batch rows, `BatchRow.OnResize`
+> — would have snapped the layout back to design coordinates, which is worse than not scaling at all. Those
+> paths scale their constants explicitly.
+>
+> `Dpi` lives in `Core.cs` rather than `Ui.cs` because `_selftest.exe` is compiled from `Core.cs` +
+> `TestMain.cs` only, so anything in `Ui.cs` is unreachable from the suite. Eight assertions cover the
+> scaling arithmetic.
+>
+> **Not verified visually.** There is no way to render the window at 150% in this environment, so the
+> arithmetic is tested and no regression was introduced, but the appearance at >100% has not been seen.
+> That is the one thing to check on a HiDPI display.
+
 ### 12. One stale backup file permanently blocks patching
 
 `OriginalBackups.Existing` (`Core.cs:347-372`) throws whenever a backup exists but fails hash verification,
@@ -613,7 +632,7 @@ narrower than the API's documented behaviour.
 | 1 | #1, #2, #3 — **done** | Data safety and disk hygiene; all three live in `SafePersistence` and can be done together |
 | 2 | #21, #20 — **done** | Largest user-visible win per line changed (8.4 MB exe, faster start) |
 | 3 | #5, #6, #10 — **done** | Correctness of the core value proposition (dll placement, unpack detection) |
-| 4 | #11 | Unblocks anyone on a HiDPI display |
+| 4 | #11 — **done** (arithmetic verified, appearance not) | Unblocks anyone on a HiDPI display |
 | 5 | #4, #8, #14 | Removes the "it just doesn't start" and "no output" failure classes |
 | 6 | #9, #17, #18, #19 | Performance, once correctness is settled |
 | 7 | #12, #13, #15, #16 | Robustness hardening |

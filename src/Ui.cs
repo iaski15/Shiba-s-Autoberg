@@ -51,6 +51,20 @@ namespace Gp
             return fontCache[key];
         }
 
+        /// <summary>Display scale relative to 96 DPI, set once at startup. The forms opt into
+        /// <see cref="AutoScaleMode.Dpi"/>, which scales every control's bounds by this same factor, so the
+        /// paint code below - which positions things by hand - has to scale its own constants to stay in
+        /// step. Fonts need no help: they are created in points and GDI+ already maps those through the
+        /// device DPI. The implementation lives in <see cref="Dpi"/> so the self-test can reach it.</summary>
+        public static float Scale { get { return Dpi.Scale; } set { Dpi.Scale = value; } }
+
+        public static void InitializeScale() { Dpi.Initialize(); }
+
+        public static int S(int px) { return Dpi.S(px); }
+        public static float S(float px) { return Dpi.S(px); }
+        public static PointF S(PointF p) { return Dpi.S(p); }
+        public static Point S(Point p) { return Dpi.S(p); }
+
         public static GraphicsPath RoundPath(Rectangle r, int rad)
         {
             var p = new GraphicsPath();
@@ -113,12 +127,12 @@ namespace Gp
         {
             if (string.IsNullOrEmpty(text)) return;
             var sz = g.MeasureString(text, F(7.75f, true));
-            int w = (int)Math.Ceiling(sz.Width) + 18;
+            int w = (int)Math.Ceiling(sz.Width) + S(18);
             var r = new Rectangle(x, y, w, h);
             FillRound(g, r, h / 2, back);
             if (border.HasValue) StrokeRound(g, Rectangle.Inflate(r, 0, 0), h / 2, border.Value, 1f);
             TextRendererHelper(g, text, fore, r);
-            x += w + 8;
+            x += w + S(8);
         }
 
         static void TextRendererHelper(Graphics g, string text, Color fore, Rectangle r)
@@ -221,15 +235,15 @@ namespace Gp
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
 
             // logo: gradient circle + play triangle
-            var logoRect = new Rectangle(22, 13, 20, 20);
-            using (var lg = new LinearGradientBrush(logoRect, Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(logoRect, 10)) g.FillPath(lg, p);
-            var tri = new PointF[] { new PointF(29.5f, 18.5f), new PointF(29.5f, 27.5f), new PointF(37.5f, 23f) };
+            var logoRect = new Rectangle(Ui.S(22), Ui.S(13), Ui.S(20), Ui.S(20));
+            using (var lg = new LinearGradientBrush(logoRect, Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(logoRect, Ui.S(10))) g.FillPath(lg, p);
+            var tri = new PointF[] { Ui.S(new PointF(29.5f, 18.5f)), Ui.S(new PointF(29.5f, 27.5f)), Ui.S(new PointF(37.5f, 23f)) };
             using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, tri);
 
             // title
             var tsz = Ui.MeasureSpaced(g, "GOLDBERG PATCHER", Ui.F(9, true), 1.6f);
-            Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, new PointF(52, 15), 1.6f);
-            TextRenderer.DrawText(g, "v0.4", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
+            Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, Ui.S(new PointF(52, 15)), 1.6f);
+            TextRenderer.DrawText(g, "v0.4", Ui.F(7.75f, false), new Rectangle((int)(Ui.S(52) + tsz.Width + Ui.S(10)), Ui.S(17), Ui.S(60), Ui.S(16)), Ui.MutedC, TextFormatFlags.NoPadding);
 
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, Height - 1, Width, Height - 1);
         }
@@ -368,73 +382,73 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             var rect = ClientRectangle;
 
-            Ui.FillRound(g, rect, 14, Ui.Surface);
+            Ui.FillRound(g, rect, Ui.S(14), Ui.Surface);
             if (gamePath.Length == 0)
             {
                 var bc = dragOver ? Ui.Accent : Ui.BorderC;
-                using (var pen = new Pen(bc, 1.6f)) { pen.DashStyle = DashStyle.Dash; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), 13)) g.DrawPath(pen, p); }
+                using (var pen = new Pen(bc, 1.6f)) { pen.DashStyle = DashStyle.Dash; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), Ui.S(13))) g.DrawPath(pen, p); }
 
-                var iconR = new Rectangle(Width / 2 - 19, 15, 38, 38);
-                var glowR = new Rectangle(iconR.X - 7, iconR.Y - 7, iconR.Width + 14, iconR.Height + 14);
-                using (var b = new SolidBrush(Color.FromArgb(dragOver ? 46 : 24, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B))) using (var p = Ui.RoundPath(glowR, 25)) g.FillPath(b, p);
-                using (var lg = new LinearGradientBrush(new RectangleF(iconR.X, iconR.Y, iconR.Width, iconR.Height), Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(iconR, 19)) g.FillPath(lg, p);
-                var tri = new PointF[] { new PointF(iconR.X + 16, iconR.Y + 12), new PointF(iconR.X + 16, iconR.Bottom - 12), new PointF(iconR.Right - 12, iconR.Y + 19) };
+                var iconR = new Rectangle(Width / 2 - Ui.S(19), Ui.S(15), Ui.S(38), Ui.S(38));
+                var glowR = new Rectangle(iconR.X - Ui.S(7), iconR.Y - Ui.S(7), iconR.Width + Ui.S(14), iconR.Height + Ui.S(14));
+                using (var b = new SolidBrush(Color.FromArgb(dragOver ? 46 : 24, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B))) using (var p = Ui.RoundPath(glowR, Ui.S(25))) g.FillPath(b, p);
+                using (var lg = new LinearGradientBrush(new RectangleF(iconR.X, iconR.Y, iconR.Width, iconR.Height), Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(iconR, Ui.S(19))) g.FillPath(lg, p);
+                var tri = new PointF[] { new PointF(iconR.X + Ui.S(16), iconR.Y + Ui.S(12)), new PointF(iconR.X + Ui.S(16), iconR.Bottom - Ui.S(12)), new PointF(iconR.Right - Ui.S(12), iconR.Y + Ui.S(19)) };
                 using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, tri);
 
                 var l1 = "Drop the game's .exe here";
                 var f1 = Ui.F(11.25f, true);
                 var sz1 = g.MeasureString(l1, f1);
-                TextRenderer.DrawText(g, l1, f1, new Point(Width / 2 - (int)sz1.Width / 2, 58), Ui.TextC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, l1, f1, new Point(Width / 2 - (int)sz1.Width / 2, Ui.S(58)), Ui.TextC, TextFormatFlags.NoPadding);
                 var l2 = "or click to browse  ·  architecture & DRM are detected automatically";
                 var f2 = Ui.F(8.5f, false);
                 var sz2 = g.MeasureString(l2, f2);
-                TextRenderer.DrawText(g, l2, f2, new Point(Width / 2 - (int)sz2.Width / 2, 84), Ui.MutedC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, l2, f2, new Point(Width / 2 - (int)sz2.Width / 2, Ui.S(84)), Ui.MutedC, TextFormatFlags.NoPadding);
             }
             else
             {
-                Ui.StrokeRound(g, rect, 14, dragOver ? Ui.Accent : Ui.BorderC, 1.4f);
-                int pad = 18;
-                var iconR = new Rectangle(pad, 15, 36, 36);
+                Ui.StrokeRound(g, rect, Ui.S(14), dragOver ? Ui.Accent : Ui.BorderC, 1.4f);
+                int pad = Ui.S(18);
+                var iconR = new Rectangle(pad, Ui.S(15), Ui.S(36), Ui.S(36));
                 if (fileIcon != null)
                 {
-                    Ui.FillRound(g, iconR, 10, Ui.Surface2);
+                    Ui.FillRound(g, iconR, Ui.S(10), Ui.Surface2);
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(fileIcon, new Rectangle(iconR.X + 3, iconR.Y + 3, 30, 30));
+                    g.DrawImage(fileIcon, new Rectangle(iconR.X + Ui.S(3), iconR.Y + Ui.S(3), Ui.S(30), Ui.S(30)));
                 }
                 else
                 {
-                    Ui.FillRound(g, iconR, 18, Ui.Tint(Ui.Surface2, Ui.OkC, 0.22));
+                    Ui.FillRound(g, iconR, Ui.S(18), Ui.Tint(Ui.Surface2, Ui.OkC, 0.22));
                     using (var b = new SolidBrush(Ui.OkC))
-                        g.DrawString("\u2713", Ui.F(14, true), b, iconR.X + 9, iconR.Y + 8);
+                        g.DrawString("\u2713", Ui.F(14, true), b, iconR.X + Ui.S(9), iconR.Y + Ui.S(8));
                 }
 
                 string name = Path.GetFileName(gamePath);
-                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Point(pad + 50, 20), Ui.TextC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Point(pad + Ui.S(50), Ui.S(20)), Ui.TextC, TextFormatFlags.NoPadding);
 
                 var dirF = Ui.F(8.25f, false);
                 string dir = Path.GetDirectoryName(gamePath);
-                int dirMaxW = Width - (pad + 50) - 110;
+                int dirMaxW = Width - (pad + Ui.S(50)) - Ui.S(110);
                 // Measure with the paint Graphics – creating a separate one during OnPaint is wasteful.
                 string shownDir = Ui.TruncMiddle(g, dir ?? "", dirF, dirMaxW);
-                TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + 50, 43), Ui.MutedC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + Ui.S(50), Ui.S(43)), Ui.MutedC, TextFormatFlags.NoPadding);
 
                 // CHANGE link top-right
                 var cf = Ui.F(8f, true);
                 var csz = TextRenderer.MeasureText("CHANGE", cf, Size.Empty, TextFormatFlags.NoPadding);
-                changeRect = new Rectangle(Width - pad - csz.Width - 4, 20, csz.Width + 8, 18);
+                changeRect = new Rectangle(Width - pad - csz.Width - Ui.S(4), Ui.S(20), csz.Width + Ui.S(8), Ui.S(18));
                 TextRenderer.DrawText(g, "CHANGE", cf, changeRect, overChange ? Ui.Accent2 : Ui.MutedC,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
                 // chips row
-                int cx = pad + 48; int cy = Height - 38;
+                int cx = pad + Ui.S(48); int cy = Height - Ui.S(38);
                 if (!string.IsNullOrEmpty(archChip))
-                    Ui.DrawChip(g, ref cx, cy, 24, archChip, Ui.Accent2, Ui.Tint(Ui.Surface2, Ui.Accent2, 0.16), null);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), archChip, Ui.Accent2, Ui.Tint(Ui.Surface2, Ui.Accent2, 0.16), null);
                 if (!string.IsNullOrEmpty(sizeChip))
-                    Ui.DrawChip(g, ref cx, cy, 24, sizeChip, Ui.MutedC, Ui.Surface2, Ui.BorderC);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), sizeChip, Ui.MutedC, Ui.Surface2, Ui.BorderC);
                 if (!string.IsNullOrEmpty(apiChip))
                 {
                     var col = apiState == 1 ? Ui.OkC : Ui.WarnC;
-                    Ui.DrawChip(g, ref cx, cy, 24, apiChip, col, Ui.Tint(Ui.Surface2, col, 0.14), null);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), apiChip, col, Ui.Tint(Ui.Surface2, col, 0.14), null);
                 }
             }
 
@@ -480,7 +494,7 @@ namespace Gp
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var b = new SolidBrush(Ui.Surface)) g.FillRectangle(b, ClientRectangle); // no black/unpainted area behind the pill
-            int pillH = 18, pillW = 36;
+            int pillH = Ui.S(18), pillW = Ui.S(36);
             var pill = new Rectangle(0, Height / 2 - pillH / 2, pillW, pillH);
 
             Color trackFill, trackBorder;
@@ -496,11 +510,11 @@ namespace Gp
             Ui.FillRound(g, pill, pillH / 2, trackFill);
             Ui.StrokeRound(g, pill, pillH / 2, trackBorder, 1f);
             if (press && Enabled) Ui.FillRound(g, pill, pillH / 2, Color.FromArgb(40, 0, 0, 0));
-            int knobD = pillH - 6;
-            var knob = new Rectangle(Checked ? pill.Right - knobD - 3 : pill.X + 3, pill.Y + 3, knobD, knobD);
+            int knobD = pillH - Ui.S(6);
+            var knob = new Rectangle(Checked ? pill.Right - knobD - Ui.S(3) : pill.X + Ui.S(3), pill.Y + Ui.S(3), knobD, knobD);
             using (var b = new SolidBrush(Enabled ? Color.White : Ui.FromHex("#6E7688"))) g.FillEllipse(b, knob);
 
-            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + 10, 0, Math.Max(0, Width - pill.Right - 10), Height),
+            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + Ui.S(10), 0, Math.Max(0, Width - pill.Right - Ui.S(10)), Height),
                 Enabled ? Ui.TextC : Ui.FromHex("#5A6373"), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -1, -1), Ui.TextC, Ui.Surface);
         }
@@ -540,16 +554,16 @@ namespace Gp
             else if (Kind == BtnKind.Secondary) { fill1 = Ui.Surface2; fill2 = Ui.Tint(Ui.Surface2, Color.Black, 0.25); txt = Ui.TextC; }
             else { fill1 = Ui.Accent; fill2 = Ui.Accent2; txt = Color.White; }
 
-            using (var lg = new LinearGradientBrush(rect, fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, 12)) g.FillPath(lg, p);
+            using (var lg = new LinearGradientBrush(rect, fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, Ui.S(12))) g.FillPath(lg, p);
             if (Enabled && (Kind == BtnKind.Primary || Kind == BtnKind.Secondary))
             {
-                if (press) Ui.FillRound(g, rect, 12, Color.FromArgb(45, 0, 0, 0));
-                else if (hover) Ui.FillRound(g, rect, 12, Kind == BtnKind.Primary ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(22, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B));
+                if (press) Ui.FillRound(g, rect, Ui.S(12), Color.FromArgb(45, 0, 0, 0));
+                else if (hover) Ui.FillRound(g, rect, Ui.S(12), Kind == BtnKind.Primary ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(22, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B));
             }
             if (Enabled && Kind == BtnKind.Secondary)
-                using (var p = new Pen(hover ? Color.FromArgb(160, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B) : Ui.BorderC, 1.2f)) using (var r = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), 11)) g.DrawPath(p, r);
-            if (Focused && Enabled) Ui.FillRound(g, rect, 12, Color.FromArgb(34, 255, 255, 255));
-            if (Enabled) using (var p = new Pen(Color.FromArgb(52, 255, 255, 255))) g.DrawLine(p, rect.X + 16, rect.Y + 1, rect.Right - 16, rect.Y + 1);
+                using (var p = new Pen(hover ? Color.FromArgb(160, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B) : Ui.BorderC, 1.2f)) using (var r = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), Ui.S(11))) g.DrawPath(p, r);
+            if (Focused && Enabled) Ui.FillRound(g, rect, Ui.S(12), Color.FromArgb(34, 255, 255, 255));
+            if (Enabled) using (var p = new Pen(Color.FromArgb(52, 255, 255, 255))) g.DrawLine(p, rect.X + Ui.S(16), rect.Y + 1, rect.Right - Ui.S(16), rect.Y + 1);
             var tf = Ui.F(11f, true);
             TextRenderer.DrawText(g, Text.ToUpperInvariant(), tf, rect, txt,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
@@ -639,14 +653,14 @@ namespace Gp
         protected override void OnResize(EventArgs e) { LayoutActions(); base.OnResize(e); }
         void LayoutActions()
         {
-            int ax = Width - 14;
+            int ax = Width - Ui.S(14);
             for (int i = actionButtons.Count - 1; i >= 0; i--)
             {
                 var button = actionButtons[i];
-                int bw = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding).Width + 24;
+                int bw = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding).Width + Ui.S(24);
                 ax -= bw;
-                button.Bounds = new Rectangle(ax, Height / 2 - 14, bw, 28);
-                ax -= 8;
+                button.Bounds = new Rectangle(ax, Height / 2 - Ui.S(14), bw, Ui.S(28));
+                ax -= Ui.S(8);
             }
         }
         protected override void OnPaint(PaintEventArgs e)
@@ -659,20 +673,21 @@ namespace Gp
             if (Kind == BannerKind.Success) { bg = Ui.Tint(Ui.Bg, Ui.OkC, 0.09); bd = Ui.FromHex("#1E5C44"); fg = Ui.OkC; }
             else if (Kind == BannerKind.Error) { bg = Ui.Tint(Ui.Bg, Ui.ErrC, 0.09); bd = Ui.FromHex("#6B2B31"); fg = Ui.ErrC; }
             else { bg = Ui.Tint(Ui.Bg, Ui.WarnC, 0.08); bd = Ui.FromHex("#6B5623"); fg = Ui.WarnC; }
-            Ui.FillRound(g, rect, 12, bg);
-            Ui.StrokeRound(g, rect, 12, bd, 1f);
+            Ui.FillRound(g, rect, Ui.S(12), bg);
+            Ui.StrokeRound(g, rect, Ui.S(12), bd, 1f);
 
             string glyph = Kind == BannerKind.Success ? "\u2714" : Kind == BannerKind.Error ? "\u2718" : "!";
-            using (var b = new SolidBrush(fg)) g.DrawString(glyph, Ui.F(11, true), b, 16, rect.Height / 2 - 11);
+            using (var b = new SolidBrush(fg)) g.DrawString(glyph, Ui.F(11, true), b, Ui.S(16), rect.Height / 2 - Ui.S(11));
 
             var lines = message.Split('\n');
-            int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - 12 : Width - 14;
-            int textMaxW = Math.Max(0, textRight - 44);
-            int ty = rect.Height / 2 - (lines.Length * 17) / 2;
+            int lineH = Ui.S(17);
+            int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - Ui.S(12) : Width - Ui.S(14);
+            int textMaxW = Math.Max(0, textRight - Ui.S(44));
+            int ty = rect.Height / 2 - (lines.Length * lineH) / 2;
             for (int i = 0; i < lines.Length && textMaxW > 0; i++)
             {
                 var f = i == 0 ? Ui.F(8.75f, true) : Ui.F(8.25f, false);
-                TextRenderer.DrawText(g, lines[i], f, new Rectangle(44, ty + i * 17, textMaxW, 18),
+                TextRenderer.DrawText(g, lines[i], f, new Rectangle(Ui.S(44), ty + i * lineH, textMaxW, Ui.S(18)),
                     i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
             }
         }
