@@ -351,6 +351,15 @@ delete files by hand — while the app has all the information needed to offer a
 **Fix:** on verification failure, log the mismatch, quarantine the bad backup to `<name>.corrupt-<ts>`, and
 re-preserve from the live file (or refuse with an explicit banner action). Do not hard-fail the patch.
 
+> **Fixed.** A backup that no longer verifies is moved aside as `<name>.corrupt-<yyyyMMdd-HHmmss>` (with its
+> source manifest) and the pipeline re-preserves from the live file, reporting what it did. The `Eligible`
+> guard still refuses to promote a bundled Goldberg dll, so this cannot turn an already-patched file into
+> "the original" — which is the one way this fix could have been dangerous. If the quarantine itself fails,
+> the original hard failure stands rather than overwriting something unverifiable.
+>
+> Four assertions cover it: the corrupt backup is replaced by a fresh verified copy, the bad copy is kept
+> aside rather than deleted, the recovery is logged, and the repaired backup is reused afterwards.
+
 ### 13. Nested mutex acquisition works only by accident
 
 `SafePersistence.Locked` (`Core.cs:175-189`) takes a named mutex `Local\GoldbergPatcher-<pathkey>`.
@@ -364,6 +373,12 @@ turns this into a 30-second stall followed by *"Another instance is writing …"
 
 **Fix:** make the lock re-entrant explicitly — track the held path in a `[ThreadStatic]` set and skip
 re-acquisition, or split into `LockedCore` (assumes held) and `Locked` (acquires).
+
+> **Fixed, by the first route.** `SafePersistence.Locked` keeps a `[ThreadStatic]` set of held path keys and
+> returns straight to the action when the same thread already holds that path, so the nesting in
+> `OriginalBackups.Preserve` and `SettingsScaffold.Apply` is now deliberate rather than a side effect of
+> mutex recursion. A cross-thread inner call still blocks on the mutex — correctly, since the mutex is
+> genuinely held — instead of silently depending on which thread it happened to run on.
 
 ### 14. Only the UI thread's exceptions are handled
 
@@ -395,6 +410,10 @@ a misleading diagnosis that will send users chasing the wrong problem.
 
 **Fix:** redirect stdout/stderr, log the tail on failure, and include the exit code.
 
+> **Fixed** alongside #10 in row 3, since it is the same block of code: the tool now runs with both pipes
+> drained while waiting (a chatty tool would otherwise deadlock on a full buffer) and its exit code and
+> output tail are reported.
+
 ### 16. Online AppID lookup cost is unbounded per batch item
 
 `SteamLookup.FindBestForExe` (`Core.cs:1604-1614`) tries up to 3 candidate titles sequentially, each with an
@@ -404,6 +423,18 @@ queries `MyGame`, `Autoberg`, and `Bionis`.
 
 **Fix:** cap at 2 candidates; require the candidate to be the exe's own folder first and stop on first hit;
 share a single `HttpClient` with a 4 s timeout; add a per-batch request budget.
+
+> **Fixed.** Candidates are capped at two, deepest folder first — the exe's own folder is the likeliest title
+> by far, and the third candidate almost never won but always cost a request. The per-request timeout is
+> **4 s** rather than 8 s, since this runs while a batch is stalled on the network.
+>
+> A per-run request budget now bounds the whole thing: `BatchPatcher.RunAsync` sets it to two per game, and
+> an exhausted budget makes `Search` return null **without touching the network**, so the batch falls back to
+> local detection instead of stalling. Single-game detection keeps the unlimited default.
+>
+> Not done: a shared `HttpClient`. The code uses `HttpWebRequest` with `ServicePointManager` already
+> process-wide, so connection reuse is handled by the platform; switching to `HttpClient` would be a larger
+> change than this item is worth.
 
 ---
 
@@ -691,7 +722,7 @@ narrower than the API's documented behaviour.
 | 4 | #11 — **done** (arithmetic verified, appearance not) | Unblocks anyone on a HiDPI display |
 | 5 | #4, #8, #14 — **done** | Removes the "it just doesn't start" and "no output" failure classes |
 | 6 | #9, #17, #18, #19 — **done** | Performance, once correctness is settled |
-| 7 | #12, #13, #15, #16 | Robustness hardening |
+| 7 | #12, #13, #15, #16 — **done** | Robustness hardening |
 | 8 | #25–#43 | Cleanup, in any order |
 
 ## What is already good (keep it)

@@ -769,6 +769,51 @@ static class TestMain
             try { Directory.Delete(appDir, true); } catch { }
         }
 
+        Console.WriteLine("\n[stale backup recovery]");
+        string sbDir = Path.Combine(Path.GetTempPath(), "gp_selftest_sb_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            Directory.CreateDirectory(sbDir);
+            string live = Path.Combine(sbDir, "steam_api.dll");
+            File.WriteAllText(live, "the real original");
+            string staleRoot = Path.Combine(sbDir, "goldberg_backup");
+
+            string first = OriginalBackups.Preserve(staleRoot, live);
+            Check(first != null && File.Exists(first), "first preserve succeeds", first);
+
+            // Corrupt the backup so it no longer verifies. This used to abort every later patch with
+            // "preserve and inspect ..." and no way out but deleting files by hand.
+            File.WriteAllText(first, "not the original any more");
+            var messages = new List<string>();
+            string second = OriginalBackups.Preserve(staleRoot, live, (lvl, msg) => messages.Add(msg));
+            Check(second != null && File.ReadAllText(second) == "the real original",
+                  "a corrupt backup is replaced by a fresh verified copy", second);
+
+            var quarantined = Directory.GetFiles(staleRoot, "*.corrupt-*", SearchOption.AllDirectories)
+                .Where(f => !f.EndsWith(".source.txt", StringComparison.OrdinalIgnoreCase)).ToArray();
+            Check(quarantined.Length == 1 && File.ReadAllText(quarantined[0]) == "not the original any more",
+                  "the bad copy is kept aside rather than deleted", quarantined.Length.ToString());
+            Check(messages.Count > 0, "the recovery is reported, not silent", messages.Count.ToString());
+
+            string third = OriginalBackups.Preserve(staleRoot, live, (lvl, msg) => { });
+            Check(third == second, "the repaired backup is reused from then on", third);
+        }
+        finally { try { Directory.Delete(sbDir, true); } catch { } }
+
+        Console.WriteLine("\n[steam lookup candidates]");
+        var titles = SteamLookup.CandidateTitles(@"D:\Steam\steamapps\common\Half-Life 2\bin\hl2.exe");
+        Check(titles.Count <= 2, "at most two candidates are queried", string.Join(", ", titles.ToArray()));
+        Check(titles.Count > 0 && titles[0] == "Half-Life 2",
+              "the game folder is the first candidate, not a container or a shallow parent", string.Join(", ", titles.ToArray()));
+        Check(SteamLookup.CandidateTitles(@"D:\Bionis\MyGame\g.exe").Count == 2,
+              "two usable folder names give two candidates", string.Join(", ", SteamLookup.CandidateTitles(@"D:\Bionis\MyGame\g.exe").ToArray()));
+        Check(SteamLookup.CandidateTitles(@"C:\x.exe").Count == 0, "no usable folder name means no candidates", null);
+
+        // An exhausted budget must refuse without touching the network, which is what bounds a batch.
+        SteamLookup.ResetRequestBudget(0);
+        Check(SteamLookup.Search("Half-Life 2") == null, "an exhausted request budget makes no request", null);
+        SteamLookup.ResetRequestBudget(int.MaxValue);
+
         ReviewRegressions();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 

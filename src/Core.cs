@@ -312,9 +312,18 @@ namespace Gp
                 return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant()))).Replace("-", "");
         }
 
+        [ThreadStatic] static HashSet<string> heldKeys;
+
         internal static T Locked<T>(string path, Func<T> action)
         {
-            using (var mutex = new Mutex(false, @"Local\GoldbergPatcher-" + PathKey(path)))
+            string key = PathKey(path);
+            // Windows mutexes are recursive for the owning thread, so a nested Locked() on the same path
+            // happens to work today - but only by accident, and it silently becomes a 30-second stall
+            // followed by "Another instance is writing" the moment an inner call moves to another thread.
+            // Tracking the held keys explicitly makes re-entry intentional instead of incidental.
+            if (heldKeys != null && heldKeys.Contains(key)) return action();
+
+            using (var mutex = new Mutex(false, @"Local\GoldbergPatcher-" + key))
             {
                 bool held = false;
                 try
@@ -322,7 +331,10 @@ namespace Gp
                     try { held = mutex.WaitOne(TimeSpan.FromSeconds(30)); }
                     catch (AbandonedMutexException) { held = true; }
                     if (!held) throw new IOException("Another instance is writing " + path + ". Retry after it finishes.");
-                    return action();
+                    if (heldKeys == null) heldKeys = new HashSet<string>(StringComparer.Ordinal);
+                    heldKeys.Add(key);
+                    try { return action(); }
+                    finally { heldKeys.Remove(key); }
                 }
                 finally { if (held) mutex.ReleaseMutex(); }
             }
@@ -508,7 +520,26 @@ namespace Gp
             return File.Exists(path) && new FileInfo(path).Length > 0 && !PatchRunner.LooksLikeBundledGoldberg(path);
         }
 
-        static string Existing(string root, string source, out string hash)
+        /// <summary>Moves a backup that failed verification aside so a fresh one can be taken from the live
+        /// file. Returns the new path, or null when it could not be moved - in which case the caller still
+        /// fails safe rather than overwriting something it cannot vouch for.</summary>
+        static string Quarantine(string backup, Action<LogLevel, string> log)
+        {
+            try
+            {
+                string target = backup + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                File.Move(backup, target);
+                string manifest = backup + ".source.txt";
+                if (File.Exists(manifest)) File.Move(manifest, target + ".source.txt");
+                if (log != null)
+                    log(LogLevel.Warn, "Existing backup failed verification and was set aside as "
+                        + Path.GetFileName(target) + " – a fresh copy will be taken from the current file.");
+                return target;
+            }
+            catch { return null; }
+        }
+
+        static string Existing(string root, string source, out string hash, Action<LogLevel, string> log)
         {
             string destination = Location(root, source);
             IOException failure = null;
@@ -521,7 +552,15 @@ namespace Gp
                     if (Eligible(destination)) return destination;
                     failure = new IOException("Backup is not an eligible original: " + destination);
                 }
-                catch (IOException ex) { failure = ex; }
+                catch (IOException ex)
+                {
+                    // A backup that no longer verifies used to abort the whole patch with "preserve and
+                    // inspect ...", leaving the user to delete files by hand before they could patch again.
+                    // Set the bad copy aside and re-preserve instead; the guard in Eligible still refuses to
+                    // promote a bundled Goldberg dll, so this cannot turn a patched file into "the original".
+                    if (Quarantine(destination, log) != null) failure = null;
+                    else failure = ex;
+                }
             }
             string legacy = Path.Combine(root, Path.GetFileName(source));
             if (string.Equals(Path.GetFullPath(root), Path.Combine(Path.GetDirectoryName(Path.GetFullPath(source)), "goldberg_backup"), StringComparison.OrdinalIgnoreCase)
@@ -535,13 +574,13 @@ namespace Gp
             return null;
         }
 
-        public static string Preserve(string root, string source)
+        public static string Preserve(string root, string source, Action<LogLevel, string> log = null)
         {
             string destination = Location(root, source);
             return SafePersistence.Locked(destination, () =>
             {
                 string hash;
-                string existing = Existing(root, source, out hash);
+                string existing = Existing(root, source, out hash, log);
                 if (existing != null && File.Exists(destination)) return existing;
                 string content = existing ?? source;
                 if (!Eligible(content)) return null;
@@ -560,12 +599,12 @@ namespace Gp
             });
         }
 
-        public static void Restore(string root, string source, List<FileWriteRecord> journal = null)
+        public static void Restore(string root, string source, List<FileWriteRecord> journal = null, Action<LogLevel, string> log = null)
         {
             SafePersistence.Locked(Location(root, source), () =>
             {
                 string hash;
-                string backup = Existing(root, source, out hash);
+                string backup = Existing(root, source, out hash, log);
                 if (backup == null) throw new IOException("No verified or eligible legacy original backup exists for " + source);
                 var write = SafePersistence.Copy(backup, source, journal, staged =>
                 {
@@ -1499,7 +1538,7 @@ namespace Gp
                 Func<string, string> backup = (src) =>
                 {
                     if (!o.Backup) return null;
-                    var dst = OriginalBackups.Preserve(backupDir, src);
+                    var dst = OriginalBackups.Preserve(backupDir, src, Log);
                     if (dst != null) anyBackup = true;
                     return dst;
                 };
@@ -1911,7 +1950,7 @@ namespace Gp
                 if (LooksLikeBundledGoldberg(cur))
                 {
                     // live dll is a Goldberg emulator build – online-fix cannot work with it in place
-                    OriginalBackups.Restore(backupDir, cur, res.Writes);
+                    OriginalBackups.Restore(backupDir, cur, res.Writes, Log);
                     Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from goldberg_backup\\ (required for online-fix).");
                     res.ReplacedFiles.Add(n);
                 }
@@ -2340,6 +2379,9 @@ namespace Gp
                 // Detection results are memoised per folder; drop them once per run so a steam_appid.txt
                 // written between runs is picked up while repeated lookups within a run stay cheap.
                 AppIdDetector.ClearLocalCache();
+                // Bound the online lookups for the whole run: two candidates per game, so a batch cannot
+                // stall indefinitely on the network. Single-game detection keeps the unlimited default.
+                SteamLookup.ResetRequestBudget(Math.Max(10, (items == null ? 0 : items.Count) * 2));
                 var results = new List<BatchItemOutcome>();
                 int n = (items == null ? 0 : items.Count);
 
@@ -2435,7 +2477,9 @@ namespace Gp
             {
                 string dir = Path.GetDirectoryName(Path.GetFullPath(exePath ?? ""));
                 var parts = (dir ?? "").Replace('/', '\\').Split('\\');
-                for (int i = parts.Length - 1; i >= 0 && list.Count < 3; i--)
+                // Deepest component first, which is the exe's own folder - the likeliest title by far - and
+                // capped at two: the third candidate was almost never the answer but always cost a request.
+                for (int i = parts.Length - 1; i >= 0 && list.Count < 2; i--)
                 {
                     var p = (parts[i] ?? "").Trim();
                     if (p.Length < 4) continue;
@@ -2466,6 +2510,7 @@ namespace Gp
         {
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(title)) return null;
+            if (!TakeRequestBudget()) return null;   // budget spent: fall back to local detection
             string json = HttpGet(UrlFmt.Replace("{0}", Uri.EscapeDataString(title.Trim())), ct);
             if (json == null) return null;
             return BestMatch(ParseItems(json), title);
@@ -2555,6 +2600,26 @@ namespace Gp
             return Task.Run(() => FindBestForExe(exePath, ct), ct);
         }
 
+        /// <summary>Requests left for online lookups in the current run. A 50-game batch used to be able to
+        /// issue unbounded sequential lookups, each with its own timeout; once this is spent the batch falls
+        /// back to local detection rather than stalling on the network.</summary>
+        static int requestBudget = int.MaxValue;
+
+        public static void ResetRequestBudget(int requests)
+        {
+            Interlocked.Exchange(ref requestBudget, Math.Max(0, requests));
+        }
+
+        static bool TakeRequestBudget()
+        {
+            while (true)
+            {
+                int current = Volatile.Read(ref requestBudget);
+                if (current <= 0) return false;
+                if (Interlocked.CompareExchange(ref requestBudget, current - 1, current) == current) return true;
+            }
+        }
+
         static string HttpGet(string url, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
@@ -2563,8 +2628,10 @@ namespace Gp
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "GET";
-                req.Timeout = 8000;
-                req.ReadWriteTimeout = 8000;
+                // 4s rather than 8s: this runs while a batch is stalled on the network, and a slow answer
+                // is worth less than the delay costs.
+                req.Timeout = 4000;
+                req.ReadWriteTimeout = 4000;
                 req.UserAgent = "GoldbergPatcher/0.3";
                 using (ct.Register(() => req.Abort()))
                 using (var resp = req.GetResponse())
