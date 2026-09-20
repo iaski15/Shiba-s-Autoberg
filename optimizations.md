@@ -159,6 +159,26 @@ table is data directory index 1) and take the exact imported name. Fall back to 
 when the exe imports neither. Then *verify* after install by re-reading the import table and asserting the
 name now resolves on disk.
 
+> **Fixed.** `PeReader.ImportedDlls` walks data directory index 1 and returns the names in file order, sharing
+> one bounds-checked header parse with `Analyze` (extracted as `ReadLayout` so the two cannot drift).
+> `PatchRunner.ImportedSteamApiName` picks the Steamworks name out of that, and the pipeline uses it for the
+> install name, for `PickApiTarget`, and in the summary. When the exe imports neither name it falls back to
+> the architecture and says so in the log rather than pretending.
+>
+> A second, worse bug sat next to this one: `InstallGoldbergDlls` chose which bundled dll to copy **by
+> destination name** (`dllName == "steam_api64.dll" ? ApiDll64 : ApiDll86`). So a 64-bit game importing
+> `steam_api.dll` got the 32-bit library under the right name — the same silent breakage by a different
+> route. The source is now chosen by architecture only, and the staged dll is checked against the target's
+> architecture before it is allowed to land.
+>
+> Post-install verification: if the executable imports a Steamworks name and no such file exists in the
+> install folder afterwards, the run now fails loudly instead of reporting success.
+>
+> Tested with a purpose-built synthetic PE (`WritePeWithImport`): a 64-bit executable importing
+> `steam_api.dll` reports that name, `steam_api64.dll` reports its own, and an unrelated import is not
+> mistaken for Steamworks. No binary in this repo imports a Steamworks dll, so the fixture is the only way
+> to cover the decision.
+
 ### 6. Steamless output is discovered by regex-scraping its stdout
 
 `Core.cs:936-955`:
@@ -182,6 +202,14 @@ machinery. That machinery is good, but it exists only because the primary detect
 **Fix (short term):** call Steamless with an explicit output path if the CLI supports one, or take a
 before/after snapshot of the directory and pick the new file — filesystem truth instead of text parsing.
 **Fix (real):** unpack in-process; see `plan.md`.
+
+> **Fixed, by the snapshot route.** The regex is gone; discovery now *only* uses the before/after fingerprint
+> that `InvocationOutputs` was already computing. That deletes the failure modes listed above (forward slashes,
+> quoted paths, `\\?\` prefixes, format changes between Steamless versions) and removes the "newest
+> `.unpacked.exe` in the directory" heuristic, because the fingerprint *is* the primary mechanism now rather
+> than its defender. The stdout text is still read for one thing only: choosing between two log messages.
+>
+> The real fix — unpacking in-process so there is no file to discover at all — remains plan.md §5.
 
 ### 7. .NET Framework 4.8 + `System.Web.Extensions`
 
@@ -239,6 +267,12 @@ against it and silently produces nothing — the tool's exit code is never check
 (`Core.cs:1033-1042` only kills it after 60 s).
 
 **Fix:** use the PE header; check the exit code; log it.
+
+> **Fixed.** `TryGenerateInterfaces` reads the architecture from `PeReader.Analyze(target)`, and skips with a
+> warning when it is unknown rather than guessing at the tool. It also drains stdout/stderr while waiting (a
+> chatty tool would otherwise deadlock on a full pipe) and reports the tool's exit code plus the tail of its
+> output, so "produced nothing" no longer reads as "the dll does not export interfaces" — which sent people
+> after the wrong problem. The same code path covers #15; only its output redirection overlapped.
 
 ### 11. The app opts into Per-Monitor-V2 DPI awareness but does not scale anything
 
@@ -578,7 +612,7 @@ narrower than the API's documented behaviour.
 | --- | --- | --- |
 | 1 | #1, #2, #3 — **done** | Data safety and disk hygiene; all three live in `SafePersistence` and can be done together |
 | 2 | #21, #20 — **done** | Largest user-visible win per line changed (8.4 MB exe, faster start) |
-| 3 | #5, #6, #10 | Correctness of the core value proposition (dll placement, unpack detection) |
+| 3 | #5, #6, #10 — **done** | Correctness of the core value proposition (dll placement, unpack detection) |
 | 4 | #11 | Unblocks anyone on a HiDPI display |
 | 5 | #4, #8, #14 | Removes the "it just doesn't start" and "no output" failure classes |
 | 6 | #9, #17, #18, #19 | Performance, once correctness is settled |

@@ -42,6 +42,40 @@ static class TestMain
         var selfPe = PeReader.Analyze(typeof(TestMain).Assembly.Location);
         Check(selfPe.AnyCpu && selfPe.Arch == expectedAnyCpu, "compiler-produced AnyCPU resolution", selfPe.MachineText);
 
+        Console.WriteLine("\n[import table]");
+        // The import table decides which name the emulator must be installed under, so it has to be read
+        // correctly from real binaries - not just synthetic fixtures.
+        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"steamless\Steamless.CLI.exe"));
+        Check(cliImports.Any(n => string.Equals(n, "mscoree.dll", StringComparison.OrdinalIgnoreCase)),
+              "managed exe reports its mscoree.dll import", string.Join(", ", cliImports.ToArray()));
+
+        var api64Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x64\steam_api64.dll"));
+        Check(api64Imports.Any(n => string.Equals(n, "KERNEL32.dll", StringComparison.OrdinalIgnoreCase)),
+              "native dll import names are parsed", string.Join(", ", api64Imports.ToArray()));
+        Check(api64Imports.Count >= 5, "the whole descriptor array is walked, not just the first entry",
+              api64Imports.Count.ToString());
+        // A wrong RVA mapping reads descriptor bytes as the name, which shows up as high-bit junk.
+        Check(api64Imports.All(n => n.Length >= 4 && n.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)),
+              "import names look like dll names, not decoded garbage", string.Join(", ", api64Imports.ToArray()));
+
+        var api86Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
+        Check(api86Imports.Count > 0, "32-bit dll import table is parsed too", api86Imports.Count.ToString());
+
+        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"steamless\Steamless.CLI.exe")) == null,
+              "an exe importing no Steamworks dll reports null rather than guessing", null);
+        Check(PatchRunner.IsSteamApiName("steam_api.dll") && PatchRunner.IsSteamApiName("STEAM_API64.DLL")
+              && !PatchRunner.IsSteamApiName("steam_api_extra.dll") && !PatchRunner.IsSteamApiName("mscoree.dll"),
+              "Steamworks dll name recognition", null);
+
+        string junkPath = Path.Combine(Path.GetTempPath(), "gp_import_junk_" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".bin");
+        try
+        {
+            File.WriteAllBytes(junkPath, new byte[] { 0x4D, 0x5A, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+            Check(PatchRunner.ImportedSteamApiName(junkPath) == null,
+                  "a malformed file reports null instead of throwing", null);
+        }
+        finally { try { File.Delete(junkPath); } catch { } }
+
         // ---- synthetic PEs: regression tests for the PeReader offset bugs (bug 1) ----
         Console.WriteLine("\n[PE analysis: synthetic]");
         string synDir = Path.Combine(Path.GetTempPath(), "gp_selftest_pe_" + Guid.NewGuid().ToString("N").Substring(0, 6));
@@ -133,6 +167,32 @@ static class TestMain
             try { PeReader.Analyze(noPePath); }
             catch { noPeRejected = true; }
             Check(noPeRejected, "non-PE file rejected", null);
+
+            // These fixtures carry no import directory, so the walk must come back empty rather than
+            // throwing or inventing entries.
+            var noImports = PeReader.ImportedDlls(nativePath);
+            Check(noImports.Count == 0, "a PE with no import directory yields no imports", noImports.Count.ToString());
+
+            // The install name must follow the import table, not the architecture: a 64-bit executable
+            // importing the 32-bit name is the silent-breakage case from optimizations #5.
+            var x64Importing32Path = Path.Combine(synDir, "x64_imports_32bit_name.exe");
+            WritePeWithImport(x64Importing32Path, "steam_api.dll");
+            Check(PeReader.Analyze(x64Importing32Path).Arch == ExeArch.X64, "import fixture really is 64-bit", null);
+            var fixtureImports = PeReader.ImportedDlls(x64Importing32Path);
+            Check(fixtureImports.Count == 1 && fixtureImports[0] == "steam_api.dll",
+                  "synthetic import directory yields the imported name", string.Join(", ", fixtureImports.ToArray()));
+            Check(PatchRunner.ImportedSteamApiName(x64Importing32Path) == "steam_api.dll",
+                  "a 64-bit exe importing steam_api.dll reports that name", null);
+
+            var import64Path = Path.Combine(synDir, "imports_64bit_name.exe");
+            WritePeWithImport(import64Path, "steam_api64.dll");
+            Check(PatchRunner.ImportedSteamApiName(import64Path) == "steam_api64.dll",
+                  "a steam_api64.dll import reports that name", null);
+
+            var importOtherPath = Path.Combine(synDir, "imports_unrelated.exe");
+            WritePeWithImport(importOtherPath, "kernel32.dll");
+            Check(PatchRunner.ImportedSteamApiName(importOtherPath) == null,
+                  "an unrelated import is not mistaken for Steamworks", null);
             }
         }
         finally
@@ -777,6 +837,43 @@ static class TestMain
 
     static void W16(byte[] b, int off, ushort v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); }
     static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
+
+    /// <summary>Minimal native x64 PE whose import directory names a single dll. Exists to prove the
+    /// emulator's install name comes from the import table rather than from the architecture - a 64-bit
+    /// executable importing the 32-bit name is exactly the failure mode optimizations #5 describes.</summary>
+    static void WritePeWithImport(string path, string importName)
+    {
+        var b = new byte[2048];
+        W16(b, 0x00, 0x5A4D);          // DOS "MZ"
+        W32(b, 0x3C, 0x80);            // e_lfanew
+        int pe = 0x80;
+        W32(b, pe, 0x00004550);        // "PE\0\0"
+        W16(b, pe + 4, 0x8664);        // Machine = AMD64
+        W16(b, pe + 6, 1);             // NumberOfSections
+        W32(b, pe + 8, 0x5F000000);    // TimeDateStamp
+        W16(b, pe + 20, 0xF0);         // SizeOfOptionalHeader (PE32+)
+        W16(b, pe + 22, 0x22);         // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+        int opt = pe + 24;
+        W16(b, opt, 0x20B);            // PE32+
+        W32(b, opt + 60, 0x400);       // SizeOfHeaders
+        W32(b, opt + 108, 16);         // NumberOfRvaAndSizes
+        int importDir = opt + 112 + 8; // data directory index 1 (the import table)
+        W32(b, importDir, 0x1100);     // RVA of the descriptor array
+        W32(b, importDir + 4, 40);     // two descriptors: one real, one all-zero terminator
+        int sec = opt + 0xF0;          // section table right after the optional header
+        for (int i = 0; i < 5; i++) b[sec + i] = (byte)".text"[i];
+        W32(b, sec + 8, 0x1000);       // VirtualSize
+        W32(b, sec + 12, 0x1000);      // VirtualAddress
+        W32(b, sec + 16, 0x200);       // SizeOfRawData
+        W32(b, sec + 20, 0x400);       // PointerToRawData
+
+        // Descriptor 0 sits at RVA 0x1100 -> raw 0x500. Only its Name field matters here.
+        W32(b, 0x500 + 12, 0x1180);    // Name RVA -> raw 0x580
+        byte[] nameBytes = System.Text.Encoding.ASCII.GetBytes(importName);
+        Array.Copy(nameBytes, 0, b, 0x580, nameBytes.Length);
+        b[0x580 + nameBytes.Length] = 0;
+        File.WriteAllBytes(path, b);
+    }
 
     static void WriteNativeX64Pe(string path)
     {

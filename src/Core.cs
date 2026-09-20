@@ -59,68 +59,144 @@ namespace Gp
                 throw new InvalidDataException("PE range is outside the file or header.");
         }
 
+        /// <summary>Everything the header walk produces, so <see cref="Analyze"/> and
+        /// <see cref="ImportedDlls"/> share one bounds-checked parse instead of two that can drift.</summary>
+        sealed class Layout
+        {
+            public long Length;
+            public ushort Machine;
+            public ushort Characteristics;
+            public ushort Magic;
+            public int Count;
+            public int OptSize;
+            public long Opt;
+            public int Dd;
+            public uint Headers;
+            public uint Directories;
+            public readonly List<long[]> Sections = new List<long[]>();
+        }
+
+        static Layout ReadLayout(FileStream fs, BinaryReader br)
+        {
+            var L = new Layout { Length = fs.Length };
+            RequireRange(0, 64, fs.Length);
+            if (br.ReadUInt16() != 0x5a4d) throw new InvalidDataException("Missing DOS signature.");
+            fs.Position = 0x3c;
+            long pe = br.ReadUInt32();
+            if (pe < 64) throw new InvalidDataException("Invalid PE header offset.");
+            RequireRange(pe, 24, fs.Length);
+            fs.Position = pe;
+            if (br.ReadUInt32() != 0x4550) throw new InvalidDataException("Missing PE signature.");
+            L.Machine = br.ReadUInt16();
+            L.Count = br.ReadUInt16();
+            fs.Position = pe + 20;
+            L.OptSize = br.ReadUInt16();
+            L.Characteristics = br.ReadUInt16();
+            L.Opt = pe + 24;
+            RequireRange(L.Opt, L.OptSize, fs.Length);
+            RequireRange(0, 2, L.OptSize);
+            fs.Position = L.Opt;
+            L.Magic = br.ReadUInt16();
+            if (L.Magic != 0x10b && L.Magic != 0x20b) throw new InvalidDataException("Unsupported PE optional header.");
+            if ((L.Machine == 0x14c && L.Magic != 0x10b) || (L.Machine == 0x8664 && L.Magic != 0x20b))
+                throw new InvalidDataException("PE machine and optional header disagree.");
+            L.Dd = L.Magic == 0x20b ? 112 : 96;
+            RequireRange(0, L.Dd, L.OptSize);
+            fs.Position = L.Opt + 60;
+            L.Headers = br.ReadUInt32();
+            RequireRange(0, L.Headers, fs.Length);
+            fs.Position = L.Opt + L.Dd - 4;
+            L.Directories = br.ReadUInt32();
+            RequireRange(L.Dd, (long)L.Directories * 8, L.OptSize);
+            long table = L.Opt + L.OptSize;
+            RequireRange(table, (long)L.Count * 40, fs.Length);
+            if (L.Count == 0 || table + (long)L.Count * 40 > L.Headers)
+                throw new InvalidDataException("Invalid PE section table.");
+            for (int i = 0; i < L.Count; i++)
+            {
+                fs.Position = table + i * 40L + 8;
+                long virtualSize = br.ReadUInt32();
+                long va = br.ReadUInt32();
+                long rawSize = br.ReadUInt32();
+                long raw = br.ReadUInt32();
+                RequireRange(raw, rawSize, fs.Length);
+                if (va + Math.Max(virtualSize, rawSize) > 0x100000000L)
+                    throw new InvalidDataException("PE section RVA overflows.");
+                L.Sections.Add(new[] { va, rawSize, raw });
+            }
+            return L;
+        }
+
+        /// <summary>Names of the DLLs in the executable's import directory (data directory index 1), in
+        /// file order. This is what the loader will actually ask for — which is not always derivable from
+        /// the CPU architecture, since wrapper layers and renamed redistributables exist where a 64-bit
+        /// Steamworks library is imported under the 32-bit name.</summary>
+        public static List<string> ImportedDlls(string path)
+        {
+            var names = new List<string>();
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var br = new BinaryReader(fs))
+            {
+                var L = ReadLayout(fs, br);
+                if (L.Directories <= 1) return names;
+                fs.Position = L.Opt + L.Dd + 8;                 // index 1: the import directory
+                uint rva = br.ReadUInt32();
+                uint size = br.ReadUInt32();
+                if (rva == 0 || size == 0) return names;
+
+                long start = MapRva(rva, size, L.Headers, L.Sections);
+                RequireRange(start, size, fs.Length);
+                // 20 bytes per IMAGE_IMPORT_DESCRIPTOR; the array ends at the first all-zero entry.
+                int entries = (int)Math.Min(size / 20, 4096);
+                for (int i = 0; i < entries; i++)
+                {
+                    fs.Position = start + i * 20L;
+                    br.ReadUInt32();        // OriginalFirstThunk
+                    br.ReadUInt32();        // TimeDateStamp
+                    br.ReadUInt32();        // ForwarderChain
+                    uint nameRva = br.ReadUInt32();
+                    br.ReadUInt32();        // FirstThunk
+                    if (nameRva == 0) break;
+                    try
+                    {
+                        long at = MapRva(nameRva, 1, L.Headers, L.Sections);
+                        RequireRange(at, 1, fs.Length);
+                        var sb = new StringBuilder(64);
+                        long limit = Math.Min(at + 260, fs.Length);
+                        fs.Position = at;               // the descriptor walk moved the position; seek back
+                        for (long p = at; p < limit; p++)
+                        {
+                            int ch = br.ReadByte();
+                            if (ch == 0) break;
+                            sb.Append((char)ch);
+                        }
+                        string name = sb.ToString().Trim();
+                        if (name.Length > 0 && !names.Contains(name, StringComparer.OrdinalIgnoreCase))
+                            names.Add(name);
+                    }
+                    catch { /* a malformed name RVA must not discard the other imports */ }
+                }
+            }
+            return names;
+        }
+
         public static PeInfo Analyze(string path)
         {
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var br = new BinaryReader(fs))
             {
-                var info = new PeInfo { SizeBytes = fs.Length };
-                RequireRange(0, 64, fs.Length);
-                if (br.ReadUInt16() != 0x5a4d) throw new InvalidDataException("Missing DOS signature.");
-                fs.Position = 0x3c;
-                long pe = br.ReadUInt32();
-                if (pe < 64) throw new InvalidDataException("Invalid PE header offset.");
-                RequireRange(pe, 24, fs.Length);
-                fs.Position = pe;
-                if (br.ReadUInt32() != 0x4550) throw new InvalidDataException("Missing PE signature.");
-                info.Machine = br.ReadUInt16();
-                int count = br.ReadUInt16();
-                fs.Position = pe + 20;
-                int optSize = br.ReadUInt16();
-                ushort characteristics = br.ReadUInt16();
-                long opt = pe + 24;
-                RequireRange(opt, optSize, fs.Length);
-                RequireRange(0, 2, optSize);
-                fs.Position = opt;
-                ushort magic = br.ReadUInt16();
-                if (magic != 0x10b && magic != 0x20b) throw new InvalidDataException("Unsupported PE optional header.");
-                if ((info.Machine == 0x14c && magic != 0x10b) || (info.Machine == 0x8664 && magic != 0x20b))
-                    throw new InvalidDataException("PE machine and optional header disagree.");
-                int dd = magic == 0x20b ? 112 : 96;
-                RequireRange(0, dd, optSize);
-                fs.Position = opt + 60;
-                uint headers = br.ReadUInt32();
-                RequireRange(0, headers, fs.Length);
-                fs.Position = opt + dd - 4;
-                uint directories = br.ReadUInt32();
-                RequireRange(dd, (long)directories * 8, optSize);
-                long table = opt + optSize;
-                RequireRange(table, (long)count * 40, fs.Length);
-                if (count == 0 || table + (long)count * 40 > headers)
-                    throw new InvalidDataException("Invalid PE section table.");
-                var sections = new List<long[]>();
-                for (int i = 0; i < count; i++)
-                {
-                    fs.Position = table + i * 40L + 8;
-                    long virtualSize = br.ReadUInt32();
-                    long va = br.ReadUInt32();
-                    long rawSize = br.ReadUInt32();
-                    long raw = br.ReadUInt32();
-                    RequireRange(raw, rawSize, fs.Length);
-                    if (va + Math.Max(virtualSize, rawSize) > 0x100000000L)
-                        throw new InvalidDataException("PE section RVA overflows.");
-                    sections.Add(new[] { va, rawSize, raw });
-                }
+                var L = ReadLayout(fs, br);
+                var info = new PeInfo { SizeBytes = L.Length, Machine = L.Machine };
                 uint flags = 0;
-                if (directories > 14)
+                if (L.Directories > 14)
                 {
-                    fs.Position = opt + dd + 14 * 8;
+                    fs.Position = L.Opt + L.Dd + 14 * 8;
                     uint rva = br.ReadUInt32();
                     uint size = br.ReadUInt32();
                     if (rva != 0 || size != 0)
                     {
                         if (rva == 0 || size < 72) throw new InvalidDataException("Invalid CLR directory.");
-                        long cor = MapRva(rva, size, headers, sections);
+                        long cor = MapRva(rva, size, L.Headers, L.Sections);
                         RequireRange(cor, size, fs.Length);
                         fs.Position = cor;
                         uint cb = br.ReadUInt32();
@@ -137,7 +213,7 @@ namespace Gp
                     case 0xaa64: info.MachineText = "ARM64 (unsupported)"; break;
                     default: info.MachineText = "Unsupported machine 0x" + info.Machine.ToString("X4"); break;
                 }
-                bool prefer32 = (flags & 0x20000) != 0 && (characteristics & 0x2000) == 0;
+                bool prefer32 = (flags & 0x20000) != 0 && (L.Characteristics & 0x2000) == 0;
                 info.AnyCpu = info.Managed && info.Machine == 0x14c && (flags & 1) != 0 && (flags & 2) == 0 && !prefer32;
                 if (info.AnyCpu)
                 {
@@ -1316,10 +1392,15 @@ namespace Gp
                 Pct(8);
                 var foundApi = FindSteamApiFiles(gameDir, ct);
                 string installDir = gameDir;
-                string preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
-                string otherName = pe.Arch == ExeArch.X64 ? "steam_api.dll" : "steam_api64.dll";
+                // Prefer the name the loader will actually ask for; the architecture only breaks ties and
+                // covers executables that load the library dynamically.
+                string importedApi = ImportedSteamApiName(exePath);
+                string preferredName = importedApi ?? (pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll");
+                string otherName = preferredName == "steam_api64.dll" ? "steam_api.dll" : "steam_api64.dll";
+                if (importedApi != null)
+                    Log(LogLevel.Dim, "Imports " + importedApi + " – that is the name the emulator will be installed under.");
 
-                                if (foundApi.Count > 0)
+                if (foundApi.Count > 0)
                 {
                     var best = PickApiTarget(foundApi, gameDir, preferredName);
                     installDir = Path.GetDirectoryName(best);
@@ -1377,8 +1458,13 @@ namespace Gp
                         if (pe2.Arch != ExeArch.Unknown)
                         {
                             pe = pe2;
-                            preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
-                            otherName = pe.Arch == ExeArch.X64 ? "steam_api.dll" : "steam_api64.dll";
+                            // The import table does not change when Steamless rewrites the exe, so the
+                            // imported name stands. Only the architecture-derived fallback is recomputed.
+                            if (importedApi == null)
+                            {
+                                preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
+                                otherName = preferredName == "steam_api64.dll" ? "steam_api.dll" : "steam_api64.dll";
+                            }
                         }
                     }
                     catch { /* keep the pre-unpack analysis */ }
@@ -1579,17 +1665,13 @@ namespace Gp
                 return exePath;
             }
 
-            // find produced file: prefer path mentioned in output, else scan candidates
+            // find the produced file
             string outPath = null;
-            lock (outputLines)
-            {
-                foreach (var line in outputLines)
-                {
-                    var m = Regex.Match(line, "[A-Za-z]:\\\\[^\"*?<>|]*\\.unpacked\\.exe", RegexOptions.IgnoreCase);
-                    if (m.Success && outputs.IsCurrent(m.Value)) { outPath = m.Value; break; }
-                }
-            }
-            if (outPath == null || !File.Exists(outPath))
+            // Discover the output from the filesystem rather than by scraping Steamless' stdout. The regex
+            // this used to depend on required an absolute, backslash-separated path - forward slashes,
+            // quoted paths and \\?\ prefixes all failed to match - and it silently changed behaviour between
+            // Steamless versions. InvocationOutputs already fingerprints the directory before and after the
+            // run, so filesystem truth was always available and is now the only mechanism.
             {
                 var cand1 = exePath + ".unpacked.exe";
                 var nameOnly = Path.GetFileNameWithoutExtension(exePath);
@@ -1659,8 +1741,19 @@ namespace Gp
         {
             if (foundApi.Count == 0) return null;
             string target = PickApiTarget(foundApi, gameDir, preferredName);
-            bool x64 = Path.GetFileName(target).IndexOf("64", StringComparison.Ordinal) >= 0;
-            string tool = x64 ? Tools.GenInterfaces64 : Tools.GenInterfaces86;
+
+            // Architecture from the PE header, never from the file name. A 64-bit library can legitimately be
+            // named steam_api.dll, and running the 32-bit tool against it silently produces nothing.
+            ExeArch arch = ExeArch.Unknown;
+            try { arch = PeReader.Analyze(target).Arch; }
+            catch { }
+            if (arch == ExeArch.Unknown)
+            {
+                Log(LogLevel.Warn, "Could not determine the architecture of " + Path.GetFileName(target)
+                    + " – skipping the interface dump rather than guessing at the tool.");
+                return null;
+            }
+            string tool = arch == ExeArch.X64 ? Tools.GenInterfaces64 : Tools.GenInterfaces86;
             if (!File.Exists(tool))
             {
                 Log(LogLevel.Dim, "generate_interfaces tool not found – skipping interface dump.");
@@ -1679,9 +1772,16 @@ namespace Gp
                     WorkingDirectory = tmp,
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                 };
+                string stdOut = "", stdErr = "";
+                int exit = -1;
                 using (var p = Process.Start(psi))
                 {
+                    // Drain both pipes while waiting, or a chatty tool fills its buffer and deadlocks.
+                    var outTask = p.StandardOutput.ReadToEndAsync();
+                    var errTask = p.StandardError.ReadToEndAsync();
                     var sw = Stopwatch.StartNew();
                     while (!p.HasExited)
                     {
@@ -1689,6 +1789,9 @@ namespace Gp
                         if (sw.Elapsed.TotalSeconds > 60) { try { p.Kill(); } catch { } break; }
                         Thread.Sleep(80);
                     }
+                    try { stdOut = outTask.Result; } catch { }
+                    try { stdErr = errTask.Result; } catch { }
+                    try { exit = p.ExitCode; } catch { }
                 }
                 var outFile = Path.Combine(tmp, "steam_interfaces.txt");
                 if (File.Exists(outFile) && File.ReadAllLines(outFile).Any(l => l.Trim().Length > 0))
@@ -1696,7 +1799,12 @@ namespace Gp
                     Log(LogLevel.Ok, "Generated steam_interfaces.txt from the original dll.");
                     return File.ReadAllText(outFile);
                 }
-                Log(LogLevel.Dim, "Interface dump produced nothing (dll may not export interfaces) – skipped.");
+                // Report the exit code and the tool's own output: without them a failure here reads as
+                // "the dll does not export interfaces", which sends people after the wrong problem.
+                string detail = (stdErr + " " + stdOut).Trim();
+                if (detail.Length > 300) detail = detail.Substring(detail.Length - 300);
+                Log(LogLevel.Warn, "Interface dump produced nothing (generate_interfaces exit code " + exit + ")"
+                    + (detail.Length > 0 ? ": " + detail : " – the dll may not export interfaces."));
                 return null;
             }
             catch (OperationCanceledException) { throw; }
@@ -1787,8 +1895,15 @@ namespace Gp
 
         private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, Func<string, string> backup, PatchResult res)
         {
-            string prefName = arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
-            string otherName = arch == ExeArch.X64 ? "steam_api.dll" : "steam_api64.dll";
+            // The *name* comes from the import table; the *architecture* comes from the PE header. Deriving
+            // the name from the architecture is the worst failure mode in the app: a correctly-architected
+            // dll written under a name the loader never asks for, reported as success, game still broken.
+            string imported = ImportedSteamApiName(res.FinalExe);
+            string prefName = imported ?? (arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll");
+            string otherName = prefName == "steam_api64.dll" ? "steam_api.dll" : "steam_api64.dll";
+            if (imported == null)
+                Log(LogLevel.Warn, "This executable does not import a Steamworks dll directly, so " + prefName
+                    + " is a guess from its architecture. If the game still fails to start, check which name it loads at runtime.");
 
             var wanted = new List<string> { prefName };
             if (foundApi.Any(f => string.Equals(Path.GetFileName(f), otherName, StringComparison.OrdinalIgnoreCase)))
@@ -1797,7 +1912,9 @@ namespace Gp
             int installed = 0;
             foreach (var dllName in wanted)
             {
-                string src = dllName == "steam_api64.dll" ? Tools.ApiDll64 : Tools.ApiDll86;
+                // Chosen by architecture, never by the destination name: a 64-bit game can legitimately
+                // import steam_api.dll, and installing the 32-bit library there would be silent breakage.
+                string src = arch == ExeArch.X64 ? Tools.ApiDll64 : Tools.ApiDll86;
                 if (!File.Exists(src)) { Log(LogLevel.Error, "Missing bundled emulator dll: " + src); continue; }
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
@@ -1806,17 +1923,48 @@ namespace Gp
                 }
                 SafePersistence.Copy(src, dst, res.Writes, staged =>
                 {
-                    if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
+                    var pe = PeReader.Analyze(staged);
+                    if (pe.Arch == ExeArch.Unknown)
                         throw new InvalidDataException("Unsupported emulator dll architecture.");
+                    if (pe.Arch != arch)
+                        throw new InvalidDataException("Emulator dll is " + pe.MachineText
+                            + " but the target executable is " + (arch == ExeArch.X64 ? "x64" : "x86") + ".");
                 });
                 res.ReplacedFiles.Add(dllName);
                 installed++;
-                Log(LogLevel.Ok, "Installed Goldberg → " + dllName);
+                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (arch == ExeArch.X64 ? "x64" : "x86") + ")");
             }
 
             if (installed == 0)
                 throw new Exception("No steam_api dll could be installed – the bundled emulator dll(s) are missing from this patcher's folder.\n"
                     + "The self-contained restore may have failed; check the log above and re-run, or reinstall the patcher.");
+
+            // Confirm the name the loader will ask for now resolves on disk. Nothing else in the pipeline
+            // checks this, and a mismatch stays invisible until the game is launched.
+            if (imported != null && !File.Exists(Path.Combine(installDir, imported)))
+                throw new Exception("The emulator was installed, but the executable imports " + imported
+                    + " and no such file exists in " + installDir + " – the game would still fail to start.");
+        }
+
+        /// <summary>True for the two names Steamworks libraries are shipped under.</summary>
+        public static bool IsSteamApiName(string name)
+        {
+            return string.Equals(name, "steam_api.dll", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "steam_api64.dll", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The Steamworks name the loader will actually ask for, taken from the target's import
+        /// table. Null when the executable imports neither name — it may load the library dynamically, in
+        /// which case only the architecture can guide the choice.</summary>
+        public static string ImportedSteamApiName(string exePath)
+        {
+            try
+            {
+                foreach (var name in PeReader.ImportedDlls(exePath))
+                    if (IsSteamApiName(name)) return name;
+            }
+            catch { }
+            return null;
         }
 
         /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
