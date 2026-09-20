@@ -440,12 +440,16 @@ namespace Gp
                 string content = existing ?? source;
                 if (!Eligible(content)) return null;
                 hash = hash ?? SafePersistence.Hash(content);
-                SafePersistence.Copy(content, destination, null, staged =>
+                // These two writes are the backup itself, so they need no undo record of their own –
+                // and they are not part of any run's journal, so nothing else would ever collect their
+                // staging areas. Drop them here or goldberg_backup accumulates .gp-recovery litter.
+                var backupWrite = SafePersistence.Copy(content, destination, null, staged =>
                 {
                     if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
                         throw new IOException("Original changed while preserving: " + content);
                 });
-                SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + hash + "\r\n");
+                var manifestWrite = SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + hash + "\r\n");
+                Recovery.Discard(new[] { backupWrite, manifestWrite });
                 return destination;
             });
         }
@@ -457,11 +461,13 @@ namespace Gp
                 string hash;
                 string backup = Existing(root, source, out hash);
                 if (backup == null) throw new IOException("No verified or eligible legacy original backup exists for " + source);
-                SafePersistence.Copy(backup, source, journal, staged =>
+                var write = SafePersistence.Copy(backup, source, journal, staged =>
                 {
                     if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
                         throw new IOException("Original backup changed while restoring: " + backup);
                 });
+                // When no run journal was supplied nothing will collect this staging area.
+                if (journal == null) Recovery.Discard(new[] { write });
                 return true;
             });
         }
@@ -736,6 +742,7 @@ namespace Gp
                     foreach (var f in Directory.GetFiles(area, "*.journal.txt")) TryDelete(f);
                     foreach (var f in Directory.GetFiles(area, "*.staged-*")) TryDelete(f);
                     if (Directory.GetFileSystemEntries(area).Length == 0) Directory.Delete(area);
+                    RemoveEmptyRecoveryRoot(area);
                 }
                 catch { }
             }
@@ -747,8 +754,28 @@ namespace Gp
         {
             foreach (var area in AreasOf(writes))
             {
-                try { if (Directory.Exists(area)) Directory.Delete(area, true); } catch { }
+                try
+                {
+                    if (Directory.Exists(area)) Directory.Delete(area, true);
+                    RemoveEmptyRecoveryRoot(area);
+                }
+                catch { }
             }
+        }
+
+        /// <summary>Drops the .gp-recovery folder itself once its last per-write area is gone. Without
+        /// this, every patch leaves one empty .gp-recovery behind per directory it touched – visible to
+        /// Steam's "verify integrity of game files" and to antivirus heuristics.</summary>
+        static void RemoveEmptyRecoveryRoot(string area)
+        {
+            try
+            {
+                string root = Path.GetDirectoryName(area);
+                if (string.IsNullOrEmpty(root)) return;
+                if (Directory.Exists(root) && Directory.GetFileSystemEntries(root).Length == 0)
+                    Directory.Delete(root);
+            }
+            catch { }
         }
 
         static IEnumerable<string> AreasOf(IEnumerable<FileWriteRecord> writes)

@@ -95,7 +95,14 @@ garbage at a much higher rate.
 > last patch" needs them. Growth is bounded to **one run's worth** instead of unbounded: `Recovery.SaveJournal`
 > prunes the previous run's areas as it records the new one. `AppSettings.Save` no longer leaks at all — it
 > discards its staging area immediately, since a regenerable settings file needs no undo record.
-> Not done: the time-based sweep for folders orphaned by a crash before the journal was written.
+>
+> Two further leaks only showed up under a live patch and are also fixed. The empty `.gp-recovery` **folder**
+> itself is now removed once its last area goes — previously every patch stranded one empty folder per
+> directory it touched (9 of them in a single run, measured). And `OriginalBackups.Preserve` now discards its
+> own two writes: they belong to no run journal, so nothing else would ever have collected them, and
+> `goldberg_backup` was accumulating `.gp-recovery` trees *inside itself*.
+>
+> Not done: the time-based sweep for folders orphaned by a crash between the last write and the journal write.
 
 ### 3. The original game exe is stored twice on every unpack
 

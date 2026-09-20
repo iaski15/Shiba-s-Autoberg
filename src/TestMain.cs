@@ -17,6 +17,12 @@ static class TestMain
 
     static int Main()
     {
+        // The pipeline tests below run the real PatchRunner, which persists an undo journal. Redirect it
+        // to a throwaway file for the whole run: otherwise the self-test clobbers a real pending undo and
+        // leaves a journal pointing at temp folders that are deleted before it returns.
+        string undoDir = Path.Combine(Path.GetTempPath(), "gp_selftest_undo_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Recovery.JournalPathOverride = Path.Combine(undoDir, "journal.txt");
+
         Console.WriteLine("== Goldberg Patcher self-test ==\n[PE analysis]");
         var root = AppDomain.CurrentDomain.BaseDirectory;
 
@@ -466,7 +472,6 @@ static class TestMain
         Console.WriteLine("\n[rollback]");
         string rbDir = Path.Combine(Path.GetTempPath(), "gp_selftest_rb_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(rbDir);
-        Recovery.JournalPathOverride = Path.Combine(rbDir, "journal.txt");
         try
         {
             var keep = Path.Combine(rbDir, "keep.txt");
@@ -552,21 +557,50 @@ static class TestMain
                   "collection keeps the recovery copy so undo still works", null);
             Check(!File.Exists(w8[0].JournalPath), "collection drops the superseded per-write journal", null);
 
+            // A patch that only creates files leaves no recovery copies behind, so the .gp-recovery
+            // folder itself must go – otherwise every patch strands one empty folder per directory.
+            // Use a directory of its own: sibling areas from the tests above keep their .previous copies
+            // and would legitimately keep the shared root alive.
+            string gcIsolated = Path.Combine(rbDir, "isolated");
+            Directory.CreateDirectory(gcIsolated);
+            var brandNew = Path.Combine(gcIsolated, "brand-new.txt");
+            var w9 = new List<FileWriteRecord>();
+            SafePersistence.WriteText(brandNew, "created by the patch", w9);
+            string gcRoot = Path.GetDirectoryName(w9[0].Area);
+            Check(Directory.Exists(gcRoot), "a write creates its .gp-recovery root", gcRoot);
+            Recovery.CollectStaging(w9);
+            Check(!Directory.Exists(gcRoot),
+                  "collection removes an empty .gp-recovery root, not just its contents", gcRoot);
+
+            // Preserving an original is itself a pair of writes that belong to no run journal, so
+            // nothing else would collect their staging areas – they must not litter the backup folder.
+            string backupRoot = Path.Combine(rbDir, "backup-root");
+            Directory.CreateDirectory(backupRoot);
+            var originalFile = Path.Combine(rbDir, "original-dll.bin");
+            File.WriteAllBytes(originalFile, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            string preserved = OriginalBackups.Preserve(backupRoot, originalFile);
+            Check(preserved != null && File.Exists(preserved), "preserve writes a verified backup", preserved);
+            var stray = Directory.GetDirectories(backupRoot, ".gp-recovery", SearchOption.AllDirectories);
+            Check(stray.Length == 0, "preserve strands no .gp-recovery litter in the backup root",
+                  stray.Length == 0 ? null : stray[0]);
+
             var empty = Recovery.Rollback(new List<RecoveryEntry>(), null);
             Check(empty.Restored == 0 && empty.Failed == 0 && empty.Summary == "Nothing to undo.",
                   "rolling back nothing is a no-op, not an error", empty.Summary);
         }
         finally
         {
-            // Delete the redirected journal while the override is still in place – clearing it after
-            // restoring the override would delete the real application's pending undo record.
+            // Clear the journal between sections, but leave the process-wide override in place –
+            // Main owns it and restores it before returning.
             try { if (File.Exists(Recovery.JournalPath)) File.Delete(Recovery.JournalPath); } catch { }
-            Recovery.JournalPathOverride = null;
             try { Directory.Delete(rbDir, true); } catch { }
         }
 
         ReviewRegressions();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
+
+        Recovery.JournalPathOverride = null;
+        try { Directory.Delete(undoDir, true); } catch { }
         return fail == 0 ? 0 : 1;
     }
 
