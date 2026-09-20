@@ -8,6 +8,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Web.Script.Serialization;
 
 namespace Gp
 {
@@ -33,127 +36,376 @@ namespace Gp
     /// <summary>Parses PE headers: architecture + managed/AnyCPU detection.</summary>
     public static class PeReader
     {
+        static void RequireRange(long offset, long size, long length)
+        {
+            if (offset < 0 || size < 0 || offset > length || size > length - offset)
+                throw new InvalidDataException("PE range is outside the file or header.");
+        }
+
         public static PeInfo Analyze(string path)
         {
-            var info = new PeInfo();
-            var fi = new FileInfo(path);
-            info.SizeBytes = fi.Exists ? fi.Length : 0;
-
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var br = new BinaryReader(fs))
             {
-                fs.Position = 0x3C;
-                int peOff = br.ReadInt32();
-                if (peOff <= 0 || peOff + 26 > fs.Length) throw new InvalidDataException("Not a valid PE file.");
-                fs.Position = peOff;
-                uint sig = br.ReadUInt32();
-                if (sig != 0x00004550) throw new InvalidDataException("Not a valid PE file.");
-
-                ushort machine = br.ReadUInt16();          // peOff+4   Machine
-                ushort numSections = br.ReadUInt16();      // peOff+6   NumberOfSections
-                fs.Position = peOff + 16;                  // SizeOfOptionalHeader (after TimeDateStamp + PointerToSymbolTable)
+                var info = new PeInfo { SizeBytes = fs.Length };
+                RequireRange(0, 64, fs.Length);
+                if (br.ReadUInt16() != 0x5a4d) throw new InvalidDataException("Missing DOS signature.");
+                fs.Position = 0x3c;
+                long pe = br.ReadUInt32();
+                if (pe < 64) throw new InvalidDataException("Invalid PE header offset.");
+                RequireRange(pe, 24, fs.Length);
+                fs.Position = pe;
+                if (br.ReadUInt32() != 0x4550) throw new InvalidDataException("Missing PE signature.");
+                info.Machine = br.ReadUInt16();
+                int count = br.ReadUInt16();
+                fs.Position = pe + 20;
                 int optSize = br.ReadUInt16();
-
-                int optOff = peOff + 24;
-                if (optOff >= fs.Length) throw new InvalidDataException("Not a valid PE file.");
-                fs.Position = optOff;
+                ushort characteristics = br.ReadUInt16();
+                long opt = pe + 24;
+                RequireRange(opt, optSize, fs.Length);
+                RequireRange(0, 2, optSize);
+                fs.Position = opt;
                 ushort magic = br.ReadUInt16();
-
-                bool managed = false;
-                Dictionary<long, long[]> sections = null;
-                if (magic == 0x10B || magic == 0x20B)
+                if (magic != 0x10b && magic != 0x20b) throw new InvalidDataException("Unsupported PE optional header.");
+                if ((info.Machine == 0x14c && magic != 0x10b) || (info.Machine == 0x8664 && magic != 0x20b))
+                    throw new InvalidDataException("PE machine and optional header disagree.");
+                int dd = magic == 0x20b ? 112 : 96;
+                RequireRange(0, dd, optSize);
+                fs.Position = opt + 60;
+                uint headers = br.ReadUInt32();
+                RequireRange(0, headers, fs.Length);
+                fs.Position = opt + dd - 4;
+                uint directories = br.ReadUInt32();
+                RequireRange(dd, (long)directories * 8, optSize);
+                long table = opt + optSize;
+                RequireRange(table, (long)count * 40, fs.Length);
+                if (count == 0 || table + (long)count * 40 > headers)
+                    throw new InvalidDataException("Invalid PE section table.");
+                var sections = new List<long[]>();
+                for (int i = 0; i < count; i++)
                 {
-                    // Data directories live at a fixed offset inside the optional header.
-                    int ddOff = optOff + (magic == 0x20B ? 112 : 96);
-
-                    // The section table normally follows the optional header, but some builds ship
-                    // with SizeOfOptionalHeader zeroed (Steamless.CLI.exe does) – in that case fall
-                    // back to the standard size for this magic and validate before trusting it.
-                    int stdSize = magic == 0x20B ? 0xF0 : 0xE0;
-                    sections = TryReadSections(optOff + optSize, numSections, fs, br)
-                             ?? TryReadSections(optOff + stdSize, numSections, fs, br);
-
-                    // CLR directory = DD[14]
-                    if (ddOff + 14 * 8 + 8 <= fs.Length)
+                    fs.Position = table + i * 40L + 8;
+                    long virtualSize = br.ReadUInt32();
+                    long va = br.ReadUInt32();
+                    long rawSize = br.ReadUInt32();
+                    long raw = br.ReadUInt32();
+                    RequireRange(raw, rawSize, fs.Length);
+                    if (va + Math.Max(virtualSize, rawSize) > 0x100000000L)
+                        throw new InvalidDataException("PE section RVA overflows.");
+                    sections.Add(new[] { va, rawSize, raw });
+                }
+                uint flags = 0;
+                if (directories > 14)
+                {
+                    fs.Position = opt + dd + 14 * 8;
+                    uint rva = br.ReadUInt32();
+                    uint size = br.ReadUInt32();
+                    if (rva != 0 || size != 0)
                     {
-                        fs.Position = ddOff + 14 * 8;
-                        uint clrRva = br.ReadUInt32();
-                        uint clrSize = br.ReadUInt32();
-                        if (clrRva != 0 && clrSize != 0)
-                        {
-                            managed = true;
-                            int corFile = RvaToFile(clrRva, sections);
-                            // COR20 header: cb @+0 must be sane; the COM Flags live at +8.
-                            if (corFile >= 0 && corFile + 12 <= fs.Length)
-                            {
-                                fs.Position = corFile;
-                                uint cb = br.ReadUInt32();
-                                if (cb >= 64 && cb <= 108)
-                                {
-                                    fs.Position = corFile + 8; // Flags
-                                    uint flags = br.ReadUInt32();
-                                    const uint FLAG_32BITREQUIRED = 0x2;
-                                    const uint FLAG_32BITPREFERRED = 0x20000;
-                                    if ((flags & (FLAG_32BITREQUIRED | FLAG_32BITPREFERRED)) != 0)
-                                    { info.AnyCpu = false; info.Arch = ExeArch.X86; }
-                                    else
-                                    { info.AnyCpu = true; } // resolved below by OS bitness
-                                }
-                            }
-                        }
+                        if (rva == 0 || size < 72) throw new InvalidDataException("Invalid CLR directory.");
+                        long cor = MapRva(rva, size, headers, sections);
+                        RequireRange(cor, size, fs.Length);
+                        fs.Position = cor;
+                        uint cb = br.ReadUInt32();
+                        if (cb < 72 || cb > size) throw new InvalidDataException("Invalid CLR header size.");
+                        fs.Position = cor + 16;
+                        flags = br.ReadUInt32();
+                        info.Managed = true;
                     }
                 }
-
-                info.Managed = managed;
-                info.Machine = machine;
-                switch (machine)
+                switch (info.Machine)
                 {
-                    case 0x14c: info.MachineText = "x86"; if (!managed || !info.AnyCpu) info.Arch = ExeArch.X86; break;
-                    case 0x8664: info.MachineText = "x64"; info.Arch = ExeArch.X64; break;
-                    case 0xAA64: info.MachineText = "ARM64"; info.Arch = ExeArch.X64; break;
-                    default: info.MachineText = "0x" + machine.ToString("X4"); break;
+                    case 0x14c: info.Arch = ExeArch.X86; info.MachineText = "x86"; break;
+                    case 0x8664: info.Arch = ExeArch.X64; info.MachineText = "x64"; break;
+                    case 0xaa64: info.MachineText = "ARM64 (unsupported)"; break;
+                    default: info.MachineText = "Unsupported machine 0x" + info.Machine.ToString("X4"); break;
                 }
+                bool prefer32 = (flags & 0x20000) != 0 && (characteristics & 0x2000) == 0;
+                info.AnyCpu = info.Managed && info.Machine == 0x14c && (flags & 1) != 0 && (flags & 2) == 0 && !prefer32;
                 if (info.AnyCpu)
                 {
                     info.Arch = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
-                    info.MachineText = "AnyCPU (" + (Environment.Is64BitOperatingSystem ? "runs x64" : "runs x86") + ")";
+                    info.MachineText = "AnyCPU (" + (info.Arch == ExeArch.X64 ? "runs x64" : "runs x86") + ")";
                 }
-                if (!info.Managed && info.Arch == ExeArch.Unknown && info.Machine != 0)
-                    info.Arch = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
+                return info;
             }
-            return info;
         }
 
-        /// <summary>Reads the section table at secOff, or returns null when it doesn't look like a
-        /// real section table (out of bounds, or first section's RVA implausible). Never throws.</summary>
-        static Dictionary<long, long[]> TryReadSections(int secOff, int numSections, FileStream fs, BinaryReader br)
+        static long MapRva(uint rva, uint size, uint headers, List<long[]> sections)
         {
-            if (secOff <= 0 || numSections <= 0) return null;
-            if ((long)secOff + (long)numSections * 40 > fs.Length) return null; // table must fit in the file
-            var map = new Dictionary<long, long[]>();
-            for (int i = 0; i < numSections; i++)
+            long end = (long)rva + size;
+            if (end > 0x100000000L) throw new InvalidDataException("CLR RVA overflows.");
+            if (end <= headers) return rva;
+            long mapped = -1;
+            foreach (var s in sections)
             {
-                fs.Position = secOff + i * 40 + 8;
-                uint vsize = br.ReadUInt32();
-                uint vaddr = br.ReadUInt32();
-                uint rsize = br.ReadUInt32();
-                uint raddr = br.ReadUInt32();
-                if (i == 0 && (vaddr < 0x1000 || vaddr >= 0x80000000)) return null; // not a real section table
-                map[(long)vaddr] = new long[] { vsize, rsize, (long)raddr };
+                if (rva < s[0] || end > s[0] + s[1]) continue;
+                if (mapped >= 0) throw new InvalidDataException("Ambiguous CLR RVA mapping.");
+                mapped = s[2] + (rva - s[0]);
             }
-            return map;
+            if (mapped < 0) throw new InvalidDataException("CLR directory is not backed by file data.");
+            return mapped;
+        }
+    }
+
+    public sealed class FileWriteRecord
+    {
+        public string Destination;
+        public string StagedPath;
+        public string RecoveryPath;
+        public string JournalPath;
+        public bool Completed;
+    }
+
+    public static class SafePersistence
+    {
+        public static string Hash(string path)
+        {
+            using (var input = File.OpenRead(path))
+            using (var sha = SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
         }
 
-        static int RvaToFile(uint rva, Dictionary<long, long[]> sections)
+        internal static string PathKey(string path)
         {
-            if (sections == null) return -1;
-            foreach (var kv in sections)
+            using (var sha = SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant()))).Replace("-", "");
+        }
+
+        internal static T Locked<T>(string path, Func<T> action)
+        {
+            using (var mutex = new Mutex(false, @"Local\GoldbergPatcher-" + PathKey(path)))
             {
-                long va = kv.Key, vsize = kv.Value[0], rsize = kv.Value[1], raddr = kv.Value[2];
-                long sz = Math.Max(vsize, rsize);
-                if ((long)rva >= va && (long)rva < va + sz) return (int)(raddr + (rva - va));
+                bool held = false;
+                try
+                {
+                    try { held = mutex.WaitOne(TimeSpan.FromSeconds(30)); }
+                    catch (AbandonedMutexException) { held = true; }
+                    if (!held) throw new IOException("Another instance is writing " + path + ". Retry after it finishes.");
+                    return action();
+                }
+                finally { if (held) mutex.ReleaseMutex(); }
             }
-            return -1;
+        }
+
+        static void FlushJournal(string path, string text, FileMode mode)
+        {
+            using (var stream = new FileStream(path, mode, FileAccess.Write, FileShare.Read))
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(text);
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush(true);
+            }
+        }
+
+        public static FileWriteRecord Write(string path, Action<Stream> write, Action<string> validate = null,
+            List<FileWriteRecord> journal = null, Action<string> checkpoint = null)
+        {
+            path = Path.GetFullPath(path);
+            return Locked(path, () =>
+            {
+                string parent = Path.GetDirectoryName(path);
+                string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(area);
+                string name = Path.GetFileName(path);
+                var record = new FileWriteRecord
+                {
+                    Destination = path,
+                    StagedPath = Path.Combine(area, name + ".staged-" + Guid.NewGuid().ToString("N").Substring(0, 8)),
+                    RecoveryPath = File.Exists(path) ? Path.Combine(area, name + ".previous") : "",
+                    JournalPath = Path.Combine(area, name + ".journal.txt")
+                };
+                if (journal != null) journal.Add(record);
+                try
+                {
+                    using (var stream = new FileStream(record.StagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        write(stream);
+                        stream.Flush(true);
+                    }
+                    if (validate != null) validate(record.StagedPath);
+                    if (checkpoint != null) checkpoint("staged");
+                    string oldHash = record.RecoveryPath.Length == 0 ? "absent" : Hash(path);
+                    var j = new StringBuilder();
+                    j.AppendLine("destination=" + path);
+                    j.AppendLine("staged=" + record.StagedPath);
+                    j.AppendLine("recovery=" + record.RecoveryPath);
+                    j.AppendLine("previous-sha256=" + oldHash);
+                    j.AppendLine("staged-sha256=" + Hash(record.StagedPath));
+                    j.AppendLine("state=prepared");
+                    FlushJournal(record.JournalPath, j.ToString(), FileMode.CreateNew);
+                    if (checkpoint != null) checkpoint("prepared");
+                    if (record.RecoveryPath.Length != 0)
+                        File.Replace(record.StagedPath, path, record.RecoveryPath);
+                    else
+                        File.Move(record.StagedPath, path);
+                    record.Completed = true;
+                    FlushJournal(record.JournalPath, "state=completed" + Environment.NewLine, FileMode.Append);
+                    return record;
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    throw new UnauthorizedAccessException("Access denied while writing " + path + ". Recovery/staging records: " + area + ". " + ex.Message, ex);
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException("Write failed for " + path + ". Recovery/staging records: " + area + ". " + ex.Message, ex);
+                }
+            });
+        }
+
+        public static FileWriteRecord Copy(string source, string destination, List<FileWriteRecord> journal = null,
+            Action<string> validate = null)
+        {
+            if (!File.Exists(source)) throw new FileNotFoundException("Source file for staged copy not found: " + source, source);
+            string expected = Hash(source);
+            return Write(destination, output =>
+            {
+                using (var input = File.OpenRead(source)) input.CopyTo(output);
+            }, staged =>
+            {
+                if (Hash(staged) != expected) throw new InvalidDataException("Staged copy hash mismatch: " + source);
+                if (validate != null) validate(staged);
+            }, journal);
+        }
+
+        public static FileWriteRecord WriteText(string path, string text, List<FileWriteRecord> journal = null)
+        {
+            byte[] bytes = new UTF8Encoding(false).GetBytes(text);
+            return Write(path, stream => stream.Write(bytes, 0, bytes.Length), null, journal);
+        }
+    }
+
+    internal sealed class InvocationOutputs
+    {
+        readonly string directory;
+        readonly string input;
+        readonly Dictionary<string, string> before = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        internal InvocationOutputs(string inputPath)
+        {
+            input = Path.GetFullPath(inputPath);
+            directory = Path.GetDirectoryName(input);
+            foreach (string path in Directory.GetFiles(directory))
+                if (IsCandidate(path)) before.Add(Path.GetFullPath(path), SafePersistence.Hash(path));
+        }
+
+        bool IsCandidate(string path)
+        {
+            return !string.Equals(path, input, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetDirectoryName(path), directory, StringComparison.OrdinalIgnoreCase)
+                && path.EndsWith(".unpacked.exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal bool IsCurrent(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            path = Path.GetFullPath(path);
+            if (!IsCandidate(path) || !File.Exists(path)) return false;
+            string hash;
+            return !before.TryGetValue(path, out hash) || hash != SafePersistence.Hash(path);
+        }
+
+        internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash)
+        {
+            if (!IsCurrent(path)) throw new IOException("No current invocation output: " + path);
+            string expected = SafePersistence.Hash(path);
+            SafePersistence.Copy(path, input, journal, staged =>
+            {
+                if (SafePersistence.Hash(staged) != expected || SafePersistence.Hash(input) != expectedInputHash)
+                    throw new IOException("Executable or output changed during processing: " + input);
+                if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
+                    throw new InvalidDataException("Unsupported unpacked executable architecture.");
+            });
+            if (SafePersistence.Hash(path) == expected) File.Delete(path);
+        }
+    }
+
+    public static class OriginalBackups
+    {
+        public static string Location(string root, string source)
+        {
+            return Path.Combine(root, "sources", SafePersistence.PathKey(source), Path.GetFileName(source));
+        }
+
+        static string VerifiedHash(string backup, string source)
+        {
+            string manifest = backup + ".source.txt";
+            if (!File.Exists(manifest)) throw new IOException("Backup has no source verification record: " + backup);
+            var lines = File.ReadAllLines(manifest);
+            if (lines.Length != 2 || !string.Equals(lines[0], Path.GetFullPath(source), StringComparison.OrdinalIgnoreCase)
+                || lines[1] != SafePersistence.Hash(backup))
+                throw new IOException("Backup verification failed; preserve and inspect " + backup);
+            return lines[1];
+        }
+
+        static bool Eligible(string path)
+        {
+            return File.Exists(path) && new FileInfo(path).Length > 0 && !PatchRunner.LooksLikeBundledGoldberg(path);
+        }
+
+        static string Existing(string root, string source, out string hash)
+        {
+            string destination = Location(root, source);
+            IOException failure = null;
+            hash = null;
+            if (File.Exists(destination))
+            {
+                try
+                {
+                    hash = VerifiedHash(destination, source);
+                    if (Eligible(destination)) return destination;
+                    failure = new IOException("Backup is not an eligible original: " + destination);
+                }
+                catch (IOException ex) { failure = ex; }
+            }
+            string legacy = Path.Combine(root, Path.GetFileName(source));
+            if (string.Equals(Path.GetFullPath(root), Path.Combine(Path.GetDirectoryName(Path.GetFullPath(source)), "goldberg_backup"), StringComparison.OrdinalIgnoreCase)
+                && Eligible(legacy))
+            {
+                hash = SafePersistence.Hash(legacy);
+                return legacy;
+            }
+            if (failure != null) throw failure;
+            hash = null;
+            return null;
+        }
+
+        public static string Preserve(string root, string source)
+        {
+            string destination = Location(root, source);
+            return SafePersistence.Locked(destination, () =>
+            {
+                string hash;
+                string existing = Existing(root, source, out hash);
+                if (existing != null && File.Exists(destination)) return existing;
+                string content = existing ?? source;
+                if (!Eligible(content)) return null;
+                hash = hash ?? SafePersistence.Hash(content);
+                SafePersistence.Copy(content, destination, null, staged =>
+                {
+                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
+                        throw new IOException("Original changed while preserving: " + content);
+                });
+                SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + hash + "\r\n");
+                return destination;
+            });
+        }
+
+        public static void Restore(string root, string source, List<FileWriteRecord> journal = null)
+        {
+            SafePersistence.Locked(Location(root, source), () =>
+            {
+                string hash;
+                string backup = Existing(root, source, out hash);
+                if (backup == null) throw new IOException("No verified or eligible legacy original backup exists for " + source);
+                SafePersistence.Copy(backup, source, journal, staged =>
+                {
+                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
+                        throw new IOException("Original backup changed while restoring: " + backup);
+                });
+                return true;
+            });
         }
     }
 
@@ -169,7 +421,7 @@ namespace Gp
         public bool OnlineFix = false;
 
         /// <summary>AppID actually written when online-fix mode forces Spacewar.</summary>
-        public string EffectiveAppId { get { return OnlineFix ? "480" : (AppId ?? "").Trim(); } }
+        public string EffectiveAppId { get { return OnlineFix ? "480" : AppIdDetector.Normalize(AppId); } }
     }
 
     public class PatchLogEntry
@@ -190,6 +442,89 @@ namespace Gp
         public bool Unpacked;
         public List<string> ReplacedFiles = new List<string>();
         public bool NeedsAdmin;
+        public bool Cancelled;
+        public bool PartialChanges;
+        public List<FileWriteRecord> Writes = new List<FileWriteRecord>();
+        public SettingsOutcome Settings = new SettingsOutcome();
+    }
+
+    public enum SettingsStatus { NotRequested, Copied, AlreadyPresent, Missing, Failed }
+
+    public sealed class SettingsOutcome
+    {
+        public SettingsStatus Status;
+        public string Directory = "";
+        public string Error = "";
+        public int FilesCopied;
+        internal List<KeyValuePair<string, string>> Files = new List<KeyValuePair<string, string>>();
+    }
+
+    public static class SettingsScaffold
+    {
+        public static SettingsOutcome Plan(string source, string installDir)
+        {
+            var outcome = new SettingsOutcome();
+            if (!Directory.Exists(source))
+            {
+                outcome.Status = SettingsStatus.Missing;
+                outcome.Error = "Optional settings scaffold missing: " + source + ". Generated interfaces will be kept beside the installed dll.";
+                return outcome;
+            }
+            try
+            {
+                outcome.Directory = Path.Combine(installDir, "steam_settings");
+                outcome.Status = Directory.Exists(outcome.Directory) ? SettingsStatus.AlreadyPresent : SettingsStatus.Copied;
+                Collect(source, outcome.Directory, outcome.Files);
+            }
+            catch (Exception ex)
+            {
+                outcome.Status = SettingsStatus.Failed;
+                outcome.Error = "Cannot prepare settings scaffold: " + ex.Message;
+            }
+            return outcome;
+        }
+
+        static void Collect(string source, string destination, List<KeyValuePair<string, string>> files)
+        {
+            if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("Settings scaffold contains a reparse point: " + source);
+            foreach (string file in Directory.GetFiles(source).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                using (File.OpenRead(file)) { }
+                files.Add(new KeyValuePair<string, string>(file, Path.Combine(destination, Path.GetFileName(file).Replace(".EXAMPLE", ""))));
+            }
+            foreach (string dir in Directory.GetDirectories(source).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                Collect(dir, Path.Combine(destination, Path.GetFileName(dir).Replace(".EXAMPLE", "")), files);
+        }
+
+        public static void Apply(SettingsOutcome outcome, List<FileWriteRecord> journal, CancellationToken ct = default(CancellationToken))
+        {
+            if (outcome.Status == SettingsStatus.Missing || outcome.Status == SettingsStatus.NotRequested) return;
+            if (outcome.Status == SettingsStatus.Failed) throw new IOException(outcome.Error);
+            try
+            {
+                foreach (var file in outcome.Files)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    SafePersistence.Locked(file.Value, () =>
+                    {
+                        if (!File.Exists(file.Value))
+                        {
+                            SafePersistence.Copy(file.Key, file.Value, journal);
+                            outcome.FilesCopied++;
+                        }
+                        return true;
+                    });
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                outcome.Status = SettingsStatus.Failed;
+                outcome.Error = ex.Message;
+                throw;
+            }
+        }
     }
 
     /// <summary>Resolves bundled tool paths relative to this app's folder.</summary>
@@ -263,6 +598,11 @@ namespace Gp
         /// Returns the relative paths that were restored; failures land in LastErrors.</summary>
         public static List<string> ExtractMissing()
         {
+            return SafePersistence.Locked(Path.Combine(Tools.BaseDir, "payload-extraction"), ExtractCore);
+        }
+
+        static List<string> ExtractCore()
+        {
             if (entries == null) Load();
             var written = new List<string>();
             LastErrors = new List<string>();
@@ -280,7 +620,10 @@ namespace Gp
                             && (e.Hash == null || Sha256Matches(dst, e.Hash));
                         if (intact) continue;
                         Directory.CreateDirectory(Path.GetDirectoryName(dst));
-                        using (var f = File.Create(dst)) src.CopyTo(f);
+                        var tempPath = dst + ".tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                        using (var f = File.Create(tempPath)) src.CopyTo(f);
+                        File.Copy(tempPath, dst, true);
+                        try { File.Delete(tempPath); } catch { }
                     }
                     written.Add(e.Rel);
                 }
@@ -340,7 +683,7 @@ namespace Gp
                 // ---- validate --------------------------------------------------
                 if (string.IsNullOrEmpty(o.GameExe) || !File.Exists(o.GameExe))
                     throw new Exception("Game executable not found:\n" + o.GameExe);
-                if (!o.OnlineFix && (string.IsNullOrEmpty(o.AppId) || !Regex.IsMatch(o.AppId, @"^\d{1,10}$")))
+                if (!o.OnlineFix && !AppIdDetector.IsValid(o.AppId))
                     throw new Exception("Steam AppID must be a numeric ID (find it on steamdb.info).");
                 if (o.OnlineFix)
                     Log(LogLevel.Info, "Generic online-fix: the original Steamworks dll stays in place so the game attaches to Steam as Spacewar (AppID 480).");
@@ -361,7 +704,7 @@ namespace Gp
 
                 // ---- locate steam api install dir ------------------------------
                 Pct(8);
-                var foundApi = FindSteamApiFiles(gameDir);
+                var foundApi = FindSteamApiFiles(gameDir, ct);
                 string installDir = gameDir;
                 string preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
                 string otherName = pe.Arch == ExeArch.X64 ? "steam_api.dll" : "steam_api64.dll";
@@ -379,6 +722,11 @@ namespace Gp
                     Log(LogLevel.Warn, "No existing steam_api dll found in the game folder – Goldberg dll will be placed beside the exe.");
                 }
                 res.InstallDir = installDir;
+                var settingsPlan = (o.CreateSettings || o.OnlineFix)
+                    ? SettingsScaffold.Plan(Tools.SettingsExampleDir, installDir) : new SettingsOutcome();
+                res.Settings = settingsPlan;
+                if (settingsPlan.Status == SettingsStatus.Failed) throw new IOException(settingsPlan.Error);
+                if (settingsPlan.Status == SettingsStatus.Missing) Log(LogLevel.Warn, settingsPlan.Error);
 
                 // ---- backup dir ----------------------------------------------
                 string backupDir = Path.Combine(installDir, "goldberg_backup");
@@ -386,10 +734,8 @@ namespace Gp
                 Func<string, string> backup = (src) =>
                 {
                     if (!o.Backup) return null;
-                    Directory.CreateDirectory(backupDir);
-                    var dst = Path.Combine(backupDir, Path.GetFileName(src));
-                    File.Copy(src, dst, true);
-                    anyBackup = true;
+                    var dst = OriginalBackups.Preserve(backupDir, src);
+                    if (dst != null) anyBackup = true;
                     return dst;
                 };
                 res.BackupDir = o.Backup ? backupDir : "";
@@ -449,12 +795,12 @@ namespace Gp
                 {
                     string appId = o.EffectiveAppId;
                     string txt = appId + Environment.NewLine;
-                    WriteIfChanged(Path.Combine(installDir, "steam_appid.txt"), txt);
+                    WriteIfChanged(Path.Combine(installDir, "steam_appid.txt"), txt, res);
                     res.ReplacedFiles.Add(ShortRel(gameDir, Path.Combine(installDir, "steam_appid.txt")));
                     var besideExe = Path.Combine(Path.GetDirectoryName(finalExe), "steam_appid.txt");
                     if (!string.Equals(besideExe, Path.Combine(installDir, "steam_appid.txt"), StringComparison.OrdinalIgnoreCase))
                     {
-                        WriteIfChanged(besideExe, txt);
+                        WriteIfChanged(besideExe, txt, res);
                         res.ReplacedFiles.Add(ShortRel(gameDir, besideExe));
                     }
                     Log(LogLevel.Ok, "steam_appid.txt → " + appId +
@@ -465,19 +811,26 @@ namespace Gp
                 Pct(90);
                 if (o.CreateSettings || o.OnlineFix)   // online-fix always ships the scaffold
                 {
-                    var settingsDir = CopySettingsExample(installDir, o.OnlineFix && !o.CreateSettings);
-                    res.SettingsDir = settingsDir;
-                    if (interfacesTxt != null)
+                    var outcome = settingsPlan;
+                    SettingsScaffold.Apply(outcome, res.Writes, ct);
+                    res.SettingsDir = outcome.Directory;
+                    if (interfacesTxt != null && outcome.Status != SettingsStatus.Failed && outcome.Directory.Length > 0)
                     {
-                        WriteIfChanged(Path.Combine(settingsDir, "steam_interfaces.txt"), interfacesTxt);
+                        WriteIfChanged(Path.Combine(outcome.Directory, "steam_interfaces.txt"), interfacesTxt, res);
                         Log(LogLevel.Ok, "steam_settings\\steam_interfaces.txt written.");
+                    }
+                    else if (interfacesTxt != null && outcome.Status == SettingsStatus.Missing)
+                    {
+                        var legacy = Path.Combine(installDir, "steam_interfaces.txt");
+                        WriteIfChanged(legacy, interfacesTxt, res);
+                        Log(LogLevel.Warn, "steam_settings.EXAMPLE missing – steam_interfaces.txt written to the install folder instead.");
                     }
                 }
                 else if (interfacesTxt != null)
                 {
                     // keep it somewhere useful even without a settings folder
                     var legacy = Path.Combine(installDir, "steam_interfaces.txt");
-                    WriteIfChanged(legacy, interfacesTxt);
+                    WriteIfChanged(legacy, interfacesTxt, res);
                     Log(LogLevel.Ok, "steam_interfaces.txt written (move into steam_settings later if you create one).");
                 }
 
@@ -497,6 +850,7 @@ namespace Gp
             catch (OperationCanceledException)
             {
                 res.Success = false;
+                res.Cancelled = true;
                 res.Summary = "Cancelled.";
                 Log(LogLevel.Warn, "✖ Cancelled by user.");
             }
@@ -514,6 +868,13 @@ namespace Gp
                 res.Summary = ex.Message;
                 Log(LogLevel.Error, "✖ " + ex.Message);
             }
+            res.PartialChanges = !res.Success && res.Writes.Any(w => w.Completed);
+            if (!res.Success && res.Writes.Count != 0)
+            {
+                res.Summary += res.PartialChanges ? " Partial changes remain; no automatic rollback was attempted." : " No destination writes completed.";
+                res.Summary += " Recovery records: " + string.Join(", ", res.Writes.Select(w => w.JournalPath).Distinct());
+                Log(LogLevel.Warn, res.Summary);
+            }
             return res;
         }
 
@@ -528,7 +889,8 @@ namespace Gp
             }
 
             Log(LogLevel.Info, "Running Steamless to check/remove SteamStub DRM…");
-            var before = DateTime.UtcNow;
+            var outputs = new InvocationOutputs(exePath);
+            string inputHash = SafePersistence.Hash(exePath);
             var outputLines = new List<string>();
             bool timedOut = false;
 
@@ -577,7 +939,7 @@ namespace Gp
                 foreach (var line in outputLines)
                 {
                     var m = Regex.Match(line, "[A-Za-z]:\\\\[^\"*?<>|]*\\.unpacked\\.exe", RegexOptions.IgnoreCase);
-                    if (m.Success) { outPath = m.Value; break; }
+                    if (m.Success && outputs.IsCurrent(m.Value)) { outPath = m.Value; break; }
                 }
             }
             if (outPath == null || !File.Exists(outPath))
@@ -585,10 +947,9 @@ namespace Gp
                 var cand1 = exePath + ".unpacked.exe";
                 var nameOnly = Path.GetFileNameWithoutExtension(exePath);
                 var cand2 = Path.Combine(Path.GetDirectoryName(exePath), nameOnly + ".unpacked.exe");
-                var cands = new[] { cand1, cand2 }.Where(File.Exists)
-                    .Concat(SafeFiles(Path.GetDirectoryName(exePath)).Where(f =>
-                        f.EndsWith(".unpacked.exe", StringComparison.OrdinalIgnoreCase) &&
-                        File.GetLastWriteTimeUtc(f) >= before.ToUniversalTime().AddSeconds(-2)))
+                var cands = new[] { cand1, cand2 }
+                    .Concat(SafeFiles(Path.GetDirectoryName(exePath)))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(outputs.IsCurrent)
                     .OrderByDescending(File.GetLastWriteTimeUtc).ToList();
                 outPath = cands.FirstOrDefault();
             }
@@ -624,8 +985,8 @@ namespace Gp
                 var origBackup = backup(exePath);
                 try
                 {
-                    File.Delete(exePath);
-                    File.Move(outPath, exePath);
+                    ct.ThrowIfCancellationRequested();
+                    outputs.CopyAndDelete(outPath, res.Writes, inputHash);
                 }
                 catch (IOException ex)
                 {
@@ -718,12 +1079,7 @@ namespace Gp
                 if (LooksLikeBundledGoldberg(cur))
                 {
                     // live dll is a Goldberg emulator build – online-fix cannot work with it in place
-                    string bak = Path.Combine(backupDir, n);
-                    if (!File.Exists(bak) || FilesEqual(bak, cur))
-                        throw new Exception("steam_api dll in this game folder is a Goldberg emulator dll and no original backup exists.\n" +
-                            "Online-fix mode needs the game's ORIGINAL Steamworks dll so Steam can see the game.\n" +
-                            "Restore/reinstall the original steam_api dll first, then run online-fix again.");
-                    File.Copy(bak, cur, true);
+                    OriginalBackups.Restore(backupDir, cur, res.Writes);
                     Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from goldberg_backup\\ (required for online-fix).");
                     res.ReplacedFiles.Add(n);
                 }
@@ -740,7 +1096,7 @@ namespace Gp
                 Log(LogLevel.Warn, "No steam_api dll found in the install folder – if this game uses Steamworks, double-check the chosen exe.");
         }
 
-        static bool LooksLikeBundledGoldberg(string dllPath)
+        internal static bool LooksLikeBundledGoldberg(string dllPath)
         {
             foreach (var src in new[] { Tools.ApiDll86, Tools.ApiDll64 })
             {
@@ -796,10 +1152,13 @@ namespace Gp
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
                 {
-                    backup(dst);
-                    Log(LogLevel.Dim, "Backed up original " + dllName);
+                    if (backup(dst) != null) Log(LogLevel.Dim, "Preserved original backup for " + dllName);
                 }
-                File.Copy(src, dst, true);
+                SafePersistence.Copy(src, dst, res.Writes, staged =>
+                {
+                    if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
+                        throw new InvalidDataException("Unsupported emulator dll architecture.");
+                });
                 res.ReplacedFiles.Add(dllName);
                 installed++;
                 Log(LogLevel.Ok, "Installed Goldberg → " + dllName);
@@ -808,35 +1167,6 @@ namespace Gp
             if (installed == 0)
                 throw new Exception("No steam_api dll could be installed – the bundled emulator dll(s) are missing from this patcher's folder.\n"
                     + "The self-contained restore may have failed; check the log above and re-run, or reinstall the patcher.");
-        }
-
-        private string CopySettingsExample(string installDir, bool forOnlineFix)
-        {
-            string srcRoot = Tools.SettingsExampleDir;
-            if (!Directory.Exists(srcRoot)) { Log(LogLevel.Warn, "steam_settings.EXAMPLE folder not found – skipping."); return null; }
-            string dstRoot = Path.Combine(installDir, "steam_settings");
-            int files = CopyTreeRename(srcRoot, dstRoot);
-            Log(LogLevel.Ok, string.Format("steam_settings folder created ({0} files) at: {1}{2}", files,
-                ShortRel(installDir, dstRoot), forOnlineFix ? "  (online-fix mode)" : ""));
-            return dstRoot;
-        }
-
-        private static int CopyTreeRename(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            int count = 0;
-            foreach (var f in Directory.GetFiles(src))
-            {
-                var name = Path.GetFileName(f).Replace(".EXAMPLE", "");
-                var target = Path.Combine(dst, name);
-                if (!File.Exists(target)) { File.Copy(f, target, false); count++; }
-            }
-            foreach (var d in Directory.GetDirectories(src))
-            {
-                var name = Path.GetFileName(d).Replace(".EXAMPLE", "");
-                count += CopyTreeRename(d, Path.Combine(dst, name));
-            }
-            return count;
         }
 
         /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
@@ -866,8 +1196,9 @@ namespace Gp
 
         /// <summary>Recursively scans the whole game folder (junction-safe, junk-pruned) for steam_api dlls.
         /// Results are ordered nearest-to-exe first.</summary>
-        public static List<string> FindSteamApiFiles(string startDir)
+        public static List<string> FindSteamApiFiles(string startDir, CancellationToken ct = default(CancellationToken))
         {
+            ct.ThrowIfCancellationRequested();
             var names = new[] { "steam_api.dll", "steam_api64.dll" };
             var results = new List<string>();
             var stack = new Stack<string>();
@@ -878,6 +1209,7 @@ namespace Gp
                 stack.Push(startDir);
                 while (stack.Count > 0 && results.Count < 40 && scanned < 50000)
                 {
+                    ct.ThrowIfCancellationRequested();
                     var dir = stack.Pop();
                     scanned++;
                     string[] subdirs;
@@ -897,7 +1229,9 @@ namespace Gp
                     }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
+            ct.ThrowIfCancellationRequested();
             return results.OrderBy(r => r.Length).ToList();
         }
 
@@ -911,9 +1245,9 @@ namespace Gp
                 {
                     try
                     {
-                        var line = File.ReadLines(f).FirstOrDefault(l => l.Trim().Length > 0);
-                        var digits = Regex.Match(line ?? "", @"\d{1,10}");
-                        if (digits.Success) return digits.Value;
+                        if (new FileInfo(f).Length > 128) continue;
+                        var id = AppIdDetector.Normalize(File.ReadAllText(f));
+                        if (id.Length != 0) return id;
                     }
                     catch { }
                 }
@@ -926,10 +1260,10 @@ namespace Gp
             try { return Directory.GetFiles(dir); } catch { return new string[0]; }
         }
 
-        static void WriteIfChanged(string path, string content)
+        static void WriteIfChanged(string path, string content, PatchResult res)
         {
             if (File.Exists(path) && File.ReadAllText(path) == content) return;
-            File.WriteAllText(path, content, Encoding.ASCII);
+            SafePersistence.WriteText(path, content, res.Writes);
         }
 
         public static string ShortRel(string root, string fullPath)
@@ -959,13 +1293,38 @@ namespace Gp
     /// previously saved id → steam_appid.txt anywhere in the install tree → Steam Store autocomplete.</summary>
     public static class AppIdDetector
     {
-        public static AppIdDetection Detect(string exePath, string cachedId, bool allowOnline)
+        public static bool TryNormalize(string value, out string normalized)
         {
+            normalized = "";
+            value = (value ?? "").Trim();
+            if (value.Length == 0 || value.Length > 10) return false;
+            foreach (char c in value) if (c < '0' || c > '9') return false;
+            uint number;
+            if (!uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out number) || number == 0) return false;
+            normalized = number.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        public static bool IsValid(string value)
+        {
+            string normalized;
+            return TryNormalize(value, out normalized);
+        }
+
+        public static string Normalize(string value)
+        {
+            string normalized;
+            return TryNormalize(value, out normalized) ? normalized : "";
+        }
+
+        public static AppIdDetection Detect(string exePath, string cachedId, bool allowOnline, CancellationToken ct = default(CancellationToken))
+        {
+            ct.ThrowIfCancellationRequested();
             var d = new AppIdDetection();
             if (string.IsNullOrEmpty(exePath)) return d;
 
-            if (!string.IsNullOrEmpty(cachedId) && Regex.IsMatch(cachedId.Trim(), @"^\d{1,10}$"))
-            { d.AppId = cachedId.Trim(); d.Source = "saved"; return d; }
+            if (IsValid(cachedId))
+            { d.AppId = Normalize(cachedId); d.Source = "saved"; return d; }
 
             try
             {
@@ -975,7 +1334,7 @@ namespace Gp
                     // The exe's own folder first – that's the steam_appid.txt Steam actually reads;
                     // a stale copy in some deep subfolder must not beat it.
                     var dirs = new List<string> { dir };
-                    foreach (var a in PatchRunner.FindSteamApiFiles(dir))
+                    foreach (var a in PatchRunner.FindSteamApiFiles(dir, ct))
                     {
                         var ad = Path.GetDirectoryName(a);
                         bool seen = false;
@@ -986,20 +1345,15 @@ namespace Gp
                     if (!string.IsNullOrEmpty(id)) { d.AppId = id; d.Source = "steam_appid.txt"; return d; }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
 
+            ct.ThrowIfCancellationRequested();
             if (allowOnline)
             {
-                try
-                {
-                    foreach (var t in SteamLookup.CandidateTitles(exePath))
-                    {
-                        var m = SteamLookup.Search(t);
-                        if (m != null && !string.IsNullOrEmpty(m.AppId))
-                        { d.AppId = m.AppId; d.Source = "Steam Store (" + m.GameName + ")"; return d; }
-                    }
-                }
-                catch { }
+                var m = SteamLookup.FindBestForExe(exePath, ct);
+                if (m != null && IsValid(m.AppId))
+                { d.AppId = Normalize(m.AppId); d.Source = "Steam Store (" + m.GameName + ")"; }
             }
             return d;
         }
@@ -1096,7 +1450,7 @@ namespace Gp
                         var res = runner.Run(opts, ct);
                         o.Success = res.Success;
                         o.Summary = res.Summary;
-                        if (!res.Success && string.Equals(res.Summary, "Cancelled.", StringComparison.Ordinal)) o.Cancelled = true;
+                        o.Cancelled = res.Cancelled;
                     }
                     catch (OperationCanceledException)
                     {
@@ -1171,10 +1525,11 @@ namespace Gp
         }
 
         /// <summary>Searches the Steam Store autocomplete for a title. Returns null on no confident match or network failure.</summary>
-        public static SteamMatch Search(string title)
+        public static SteamMatch Search(string title, CancellationToken ct = default(CancellationToken))
         {
+            ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(title)) return null;
-            string json = HttpGet(UrlFmt.Replace("{0}", Uri.EscapeDataString(title.Trim())));
+            string json = HttpGet(UrlFmt.Replace("{0}", Uri.EscapeDataString(title.Trim())), ct);
             if (json == null) return null;
             return BestMatch(ParseItems(json), title);
         }
@@ -1208,66 +1563,64 @@ namespace Gp
             return sb.ToString();
         }
 
-        /// <summary>Extracts {appid, name} pairs from a storesearch response. Tolerant of extra/missing fields.</summary>
+        public const int MaxResponseLength = 1024 * 1024;
+
+        public sealed class StoreResponse
+        {
+            public StoreItem[] items { get; set; }
+        }
+
+        public sealed class StoreItem
+        {
+            public object id { get; set; }
+            public object appid { get; set; }
+            public object name { get; set; }
+        }
+
         public static List<SteamMatch> ParseItems(string json)
         {
             var list = new List<SteamMatch>();
+            if (string.IsNullOrWhiteSpace(json) || json.Length > MaxResponseLength) return list;
             try
             {
-                string body = (json ?? "");
-                int i = body.IndexOf("\"items\"");
-                if (i < 0) return list;
-                int lb = body.IndexOf('[', i);
-                if (lb < 0) return list;
-                body = body.Substring(lb + 1);
-                int rb = body.IndexOf(']');
-                if (rb >= 0) body = body.Substring(0, rb);
-
-                foreach (var chunk in SplitTopObjects(body))
+                var serializer = new JavaScriptSerializer { MaxJsonLength = MaxResponseLength, RecursionLimit = 32 };
+                var response = serializer.Deserialize<StoreResponse>(json);
+                if (response == null || response.items == null) return list;
+                foreach (var item in response.items)
                 {
-                    // the storesearch endpoint reports the AppID as "id" (older payloads used "appid")
-                    var mApp = Regex.Match(chunk, "\"(?:appid|id)\"\\s*:\\s*\"?(\\d{1,9})");
-                    var mName = Regex.Match(chunk, "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-                    if (!mApp.Success) continue;
-                    list.Add(new SteamMatch
-                    {
-                        AppId = mApp.Groups[1].Value,
-                        GameName = Unescape(mName.Success ? mName.Groups[1].Value : ""),
-                    });
+                    if (item == null || !(item.name is string) || string.IsNullOrWhiteSpace((string)item.name)) continue;
+                    object id = item.id ?? item.appid;
+                    if (!(id is string) && !(id is int) && !(id is long)) continue;
+                    string normalized = AppIdDetector.Normalize(Convert.ToString(id, CultureInfo.InvariantCulture));
+                    if (normalized.Length != 0)
+                        list.Add(new SteamMatch { AppId = normalized, GameName = (string)item.name });
                 }
             }
-            catch { }
+            catch (ArgumentException) { list.Clear(); }
+            catch (InvalidOperationException) { list.Clear(); }
             return list;
         }
 
-        static List<string> SplitTopObjects(string body)
+        public static SteamMatch FindBestForExe(string exePath, CancellationToken ct = default(CancellationToken))
         {
-            var outl = new List<string>();
-            int depth = 0, start = -1; bool inStr = false;
-            for (int i = 0; i < body.Length; i++)
+            ct.ThrowIfCancellationRequested();
+            foreach (string title in CandidateTitles(exePath))
             {
-                char c = body[i];
-                if (inStr)
-                {
-                    if (c == '\\' && i + 1 < body.Length) i++;
-                    else if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') inStr = true;
-                else if (c == '{') { depth++; if (depth == 1) start = i; }
-                else if (c == '}') { depth--; if (depth == 0 && start >= 0) { outl.Add(body.Substring(start, i - start + 1)); start = -1; } }
+                ct.ThrowIfCancellationRequested();
+                var match = Search(title, ct);
+                if (match != null) return match;
             }
-            return outl;
+            return null;
         }
 
-        static string Unescape(string s)
+        public static Task<SteamMatch> FindBestForExeAsync(string exePath, CancellationToken ct = default(CancellationToken))
         {
-            if (s == null) return "";
-            return s.Replace("\\\\", "\u0001").Replace("\\\"", "\"").Replace("\\n", " ").Replace("\u0001", "\\");
+            return Task.Run(() => FindBestForExe(exePath, ct), ct);
         }
 
-        static string HttpGet(string url)
+        static string HttpGet(string url, CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
                 ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
@@ -1275,12 +1628,27 @@ namespace Gp
                 req.Method = "GET";
                 req.Timeout = 8000;
                 req.ReadWriteTimeout = 8000;
-                req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoldbergPatcher/0.3";
+                req.UserAgent = "GoldbergPatcher/0.3";
+                using (ct.Register(() => req.Abort()))
                 using (var resp = req.GetResponse())
                 using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                    return sr.ReadToEnd();
+                {
+                    if (resp.ContentLength > MaxResponseLength) return null;
+                    var text = new StringBuilder();
+                    var buffer = new char[4096];
+                    int read;
+                    while ((read = sr.Read(buffer, 0, buffer.Length)) != 0)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (text.Length + read > MaxResponseLength) return null;
+                        text.Append(buffer, 0, read);
+                    }
+                    ct.ThrowIfCancellationRequested();
+                    return text.ToString();
+                }
             }
-            catch { return null; }
+            catch (OperationCanceledException) { throw; }
+            catch { ct.ThrowIfCancellationRequested(); return null; }
         }
     }
 
@@ -1346,8 +1714,9 @@ namespace Gp
             return s;
         }
 
-        public void Save()
+        public bool Save(out string error)
         {
+            error = "";
             try
             {
                 Directory.CreateDirectory(Dir);
@@ -1363,9 +1732,20 @@ namespace Gp
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + EscKey(kv.Key) + "=" + kv.Value);
-                System.IO.File.WriteAllText(File0, sb.ToString());
+                SafePersistence.WriteText(File0, sb.ToString());
+                return true;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                error = "Settings could not be saved: " + ex.Message;
+                return false;
+            }
+        }
+
+        public void Save()
+        {
+            string error;
+            Save(out error);
         }
 
         // Keys are written as `folder:<path>=<id>` and parsed by splitting on the FIRST '='.

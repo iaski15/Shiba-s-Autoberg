@@ -1,17 +1,37 @@
+param(
+    [string]$CompilerPath = '',
+    [string]$ReferencePath = '',
+    [switch]$Verify
+)
+
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $src = Join-Path $root 'src'
 
 # ---- locate Roslyn csc ----
-$csc = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -like '*Roslyn*' } | Select-Object -First 1 -ExpandProperty FullName
-if (-not $csc) { throw "Roslyn csc.exe not found (VS Build Tools required)" }
+$csc = $CompilerPath
+if (-not $csc) {
+    $candidates = @(Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -like '*Roslyn*' } |
+        Sort-Object @{Expression = { $_.VersionInfo.FileVersionRaw }; Descending = $true}, FullName)
+    if ($candidates.Count -gt 0) { $csc = $candidates[0].FullName }
+}
+if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe not found; specify -CompilerPath." }
 
 # ---- reference assemblies (.NET Framework 4.8) ----
-$refDir = "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8"
-if (-not (Test-Path $refDir)) { $refDir = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319" }
-$refs = @('mscorlib.dll','System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll') |
-    ForEach-Object { "/r:`"$refDir\$_`"" }
+$refDir = $ReferencePath
+if (-not $refDir) {
+    $refDir = "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8"
+    if (-not (Test-Path -LiteralPath $refDir)) {
+        $refDir = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"
+        Write-Warning "4.8 targeting pack unavailable; using installed Framework assemblies. Pin -ReferencePath for reproducible references."
+    }
+}
+$refs = @('mscorlib.dll','System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll') |
+    ForEach-Object {
+        if (-not (Test-Path -LiteralPath (Join-Path $refDir $_))) { throw "Required reference missing: $refDir\$_" }
+        "/r:`"$refDir\$_`""
+    }
 
 Write-Host "csc:   $csc"
 Write-Host "refs:  $refDir"
@@ -25,7 +45,7 @@ if (-not (Test-Path $icon)) {
 $iconArg = "/win32icon:`"$icon`""
 
 function Compile($sources, $out, $extra) {
-    $cscArgs = @('/nologo','/noconfig','/target:exe','/platform:anycpu','/optimize+','/utf8output') + $refs + $sources
+    $cscArgs = @('/nologo','/noconfig','/target:exe','/platform:anycpu','/optimize+','/utf8output','/nostdlib-','/deterministic') + @("/pathmap:`"$root=.`"") + $refs + $sources
     $cscArgs += @("/out:`"$out`"")
     if ($iconArg) { $cscArgs += $iconArg }
     if ($extra) { $cscArgs += $extra }
@@ -74,6 +94,13 @@ try {
     Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
 } finally {
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
+}
+
+if ($Verify) {
+    Write-Host "`nverify: running _selftest.exe..."
+    & (Join-Path $root '_selftest.exe')
+    if ($LASTEXITCODE -ne 0) { throw "self-test failed with exit code $LASTEXITCODE" }
+    Write-Host "verify: OK"
 }
 
 Write-Host "`nDone."

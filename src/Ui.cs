@@ -30,6 +30,14 @@ namespace Gp
         public static readonly Color ErrC = FromHex("#F87171");
 
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
+        static Ui()
+        {
+            Application.ApplicationExit += delegate
+            {
+                foreach (var f in fontCache.Values) f.Dispose();
+                fontCache.Clear();
+            };
+        }
         public static Font F(float size, bool bold) { return F("Segoe UI", size, bold); }
         public static Font F(string fam, float size, bool bold)
         {
@@ -67,18 +75,22 @@ namespace Gp
 
         public static string TruncMiddle(Graphics g, string s, Font f, int maxW)
         {
-            if (string.IsNullOrEmpty(s) || g.MeasureString(s, f).Width <= maxW) return s;
+            if (string.IsNullOrEmpty(s)) return s;
+            if (maxW <= 0) return "";
+            if (g.MeasureString(s, f).Width <= maxW) return s;
             string mid = "…";
-            int a = 0, b = s.Length - 1;
-            while (a < b && a < s.Length && b > 0)
+            if (g.MeasureString(mid, f).Width > maxW) return "";
+            int lo = 1, hi = s.Length - 1;
+            string best = mid;
+            while (lo <= hi)
             {
-                var t = s.Substring(0, a + 1) + mid + s.Substring(b);
-                if (g.MeasureString(t, f).Width > maxW) break;
-                a++; if (a >= b) break;
-                t = s.Substring(0, a + 1) + mid + s.Substring(b);
-                if (g.MeasureString(t, f).Width > maxW) { b--; }
+                int take = lo + (hi - lo) / 2;
+                int left = (take + 1) / 2, right = take / 2;
+                var t = s.Substring(0, left) + mid + s.Substring(s.Length - right);
+                if (g.MeasureString(t, f).Width <= maxW) { best = t; lo = take + 1; }
+                else hi = take - 1;
             }
-            return s.Substring(0, Math.Max(a, 1)) + mid + s.Substring(Math.Max(b, 0));
+            return best;
         }
 
         public static void SpacedText(Graphics g, string text, Font f, Brush b, PointF pt, float spacing)
@@ -144,42 +156,47 @@ namespace Gp
 
     public class TitleBar : Control
     {
-        Rectangle minR, closeR;
-        int hoverBtn = -1;
+        readonly Button minimizeButton = new Button();
+        readonly Button closeButton = new Button();
         public TitleBar()
         {
             Dock = DockStyle.Top; Height = 46;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             Cursor = Cursors.Default;
+            TabStop = false;
+            int tab = 0;
+            foreach (var button in new[] { minimizeButton, closeButton })
+            {
+                button.FlatStyle = FlatStyle.Flat;
+                button.FlatAppearance.BorderSize = 0;
+                button.BackColor = Ui.Bg; button.ForeColor = Ui.MutedC;
+                button.Font = Ui.F(11, false);
+                button.TabIndex = tab++;
+                button.UseVisualStyleBackColor = false;
+                Controls.Add(button);
+            }
+            minimizeButton.Text = "−"; minimizeButton.AccessibleName = "Minimize";
+            closeButton.Text = "×"; closeButton.AccessibleName = "Close";
+            closeButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(210, 40, 55);
+            minimizeButton.Click += delegate { OnMinimizeClicked(); };
+            closeButton.Click += delegate { OnCloseClicked(); };
+            LayoutBtns();
         }
         protected override void OnResize(EventArgs e) { LayoutBtns(); base.OnResize(e); }
         void LayoutBtns()
         {
-            closeR = new Rectangle(Width - 50, 8, 42, 30);
-            minR = new Rectangle(Width - 96, 8, 42, 30);
-        }
-        protected override void OnMouseLeave(EventArgs e) { hoverBtn = -1; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            int h = closeR.Contains(e.Location) ? 2 : minR.Contains(e.Location) ? 1 : 0;
-            if (h != hoverBtn) { hoverBtn = h; Invalidate(); }
-            base.OnMouseMove(e);
+            closeButton.Bounds = new Rectangle(Width - 50, 8, 42, 30);
+            minimizeButton.Bounds = new Rectangle(Width - 96, 8, 42, 30);
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (hoverBtn == 0) DragWindow();
+            if (e.Button == MouseButtons.Left && !closeButton.Bounds.Contains(e.Location) && !minimizeButton.Bounds.Contains(e.Location)) DragWindow();
             base.OnMouseDown(e);
         }
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
-            if (!closeR.Contains(e.Location) && !minR.Contains(e.Location)) OnMinimizeClicked();
+            if (e.Button == MouseButtons.Left && !closeButton.Bounds.Contains(e.Location) && !minimizeButton.Bounds.Contains(e.Location)) OnMinimizeClicked();
             base.OnMouseDoubleClick(e);
-        }
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
-            if (closeR.Contains(e.Location)) OnCloseClicked();
-            else if (minR.Contains(e.Location)) OnMinimizeClicked();
-            base.OnMouseUp(e);
         }
         public event Action CloseClicked;
         public event Action MinimizeClicked;
@@ -214,17 +231,6 @@ namespace Gp
             Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, new PointF(52, 15), 1.6f);
             TextRenderer.DrawText(g, "v0.4", Ui.F(7.75f, false), new Rectangle((int)(52 + tsz.Width + 10), 17, 60, 16), Ui.MutedC, TextFormatFlags.NoPadding);
 
-            // buttons
-            if (hoverBtn == 1) { Ui.FillRound(g, minR, 6, Ui.Tint(Ui.Bg, Color.White, 0.07)); }
-            if (hoverBtn == 2) { Ui.FillRound(g, closeR, 6, Color.FromArgb(210, 40, 55)); }
-            using (var p = new Pen(hoverBtn == 2 ? Color.White : Ui.MutedC, 1.6f))
-            {
-                g.DrawLine(p, closeR.X + 15, closeR.Y + 10, closeR.Right - 15, closeR.Bottom - 10);
-                g.DrawLine(p, closeR.Right - 15, closeR.Y + 10, closeR.X + 15, closeR.Bottom - 10);
-            }
-            using (var p = new Pen(hoverBtn == 1 ? Ui.TextC : Ui.MutedC, 1.6f))
-                g.DrawLine(p, minR.X + 12, minR.Bottom - 11, minR.Right - 12, minR.Bottom - 11);
-
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, Height - 1, Width, Height - 1);
         }
     }
@@ -253,7 +259,7 @@ namespace Gp
         int apiState = 0; // 0 warn, 1 ok
         bool dragOver = false;
         bool overChange = false;
-        Icon fileIcon = null;
+        Bitmap fileIcon = null;
 
         public string GamePath { get { return gamePath; } }
 
@@ -287,28 +293,25 @@ namespace Gp
             archChip = arch ?? ""; sizeChip = size ?? ""; apiChip = api ?? ""; apiState = state; Invalidate();
         }
 
-        static Icon LoadFileIcon(string path)
+        static Bitmap LoadFileIcon(string path)
         {
-            // Only ask shell32 for icons of files that actually exist – ExtractAssociatedIcon on a
-            // missing/garbage path has been observed to crash non-deterministically (AccessViolation).
-            if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return null;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
             try
             {
-                var h = NativeMethods.ExtractAssociatedIcon(IntPtr.Zero, path);
-                if (h == IntPtr.Zero) return null;
-                Icon copy = null;
-                using (var tmp = Icon.FromHandle(h)) copy = (Icon)tmp.Clone(); // own the copy so we can dispose later
-                NativeMethods.DestroyIcon(h); // FromHandle does not take ownership of the HICON – release it ourselves
-                return copy;
+                using (var icon = Icon.ExtractAssociatedIcon(path)) return icon == null ? null : icon.ToBitmap();
             }
             catch { return null; }
         }
 
         public void SetGame(string path)
         {
-            gamePath = path ?? "";
-            if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
-            fileIcon = LoadFileIcon(gamePath);
+            string nextPath = path ?? "";
+            if (!string.Equals(gamePath, nextPath, StringComparison.OrdinalIgnoreCase))
+            {
+                gamePath = nextPath;
+                if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
+                fileIcon = LoadFileIcon(gamePath);
+            }
             Invalidate();
             var h = FileChosen; if (h != null && gamePath.Length > 0) h(gamePath);
         }
@@ -344,7 +347,7 @@ namespace Gp
             { var h = InvalidFile; if (h != null) h(f0); return; }
             SetGame(files[0]);
         }
-        protected override void OnClick(EventArgs e) { Browse(); base.OnClick(e); }
+        protected override void OnMouseClick(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) Browse(); base.OnMouseClick(e); }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             bool oc = gamePath.Length > 0 && MouseIsOverChange(e.Location);
@@ -396,8 +399,7 @@ namespace Gp
                 {
                     Ui.FillRound(g, iconR, 10, Ui.Surface2);
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    using (var bmp = fileIcon.ToBitmap())
-                        g.DrawImage(bmp, new Rectangle(iconR.X + 3, iconR.Y + 3, 30, 30));
+                    g.DrawImage(fileIcon, new Rectangle(iconR.X + 3, iconR.Y + 3, 30, 30));
                 }
                 else
                 {
@@ -442,7 +444,6 @@ namespace Gp
 
         protected override void Dispose(bool disposing)
         {
-            // fileIcon is a cloned Icon we own – release it with the control (bug #15).
             if (disposing && fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
             base.Dispose(disposing);
         }
@@ -450,19 +451,13 @@ namespace Gp
 
     // ─────────────────────────────────────────────── toggle
 
-    public class Toggle : Control
+    public class Toggle : CheckBox
     {
-        bool @checked;
         bool hover = false, press = false;
-        public event EventHandler CheckedChanged;
-        public bool Checked
-        {
-            get { return @checked; }
-            set { if (@checked != value) { @checked = value; Invalidate(); var h = CheckedChanged; if (h != null) h(this, EventArgs.Empty); } }
-        }
         public Toggle(string label, bool initial)
         {
-            Text = label; @checked = initial;
+            Text = label; Checked = initial;
+            AccessibleName = label; AutoSize = false; TabStop = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
             BackColor = Ui.Surface; // match the card so no black/unpainted area shows behind the pill
             Cursor = Cursors.Hand; Height = 24;
@@ -470,13 +465,16 @@ namespace Gp
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) { hover = true; Invalidate(); } base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { if (Enabled) { press = true; Invalidate(); } base.OnMouseDown(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) { press = true; Invalidate(); } base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            bool p = press; press = false; hover = Enabled && !press; Invalidate();
-            if (p) Checked = !Checked;
+            if (e.Button == MouseButtons.Left) { press = false; hover = Enabled && ClientRectangle.Contains(e.Location); Invalidate(); }
             base.OnMouseUp(e);
         }
+        protected override void OnMouseCaptureChanged(EventArgs e) { press = false; Invalidate(); base.OnMouseCaptureChanged(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { press = false; Invalidate(); base.OnLostFocus(e); }
+        protected override void OnCheckedChanged(EventArgs e) { Invalidate(); base.OnCheckedChanged(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -488,10 +486,10 @@ namespace Gp
             Color trackFill, trackBorder;
             if (!Enabled)
             {
-                trackFill = @checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.55) : Ui.Tint(Ui.Surface2, Ui.Bg, 0.3);
-                trackBorder = @checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.6) : Ui.Tint(Ui.BorderC, Ui.Bg, 0.3);
+                trackFill = Checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.55) : Ui.Tint(Ui.Surface2, Ui.Bg, 0.3);
+                trackBorder = Checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.6) : Ui.Tint(Ui.BorderC, Ui.Bg, 0.3);
             }
-            else if (@checked) { trackFill = Ui.Accent; trackBorder = Ui.Accent; }
+            else if (Checked) { trackFill = Ui.Accent; trackBorder = Ui.Accent; }
             else if (hover) { trackFill = Ui.Tint(Ui.Surface2, Color.White, 0.05); trackBorder = Ui.Tint(Ui.BorderC, Ui.Accent, 0.4); }
             else { trackFill = Ui.Surface2; trackBorder = Ui.BorderC; }
 
@@ -499,17 +497,18 @@ namespace Gp
             Ui.StrokeRound(g, pill, pillH / 2, trackBorder, 1f);
             if (press && Enabled) Ui.FillRound(g, pill, pillH / 2, Color.FromArgb(40, 0, 0, 0));
             int knobD = pillH - 6;
-            var knob = new Rectangle(@checked ? pill.Right - knobD - 3 : pill.X + 3, pill.Y + 3, knobD, knobD);
+            var knob = new Rectangle(Checked ? pill.Right - knobD - 3 : pill.X + 3, pill.Y + 3, knobD, knobD);
             using (var b = new SolidBrush(Enabled ? Color.White : Ui.FromHex("#6E7688"))) g.FillEllipse(b, knob);
 
-            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + 10, 0, Width - pill.Right - 10, Height),
+            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + 10, 0, Math.Max(0, Width - pill.Right - 10), Height),
                 Enabled ? Ui.TextC : Ui.FromHex("#5A6373"), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -1, -1), Ui.TextC, Ui.Surface);
         }
     }
 
     // ─────────────────────────────────────────────── gradient button
 
-    public class GradientButton : Control
+    public class GradientButton : Button
     {
         public enum BtnKind { Primary, Cancel, Success, Secondary }
         public BtnKind Kind = BtnKind.Primary;
@@ -522,15 +521,11 @@ namespace Gp
         }
         protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
         protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
-        protected override void OnKeyDown(KeyEventArgs e)
-        {
-            if (Enabled && (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)) { e.SuppressKeyPress = true; e.Handled = true; OnClick(EventArgs.Empty); return; }
-            base.OnKeyDown(e);
-        }
         protected override void OnMouseLeave(EventArgs e) { hover = press = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { press = true; Invalidate(); base.OnMouseDown(e); }
-        protected override void OnMouseUp(MouseEventArgs e) { press = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) { press = true; Invalidate(); } base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { press = false; Invalidate(); } base.OnMouseUp(e); }
+        protected override void OnMouseCaptureChanged(EventArgs e) { press = false; Invalidate(); base.OnMouseCaptureChanged(e); }
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -578,7 +573,12 @@ namespace Gp
                 Invalidate();
             };
         }
-        public void SetValue(int v) { target = Math.Max(0, Math.Min(100, v)); timer.Start(); }
+        public void SetValue(int v) { if (IsDisposed || Disposing || timer == null) return; target = Math.Max(0, Math.Min(100, v)); timer.Start(); }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && timer != null) { timer.Stop(); timer.Dispose(); timer = null; }
+            base.Dispose(disposing);
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -602,34 +602,52 @@ namespace Gp
         public         BannerKind Kind = BannerKind.Success;
         string message = "";
         public string MessageText { get { return message; } }
-        List<string> actions = new List<string>();
         public event Action<int> ActionClicked;
-        readonly List<Rectangle> actionRects = new List<Rectangle>();
-        int hoverAction = -1;
+        readonly List<Button> actionButtons = new List<Button>();
 
         public Banner()
         {
-            Visible = false;
+            Visible = false; TabStop = false;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
         public void Show(BannerKind kind, string msg, params string[] buttons)
         {
-            Kind = kind; message = msg ?? ""; actions = new List<string>(buttons);
-            actionRects.Clear(); Visible = true; Invalidate();
+            ClearActions();
+            Kind = kind; message = msg ?? ""; AccessibleName = message;
+            Color fg = kind == BannerKind.Success ? Ui.OkC : kind == BannerKind.Error ? Ui.ErrC : Ui.WarnC;
+            foreach (var text in buttons ?? new string[0])
+            {
+                int index = actionButtons.Count;
+                var button = new Button();
+                button.Text = (text ?? "").ToUpperInvariant(); button.AccessibleName = text ?? "";
+                button.Font = Ui.F(8f, true); button.TabIndex = index;
+                button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderColor = fg;
+                button.BackColor = Ui.Tint(Ui.Bg, fg, 0.16); button.ForeColor = fg;
+                button.FlatAppearance.MouseOverBackColor = Ui.Tint(Ui.Bg, fg, 0.3);
+                button.UseVisualStyleBackColor = false; button.Cursor = Cursors.Hand;
+                button.Click += delegate { var h = ActionClicked; if (h != null) h(index); };
+                actionButtons.Add(button); Controls.Add(button);
+            }
+            LayoutActions(); Visible = true; Invalidate();
         }
-        public void HideBanner() { Visible = false; actions.Clear(); }
-        protected override void OnMouseLeave(EventArgs e) { hoverAction = -1; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseMove(MouseEventArgs e)
+        void ClearActions()
         {
-            int h = -1;
-            for (int i = 0; i < actionRects.Count; i++) if (actionRects[i].Contains(e.Location)) { h = i; break; }
-            Cursor = h >= 0 ? Cursors.Hand : Cursors.Default;
-            if (h != hoverAction) { hoverAction = h; Invalidate(); }
+            foreach (var button in actionButtons) { Controls.Remove(button); button.Dispose(); }
+            actionButtons.Clear();
         }
-        protected override void OnMouseUp(MouseEventArgs e)
+        public void HideBanner() { Visible = false; ClearActions(); Invalidate(); }
+        protected override void OnResize(EventArgs e) { LayoutActions(); base.OnResize(e); }
+        void LayoutActions()
         {
-            for (int i = 0; i < actionRects.Count; i++)
-                if (actionRects[i].Contains(e.Location)) { var h = ActionClicked; if (h != null) h(i); return; }
+            int ax = Width - 14;
+            for (int i = actionButtons.Count - 1; i >= 0; i--)
+            {
+                var button = actionButtons[i];
+                int bw = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding).Width + 24;
+                ax -= bw;
+                button.Bounds = new Rectangle(ax, Height / 2 - 14, bw, 28);
+                ax -= 8;
+            }
         }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -647,37 +665,15 @@ namespace Gp
             string glyph = Kind == BannerKind.Success ? "\u2714" : Kind == BannerKind.Error ? "\u2718" : "!";
             using (var b = new SolidBrush(fg)) g.DrawString(glyph, Ui.F(11, true), b, 16, rect.Height / 2 - 11);
 
-            // lay out action buttons first so the message text can use the remaining width
-            var bf = Ui.F(8f, true);
-            actionRects.Clear();
-            int ax = rect.Right - 14;
-            for (int i = actions.Count - 1; i >= 0; i--)
-            {
-                var sz = TextRenderer.MeasureText(actions[i].ToUpperInvariant(), bf, Size.Empty, TextFormatFlags.NoPadding);
-                int bw = sz.Width + 24;
-                ax -= bw;
-                actionRects.Insert(0, new Rectangle(ax, rect.Height / 2 - 14, bw, 28));
-                ax -= 8;
-            }
-
             var lines = message.Split('\n');
-            int textMaxW = (actions.Count > 0 ? actionRects[actionRects.Count - 1].X : Width - 56) - 56;
+            int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - 12 : Width - 14;
+            int textMaxW = Math.Max(0, textRight - 44);
             int ty = rect.Height / 2 - (lines.Length * 17) / 2;
-            for (int i = 0; i < lines.Length; i++)
+            for (int i = 0; i < lines.Length && textMaxW > 0; i++)
             {
                 var f = i == 0 ? Ui.F(8.75f, true) : Ui.F(8.25f, false);
-                TextRenderer.DrawText(g, lines[i], f, new Rectangle(44, ty + i * 17, Math.Max(80, textMaxW), 18),
-                    i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-            }
-
-            for (int i = 0; i < actions.Count; i++)
-            {
-                var br = actionRects[i];
-                bool hov = i == hoverAction;
-                Ui.FillRound(g, br, 14, hov ? fg : Ui.Tint(bg, fg, 0.16));
-                Ui.StrokeRound(g, br, 14, fg, 1f);
-                TextRenderer.DrawText(g, actions[i].ToUpperInvariant(), bf, br, hov ? Ui.Bg : fg,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, lines[i], f, new Rectangle(44, ty + i * 17, textMaxW, 18),
+                    i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
             }
         }
     }
@@ -689,13 +685,13 @@ namespace Gp
         // Long batch runs used to grow this control without bound (memory + UI lag). Cap the line count
         // and drop the oldest lines in batches when the cap is exceeded.
         const int MaxLines = 1500;
-        int lineCount = 0;
+        bool trimming;
 
         public LogView()
         {
             ReadOnly = true; BorderStyle = System.Windows.Forms.BorderStyle.None;
             BackColor = Ui.Inset; ForeColor = Ui.TextC;
-            Font = new Font("Consolas", 8.75f);
+            Font = Ui.F("Consolas", 8.75f, false);
             HideSelection = false;
         }
         public void AppendLine(string msg) { AppendLine(msg, LogLevel.Info); }
@@ -715,34 +711,50 @@ namespace Gp
             SelectionLength = 0;
             SelectionColor = c;
             AppendText(msg + Environment.NewLine);
+            TrimLines();
             SelectionColor = ForeColor;
-            lineCount++;
-            if (lineCount > MaxLines) TrimOldest(lineCount - MaxLines / 2); // drop a batch of the oldest lines
+            SelectionStart = TextLength;
+            SelectionLength = 0;
             ScrollToCaret();
         }
 
-        void TrimOldest(int nLines)
+        protected override void OnTextChanged(EventArgs e)
         {
-            try
+            if (trimming) return;
+            TrimLines();
+            base.OnTextChanged(e);
+        }
+        void TrimLines()
+        {
+            if (trimming) return;
+            var t = Text;
+            var starts = new List<int>();
+            starts.Add(0);
+            for (int i = 0; i < t.Length; i++)
             {
-                var t = Text; // snapshot – trimming is rare, so this copy is cheap enough
-                int pos = 0, removed = 0;
-                while (removed < nLines && pos < t.Length)
+                if (t[i] == '\r')
                 {
-                    int nl = t.IndexOf('\n', pos);
-                    if (nl < 0) break;
-                    pos = nl + 1;
-                    removed++;
+                    if (i + 1 < t.Length && t[i + 1] == '\n') i++;
+                    starts.Add(i + 1);
                 }
-                if (pos > 0)
-                {
-                    SelectionStart = 0;
-                    SelectionLength = Math.Min(pos, TextLength);
-                    SelectedText = ""; // delete the selection (DeleteText is not available on this framework build)
-                    lineCount -= removed;
-                }
+                else if (t[i] == '\n') starts.Add(i + 1);
             }
-            catch { }
+            if (starts.Count > MaxLines)
+            {
+                int cut = starts[starts.Count - MaxLines / 2];
+                int start = SelectionStart, end = start + SelectionLength;
+                trimming = true;
+                bool wasReadOnly = ReadOnly;
+                try
+                {
+                    ReadOnly = false;
+                    Select(0, cut);
+                    SelectedText = "";
+                    int newStart = Math.Max(0, start - cut);
+                    Select(newStart, Math.Max(0, end - cut - newStart));
+                }
+                finally { trimming = false; ReadOnly = wasReadOnly; }
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Text;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -21,13 +23,31 @@ namespace Gp
         Rectangle removeRect = Rectangle.Empty;
         bool hoverRemove = false;
         bool updatingText = false;
+        int detectionGeneration;
+        readonly Button removeButton;
 
         string detectedId = "";
         RowState state = RowState.Queued;
         string statusText = "queued";
 
         public string ExePath { get; private set; }
-        public bool Locked { get; set; }
+        bool locked;
+        public bool Locked
+        {
+            get { return locked; }
+            set
+            {
+                locked = value;
+                if (value) InvalidateDetection();
+                if (removeButton != null) removeButton.Enabled = !value;
+            }
+        }
+        public int BeginDetection() { SetState(RowState.Detecting); return ++detectionGeneration; }
+        public void InvalidateDetection() { detectionGeneration++; }
+        public bool CanApplyDetection(int generation)
+        {
+            return !IsDisposed && !Locked && generation == detectionGeneration && state == RowState.Detecting;
+        }
         public event Action<BatchRow> Removed;
 
         public BatchRow(string exePath)
@@ -45,24 +65,36 @@ namespace Gp
                 MaxLength = 10,
             };
             Controls.Add(idBox);
-            idBox.KeyPress += (s, e) => { if (!char.IsDigit(e.KeyChar) && !char.IsControl(e.KeyChar)) e.Handled = true; };
+            idBox.AccessibleName = "Steam AppID for " + Path.GetFileName(ExePath);
+            idBox.KeyPress += (s, e) => { if ((e.KeyChar < '0' || e.KeyChar > '9') && !char.IsControl(e.KeyChar)) e.Handled = true; };
             idBox.TextChanged += delegate
             {
                 if (updatingText || Locked) return;
-                bool has = idBox.Text.Trim().Length > 0;
-                if (state == RowState.Ready || state == RowState.NoId || state == RowState.Queued)
-                    SetState(has ? RowState.Ready : RowState.NoId,
-                        has ? "AppID · entered manually" : "no AppID found – type one in the box");
+                InvalidateDetection();
+                bool has = AppIdDetector.IsValid(idBox.Text);
+                SetState(has ? RowState.Ready : RowState.NoId,
+                    has ? "AppID · entered manually" : "enter a valid Steam AppID");
             };
 
-            Height = 64; // last: triggers OnResize, which needs idBox to exist
+            removeButton = new Button
+            {
+                Text = "×", TabStop = true, FlatStyle = FlatStyle.Flat,
+                ForeColor = Ui.MutedC, BackColor = Ui.Surface,
+                AccessibleName = "Remove " + Path.GetFileName(ExePath),
+                AccessibleRole = AccessibleRole.PushButton
+            };
+            removeButton.FlatAppearance.BorderSize = 0;
+            removeButton.Click += delegate { if (!Locked) { var h = Removed; if (h != null) h(this); } };
+            Controls.Add(removeButton);
+            Height = 64;
         }
 
         public string AppId { get { return idBox.Text.Trim(); } }
 
-        public void ApplyDetection(string id, string source)
+        public void ApplyDetection(int generation, string id, string source)
         {
-            detectedId = id ?? "";
+            if (generation != detectionGeneration || Locked || IsDisposed) return;
+            detectedId = AppIdDetector.Normalize(id);
             updatingText = true;
             idBox.Text = detectedId;
             updatingText = false;
@@ -121,7 +153,8 @@ namespace Gp
         {
             base.OnResize(e);
             removeRect = new Rectangle(Width - 32, Height / 2 - 12, 24, 24);
-            idBox.SetBounds(Width - 32 - 8 - 106, (Height - 30) / 2, 106, 30);
+            if (removeButton != null) removeButton.Bounds = removeRect;
+            if (idBox != null) idBox.SetBounds(Width - 32 - 8 - 106, (Height - 30) / 2, 106, 30);
         }
 
         protected override void OnMouseLeave(EventArgs e) { hoverRemove = false; Invalidate(); base.OnMouseLeave(e); }
@@ -133,19 +166,11 @@ namespace Gp
         }
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (!Locked && removeRect.Contains(e.Location))
+            if (e.Button == MouseButtons.Left && !Locked && removeRect.Contains(e.Location))
             {
                 var h = Removed; if (h != null) h(this);
             }
             base.OnMouseUp(e);
-        }
-
-        static string Trunc(Graphics g, string s, Font f, int maxW)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            if (g.MeasureString(s, f).Width <= maxW) return s;
-            while (s.Length > 1 && g.MeasureString(s + "…", f).Width > maxW) s = s.Substring(0, s.Length - 1);
-            return s + "…";
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -165,12 +190,14 @@ namespace Gp
             if (state == RowState.Patching || state == RowState.Detecting)
                 using (var p = new Pen(Color.FromArgb(90, col.R, col.G, col.B), 1.5f)) g.DrawEllipse(p, 11, Height / 2 - 7, 14, 14);
 
-            int textMaxW = Math.Max(60, Width - removeRect.X - 8 - 30);
-            TextRenderer.DrawText(g, Path.GetFileName(ExePath), Ui.F(9.5f, true),
-                new Rectangle(32, 7, textMaxW, 18), Ui.TextC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
-            string shown = Trunc(g, statusText, Ui.F(8f, false), textMaxW);
-            TextRenderer.DrawText(g, shown, Ui.F(8f, false), new Rectangle(32, 30, textMaxW, 16), col,
-                TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+            int textMaxW = Math.Max(0, idBox.Left - 12 - 32);
+            if (textMaxW > 0)
+            {
+                var flags = TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+                TextRenderer.DrawText(g, Path.GetFileName(ExePath), Ui.F(9.5f, true),
+                    new Rectangle(32, 7, textMaxW, 18), Ui.TextC, flags);
+                TextRenderer.DrawText(g, statusText, Ui.F(8f, false), new Rectangle(32, 30, textMaxW, 16), col, flags);
+            }
 
             // appid box chrome (the TextBox itself paints on top)
             var br = idBox.Bounds;
@@ -187,6 +214,151 @@ namespace Gp
     }
 
     // ─────────────────────────────────────────────── batch dialog
+
+    internal sealed class BufferedRunLog : IDisposable
+    {
+        readonly LogView view;
+        readonly string prefix;
+        readonly ConcurrentQueue<PatchLogEntry> pending = new ConcurrentQueue<PatchLogEntry>();
+        readonly BlockingCollection<string> disk = new BlockingCollection<string>(2048);
+        readonly System.Windows.Forms.Timer timer;
+        readonly Task writer;
+        static readonly object fileLock = new object();
+        static string logDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
+        int pendingCount, dropped;
+        bool completed;
+        string writeError;
+
+        public BufferedRunLog(LogView view, string prefix)
+        {
+            this.view = view;
+            this.prefix = prefix;
+            writer = Task.Run((Action)WriteLoop);
+            timer = new System.Windows.Forms.Timer { Interval = 100 };
+            timer.Tick += delegate { Drain(); };
+            timer.Start();
+        }
+
+        public static IDisposable UseLogDirectory(string dir)
+        {
+            var prev = Interlocked.Exchange(ref logDirectory, dir);
+            return new LogDirScope(prev);
+        }
+
+        sealed class LogDirScope : IDisposable
+        {
+            readonly string restore;
+            public LogDirScope(string restoreTo) { restore = restoreTo; }
+            public void Dispose() { Interlocked.Exchange(ref logDirectory, restore); }
+        }
+
+        public void Append(string message, LogLevel level = LogLevel.Info)
+        {
+            if (completed) return;
+            using (var reader = new StringReader(message ?? ""))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (line.Length == 0) Enqueue("", level);
+                    for (int start = 0; start < line.Length; start += 2048)
+                        Enqueue(line.Substring(start, Math.Min(2048, line.Length - start)), level);
+                }
+            }
+        }
+
+        void Enqueue(string line, LogLevel level)
+        {
+            if (Interlocked.Increment(ref pendingCount) <= 2048)
+                pending.Enqueue(new PatchLogEntry { Message = line, Level = level });
+            else { Interlocked.Decrement(ref pendingCount); Interlocked.Increment(ref dropped); }
+            try
+            {
+                if (!disk.TryAdd(DateTime.Now.ToString("HH:mm:ss") + "  " + prefix + line))
+                    Interlocked.Increment(ref dropped);
+            }
+            catch (InvalidOperationException) { }
+        }
+
+        void DiscardPending()
+        {
+            PatchLogEntry entry;
+            while (pending.TryDequeue(out entry)) Interlocked.Decrement(ref pendingCount);
+            Interlocked.Exchange(ref dropped, 0);
+            Interlocked.Exchange(ref writeError, null);
+        }
+
+        public void Drain()
+        {
+            if (view.IsDisposed || view.Disposing) { DiscardPending(); return; }
+            try
+            {
+                PatchLogEntry entry;
+                int count = 0;
+                while (count++ < 256 && pending.TryDequeue(out entry))
+                {
+                    Interlocked.Decrement(ref pendingCount);
+                    if (view.IsDisposed || view.Disposing) { DiscardPending(); return; }
+                    view.AppendLine(entry.Message, entry.Level);
+                }
+                if (view.IsDisposed || view.Disposing) { DiscardPending(); return; }
+                int lost = Interlocked.Exchange(ref dropped, 0);
+                if (lost > 0) view.AppendLine("Log queue limit reached: " + lost + " UI/disk entries omitted.", LogLevel.Warn);
+                string error = Interlocked.Exchange(ref writeError, null);
+                if (error != null && !view.IsDisposed && !view.Disposing) view.AppendLine("Persistent log unavailable: " + error, LogLevel.Error);
+            }
+            catch (Exception) when (view.IsDisposed || view.Disposing) { DiscardPending(); }
+        }
+
+        void WriteLoop()
+        {
+            foreach (string first in disk.GetConsumingEnumerable())
+            {
+                var text = new StringBuilder().AppendLine(first);
+                string next;
+                for (int i = 0; i < 127 && disk.TryTake(out next); i++) text.AppendLine(next);
+                try
+                {
+                    lock (fileLock)
+                    {
+                        var dir = logDirectory;
+                        Directory.CreateDirectory(dir);
+                        var path = Path.Combine(dir, "last_run.log");
+                        if (File.Exists(path) && new FileInfo(path).Length + Encoding.UTF8.GetByteCount(text.ToString()) > 2 * 1024 * 1024)
+                        {
+                            var previous = path + ".1";
+                            if (File.Exists(previous)) File.Delete(previous);
+                            File.Move(path, previous);
+                        }
+                        using (var output = new StreamWriter(path, true, new UTF8Encoding(false))) output.Write(text.ToString());
+                    }
+                }
+                catch (Exception ex) { Interlocked.Exchange(ref writeError, ex.Message); }
+            }
+        }
+
+        public async Task CompleteAsync()
+        {
+            if (!completed)
+            {
+                completed = true;
+                timer.Stop();
+                disk.CompleteAdding();
+            }
+            await writer;
+            while (!pending.IsEmpty) Drain();
+            Drain();
+        }
+
+        public void Dispose()
+        {
+            timer.Dispose();
+            if (!completed) { completed = true; disk.CompleteAdding(); }
+            if (writer.IsCompleted) disk.Dispose();
+            else writer.ContinueWith(t => disk.Dispose(), TaskScheduler.Default);
+        }
+    }
 
     public class BatchForm : Form
     {
@@ -210,6 +382,13 @@ namespace Gp
         readonly List<BatchRow> rows = new List<BatchRow>();
         CancellationTokenSource cts;
         volatile bool running;
+        bool closing, allowClose;
+        Task runTask = Task.FromResult(0);
+        readonly SemaphoreSlim detectionSlots = new SemaphoreSlim(3);
+        readonly ConcurrentDictionary<BatchRow, CancellationTokenSource> detectionSources = new ConcurrentDictionary<BatchRow, CancellationTokenSource>();
+        readonly List<Task> detectionTasks = new List<Task>();
+        readonly BufferedRunLog runLog;
+        Task shutdownTask;
 
         public bool HasRun { get; private set; }
         public int TotalGames, OkCount, FailCount, SkipCount;
@@ -315,18 +494,13 @@ namespace Gp
             log = new LogView();
             log.SetBounds(10, 10, logCard.Width - 20, logCard.Height - 20);
             logCard.Controls.Add(log);
+            runLog = new BufferedRunLog(log, "[batch] ");
 
             rowTip = new ToolTip();
             rowTip.AutoPopDelay = 8000;
 
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { if (running) CancelBatch(); else Close(); } };
-            FormClosing += (s, e) =>
-            {
-                if (!running) return;
-                var r = MessageBox.Show(this, "The batch is still running – closing will cancel it.\nClose anyway?",
-                    "Goldberg Patcher", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (r != DialogResult.Yes) e.Cancel = true;
-            };
+            FormClosing += OnClosing;
 
             LayoutRows();
             RefreshRunButton();
@@ -405,7 +579,7 @@ namespace Gp
 
         void AddPaths(string[] paths)
         {
-            if (running || paths == null) return;
+            if (running || closing || paths == null) return;
             int added = 0, bad = 0;
             foreach (var p in paths)
             {
@@ -440,6 +614,9 @@ namespace Gp
         void RemoveRow(BatchRow row, bool logIt)
         {
             if (running || rows.IndexOf(row) < 0) return;
+            row.InvalidateDetection();
+            CancellationTokenSource source;
+            if (detectionSources.TryGetValue(row, out source)) source.Cancel();
             rows.Remove(row);
             rowsPanel.Controls.Remove(row);
             row.Dispose();
@@ -460,62 +637,75 @@ namespace Gp
 
         void Detect(BatchRow r)
         {
-            if (prefs.OnlineFix) return;
-            var st = r.GetState();
-            if (st != BatchRow.RowState.Queued && st != BatchRow.RowState.NoId) return;
-            r.SetState(BatchRow.RowState.Detecting);
+            if (prefs.OnlineFix || running || closing || detectionSources.ContainsKey(r)) return;
+            if (r.GetState() != BatchRow.RowState.Queued) return;
+            int generation = r.BeginDetection();
+            string cached;
+            settings.AppIdsByFolder.TryGetValue(Path.GetDirectoryName(r.ExePath) ?? "", out cached);
+            var source = new CancellationTokenSource();
+            detectionSources[r] = source;
+            detectionTasks.RemoveAll(t => t.IsCompleted);
+            detectionTasks.Add(DetectAsync(r, generation, cached, chkOnline.Checked, source));
+        }
 
-            string exe = r.ExePath;
-            bool online = chkOnline.Checked; // read on the UI thread only
-
-            Func<AppIdDetection> job = delegate
+        async Task DetectAsync(BatchRow row, int generation, string cached, bool online, CancellationTokenSource source)
+        {
+            bool entered = false;
+            try
             {
-                string cached = "";
-                try
+                await detectionSlots.WaitAsync(source.Token);
+                entered = true;
+                var result = await Task.Run(() => AppIdDetector.Detect(row.ExePath, cached, online, source.Token), source.Token);
+                await RunOnUi(delegate
                 {
-                    var dir = Path.GetDirectoryName(exe);
-                    settings.AppIdsByFolder.TryGetValue(dir ?? "", out cached);
-                }
-                catch { }
-                return AppIdDetector.Detect(exe, cached, online);
-            };
-
-            Task.Run(job).ContinueWith(delegate(Task<AppIdDetection> t)
-            {
-                // Capture the result/exception on the pool thread: reading t.Result inside the UI
-                // delegate would rethrow a faulted task there and land in the global ThreadException
-                // MessageBox instead of a clean log line.
-                AppIdDetection d = null; Exception ex = null;
-                try { if (t.IsCompleted) d = t.Result; } catch (Exception e) { ex = e; }
-
-                UiInvoke(delegate
-                {
-                    if (IsDisposed || rows.IndexOf(r) < 0) return;
-                    if (ex != null)
+                    if (closing || running || source.IsCancellationRequested || !rows.Contains(row) || !row.CanApplyDetection(generation)) return;
+                    row.ApplyDetection(generation, result.AppId, result.Source);
+                    if (result.Found)
                     {
-                        r.ApplyDetection("", "");
-                        log.AppendLine(Path.GetFileName(exe) + ": AppID detection failed – " + ex.Message, LogLevel.Warn);
+                        settings.AppIdsByFolder[Path.GetDirectoryName(row.ExePath) ?? ""] = result.AppId;
+                        string error;
+                        if (!settings.Save(out error)) runLog.Append(error, LogLevel.Error);
+                        runLog.Append(Path.GetFileName(row.ExePath) + ": AppID " + result.AppId + " (" + result.Source + ")");
                     }
-                    else if (d != null && d.Found)
-                    {
-                        r.ApplyDetection(d.AppId, d.Source);
-                        log.AppendLine(Path.GetFileName(exe) + " → AppID " + d.AppId + " (" + d.Source + ")");
-                        try
-                        {
-                            var dir = Path.GetDirectoryName(exe);
-                            settings.AppIdsByFolder[dir ?? ""] = d.AppId;
-                            settings.Save();
-                        }
-                        catch { }
-                    }
-                    else
-                    {
-                        r.ApplyDetection("", "");
-                        log.AppendLine(Path.GetFileName(exe) + ": no AppID found locally" + (chkOnline.Checked ? " or in the Steam Store." : "."), LogLevel.Warn);
-                    }
-                    RefreshRunButton();
+                    else runLog.Append(Path.GetFileName(row.ExePath) + ": no AppID found" + (online ? " locally or online." : " locally."), LogLevel.Warn);
                 });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                bool report = !closing && !running && rows.Contains(row) && row.CanApplyDetection(generation);
+                if (report) await RunOnUi(delegate
+                {
+                    row.ApplyDetection(generation, "", "");
+                    runLog.Append(Path.GetFileName(row.ExePath) + ": AppID detection failed – " + ex.Message, LogLevel.Warn);
+                });
+            }
+            finally
+            {
+                if (entered) detectionSlots.Release();
+                CancellationTokenSource removed;
+                detectionSources.TryRemove(row, out removed);
+                source.Dispose();
+                await RunOnUi(delegate { if (!closing) RefreshRunButton(); });
+            }
+        }
+
+        Task RunOnUi(Action action)
+        {
+            var completion = new TaskCompletionSource<bool>();
+            UiInvoke(delegate
+            {
+                try { action(); }
+                catch (Exception ex) { completion.TrySetException(ex); return; }
+                completion.TrySetResult(true);
             });
+            return completion.Task;
+        }
+
+        void CancelDetection()
+        {
+            foreach (var row in rows) row.InvalidateDetection();
+            foreach (var source in detectionSources.Values.ToArray()) source.Cancel();
         }
 
         // ---------------------------------------------------------- running the batch
@@ -542,7 +732,12 @@ namespace Gp
                 return;
 
             running = true;
-            settings.LookupAppId = chkOnline.Checked; // keep the global option in sync with the main window toggle
+            CancelDetection();
+            OkCount = FailCount = SkipCount = 0;
+            appliedExes.Clear();
+            outcomes.Clear();
+            TotalGames = total;
+            settings.LookupAppId = chkOnline.Checked;
             cts = new CancellationTokenSource();
             runBtn.Kind = GradientButton.BtnKind.Cancel;
             runBtn.Text = "Cancel";
@@ -558,11 +753,7 @@ namespace Gp
                 items.Add(new BatchInput { Exe = r.ExePath, AppId = prefs.OnlineFix ? "" : r.AppId });
 
             var patcher = new BatchPatcher();
-            patcher.LogLine += e => UiInvoke(delegate
-            {
-                log.AppendLine(e.Message, e.Level);
-                AppendRunLog(e.Message);
-            });
+            patcher.LogLine += e => runLog.Append(e.Message, e.Level);
             patcher.GameStarted += (i, n) => UiInvoke(delegate
             {
                 if (IsDisposed) return;
@@ -576,12 +767,32 @@ namespace Gp
             });
             patcher.ItemCompleted += o => UiInvoke(delegate { if (!IsDisposed) ApplyOutcome(o); });
 
-            patcher.RunAsync(items, prefs, cts.Token).ContinueWith(t => UiInvoke(delegate
+            runTask = CompleteRunAsync(patcher.RunAsync(items, prefs, cts.Token));
+        }
+
+        async Task CompleteRunAsync(Task<List<BatchItemOutcome>> task)
+        {
+            List<BatchItemOutcome> results = null;
+            Exception error = null;
+            bool cancelled = false;
+            try
             {
-                List<BatchItemOutcome> res = null; Exception ex = null;
-                try { if (t.IsCompleted) { res = t.Result; ex = t.Exception; } } catch { }
-                FinishBatch(res, ex);
-            }));
+                try { await task; } catch { }
+                if (task.Status == TaskStatus.Faulted) error = task.Exception.Flatten();
+                else if (task.Status == TaskStatus.Canceled) cancelled = true;
+                else if (task.Status == TaskStatus.RanToCompletion) results = task.Result;
+                FinishBatch(results, error, cancelled);
+            }
+            finally
+            {
+                running = false;
+                if (cts != null) { cts.Dispose(); cts = null; }
+                runBtn.Kind = GradientButton.BtnKind.Primary;
+                addBtn.Enabled = clearBtn.Enabled = !closing;
+                chkOnline.Enabled = !closing && !prefs.OnlineFix;
+                foreach (var row in rows) { row.Locked = closing; row.SetIdBoxEnabled(!closing && !prefs.OnlineFix); }
+                if (!closing) RefreshRunButton();
+            }
         }
 
         void CancelBatch()
@@ -598,17 +809,20 @@ namespace Gp
         {
             // Wrap in an anonymous method – Action and MethodInvoker are unrelated delegate types, so a
             // direct cast is not allowed.
-            try { BeginInvoke((MethodInvoker)delegate { a(); }); }
-            catch (ObjectDisposedException) { }
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) a(); }); }
+            catch (InvalidOperationException) { }
         }
 
         readonly HashSet<string> appliedExes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, BatchItemOutcome> outcomes = new Dictionary<string, BatchItemOutcome>(StringComparer.OrdinalIgnoreCase);
 
         void ApplyOutcome(BatchItemOutcome o)
         {
+            if (o == null || !appliedExes.Add(o.Exe)) return;
+            outcomes[o.Exe] = o;
             BatchRow row = null;
             foreach (var r in rows) if (string.Equals(r.ExePath, o.Exe, StringComparison.OrdinalIgnoreCase)) { row = r; break; }
-            appliedExes.Add(o.Exe);
 
             if (o.Success)
             {
@@ -636,44 +850,70 @@ namespace Gp
             }
         }
 
-        void FinishBatch(List<BatchItemOutcome> results, Exception ex)
+        void FinishBatch(List<BatchItemOutcome> results, Exception ex, bool taskCancelled)
         {
-            bool cancelled = cts != null && cts.IsCancellationRequested;
-
-            foreach (var r in rows)
-                if (!appliedExes.Contains(r.ExePath))
-                    r.SetState(BatchRow.RowState.Skipped, cancelled ? "not started – batch cancelled" : "no result");
-
-            running = false;
-            cts = null;
-            runBtn.Kind = GradientButton.BtnKind.Primary;
-            addBtn.Enabled = true;
-            clearBtn.Enabled = true;
-            chkOnline.Enabled = !prefs.OnlineFix;
-            foreach (var r in rows) { r.Locked = false; if (!prefs.OnlineFix) r.SetIdBoxEnabled(true); }
-
-            TotalGames = rows.Count;
+            bool cancelled = taskCancelled || (cts != null && cts.IsCancellationRequested);
+            if (results != null) foreach (var outcome in results) ApplyOutcome(outcome);
+            foreach (var row in rows)
+                if (!appliedExes.Contains(row.ExePath))
+                    ApplyOutcome(new BatchItemOutcome
+                    {
+                        Exe = row.ExePath, Skipped = true, Cancelled = cancelled,
+                        Summary = cancelled ? "not started – batch cancelled" : "not reached – no worker result"
+                    });
+            OkCount = outcomes.Values.Count(o => o.Success);
+            SkipCount = outcomes.Values.Count(o => !o.Success && (o.Skipped || o.Cancelled));
+            FailCount = outcomes.Count - OkCount - SkipCount;
             HasRun = true;
-            string line = OkCount + " patched · " + FailCount + " failed · " + SkipCount + " skipped";
-            sumLbl.Text = (cancelled ? "Cancelled – " : "") + line;
+            sumLbl.Text = (cancelled ? "Cancelled – " : "") + SummaryLine();
             sumLbl.ForeColor = ex != null ? Ui.ErrC : (FailCount > 0 ? Ui.WarnC : (OkCount > 0 ? Ui.OkC : Ui.MutedC));
-            if (ex != null) log.AppendLine("Batch error: " + ex.Message, LogLevel.Error);
-            if (cancelled && results != null)
-                log.AppendLine("Batch cancelled – " + (results.Count) + "/" + TotalGames + " games reached.", LogLevel.Warn);
-
-            try { settings.Save(); } catch { }
-            RefreshRunButton();
+            if (ex != null) runLog.Append("Batch error: " + ex, LogLevel.Error);
+            runLog.Append((cancelled ? "Batch cancelled: " : "Batch complete: ") + SummaryLine());
+            string error;
+            if (!settings.Save(out error)) runLog.Append(error, LogLevel.Error);
         }
 
-        static void AppendRunLog(string msg)
+        async void OnClosing(object sender, FormClosingEventArgs e)
         {
-            try
+            if (allowClose) return;
+            e.Cancel = true;
+            if (closing) return;
+            if (running && MessageBox.Show(this, "Cancel the batch and wait for a safe stopping point?",
+                "Goldberg Patcher", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            await ShutdownAsync();
+            allowClose = true;
+            Close();
+        }
+
+        public Task ShutdownAsync()
+        {
+            if (shutdownTask == null) shutdownTask = StopAsync();
+            return shutdownTask;
+        }
+
+        async Task StopAsync()
+        {
+            closing = true;
+            addBtn.Enabled = clearBtn.Enabled = runBtn.Enabled = chkOnline.Enabled = false;
+            CancelBatch();
+            CancelDetection();
+            var work = Task.WhenAll(detectionTasks.Concat(new[] { runTask }));
+            if (await Task.WhenAny(work, Task.Delay(10000)) != work)
+                sumLbl.Text = "Still stopping safely – waiting for outstanding work";
+            try { await work; }
+            catch (Exception ex) { runLog.Append("Shutdown: " + ex, LogLevel.Error); }
+            await runLog.CompleteAsync();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
             {
-                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
-                Directory.CreateDirectory(dir);
-                File.AppendAllText(Path.Combine(dir, "last_run.log"), DateTime.Now.ToString("HH:mm:ss") + "  [batch] " + msg + Environment.NewLine);
+                rowTip.Dispose();
+                runLog.Dispose();
+                detectionSlots.Dispose();
             }
-            catch { }
+            base.Dispose(disposing);
         }
     }
 

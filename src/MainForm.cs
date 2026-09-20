@@ -22,6 +22,8 @@ namespace Gp
         public bool ExitWhenDone;
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
+        public string Initialization = "";
+        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\"\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -30,16 +32,28 @@ namespace Gp
             for (int i = 0; i < a.Length; i++)
             {
                 var s = (a[i] ?? "").ToLowerInvariant();
-                try
+                if (s == "--exe" || s == "--appid" || s == "--batch")
                 {
-                    if (s == "--exe" && i + 1 < a.Length) r.Exe = a[++i];
-                    else if (s == "--appid" && i + 1 < a.Length) r.AppId = a[++i];
-                    else if (s == "--batch" && i + 1 < a.Length) r.Batch = a[++i];
-                    else if (s == "--auto") r.Auto = true;
-                    else if (s == "--exit-when-done") r.ExitWhenDone = true;
+                    if (i + 1 >= a.Length || string.IsNullOrWhiteSpace(a[i + 1]) || a[i + 1].StartsWith("--"))
+                        throw new ArgumentException("Missing value for " + s);
+                    string value = a[++i];
+                    if (s == "--exe") r.Exe = value;
+                    else if (s == "--appid")
+                    {
+                        if (!AppIdDetector.TryNormalize(value, out r.AppId)) throw new ArgumentException("Invalid --appid value.");
+                    }
+                    else r.Batch = value;
                 }
-                catch { }
+                else if (s == "--auto") r.Auto = true;
+                else if (s == "--exit-when-done") r.ExitWhenDone = true;
+                else throw new ArgumentException("Unknown argument: " + s);
             }
+            if (r.Batch.Length > 0 && (r.Exe.Length > 0 || r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
+                throw new ArgumentException("--batch cannot be combined with single-game flags.");
+            if (r.Batch.Length == 0 && r.Exe.Length == 0 && (r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
+                throw new ArgumentException("Single-game flags require --exe.");
+            if (r.Exe.Length > 0 && (!File.Exists(r.Exe) || !r.Exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("--exe must name an existing .exe file.");
             return r;
         }
     }
@@ -57,7 +71,23 @@ namespace Gp
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
 
-            var sa = StartupArgs.Parse(args);
+            StartupArgs sa;
+            try { sa = StartupArgs.Parse(args); }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine(ex.Message + Environment.NewLine + StartupArgs.Usage);
+                Environment.ExitCode = 1;
+                return;
+            }
+            string initialization;
+            if (!InitializePayload(out initialization))
+            {
+                Console.Error.WriteLine(initialization);
+                if (args == null || args.Length == 0) MessageBox.Show(initialization, "Setup incomplete");
+                Environment.ExitCode = 1;
+                return;
+            }
+            sa.Initialization = initialization;
             if (sa.Batch.Length > 0)
             {
                 Environment.Exit(RunBatchCli(sa));
@@ -81,10 +111,25 @@ namespace Gp
             Application.Run(new MainForm(sa));
         }
 
-        // headless batch mode: same BatchPatcher engine as the GUI "Batch Patch…" dialog
+        internal static bool InitializePayload(out string message)
+        {
+            try
+            {
+                int restored = Payload.Count > 0 ? Payload.ExtractMissing().Count : 0;
+                var errors = new List<string>();
+                if (Payload.LastErrors != null) errors.AddRange(Payload.LastErrors);
+                errors.AddRange(Tools.Missing());
+                message = errors.Count > 0 ? "Payload initialization failed: " + string.Join("; ", errors)
+                    : "Payload verified: " + Payload.Count + " bundled files, " + restored + " restored.";
+                return errors.Count == 0;
+            }
+            catch (Exception ex) { message = "Payload initialization failed: " + ex.Message; return false; }
+        }
+
         static int RunBatchCli(StartupArgs sa)
         {
             var items = new List<BatchInput>();
+            int invalid = 0;
             foreach (var raw in (sa.Batch ?? "").Split(';'))
             {
                 string entry = (raw ?? "").Trim();
@@ -94,18 +139,22 @@ namespace Gp
                 if (bar < 0) { exePart = entry; appId = ""; }
                 else { exePart = entry.Substring(0, bar).Trim(); appId = entry.Substring(bar + 1).Trim(); }
 
-                string full;
-                try { full = Path.GetFullPath(exePart); }
-                catch { Console.WriteLine("SKIP " + exePart + "   (bad path)"); continue; }
-                if (!File.Exists(full)) { Console.WriteLine("SKIP " + full + "   (file not found)"); continue; }
+                string reason;
+                string full = ValidateBatchEntry(exePart, appId, out reason);
+                if (full == null)
+                {
+                    Console.WriteLine("FAIL " + exePart + "   (" + reason + ")");
+                    invalid++;
+                    continue;
+                }
                 items.Add(new BatchInput { Exe = full, AppId = appId });
             }
 
             if (items.Count == 0)
             {
                 Console.WriteLine("Goldberg Patcher --batch: no usable game entries.");
-                Console.WriteLine("Usage: \"Goldberg Patcher.exe\" --batch \"C:\\game1\\g1.exe|480;C:\\game2\\g2.exe\"");
-                return 2;
+                Console.WriteLine(StartupArgs.Usage);
+                return invalid > 0 ? 1 : 2;
             }
 
             // resolve missing AppIDs from local sources (saved id / steam_appid.txt in the tree)
@@ -113,13 +162,14 @@ namespace Gp
                 if (string.IsNullOrEmpty(it.AppId))
                     try { var d = AppIdDetector.Detect(it.Exe, "", false); if (d.Found) it.AppId = d.AppId; } catch { }
 
-            Console.WriteLine("Goldberg Patcher --batch: " + items.Count + (items.Count == 1 ? " game" : " games"));
+            Console.WriteLine("Goldberg Patcher --batch: " + items.Count + (items.Count == 1 ? " game" : " games")
+                + (invalid > 0 ? ", " + invalid + " invalid entr" + (invalid == 1 ? "y" : "ies") + " (counted as failures)" : ""));
             var prefs = new BatchPrefs { UnpackDrm = true, Backup = true, WriteAppIdTxt = true, CreateSettings = false, OnlineFix = false };
             var patcher = new BatchPatcher();
             patcher.LogLine += e => Console.WriteLine("  [" + e.Level.ToString().ToLowerInvariant() + "] " + e.Message);
 
             List<BatchItemOutcome> results;
-            try { results = patcher.RunAsync(items, prefs, CancellationToken.None).Result; }
+            try { results = patcher.RunAsync(items, prefs, CancellationToken.None).GetAwaiter().GetResult(); }
             catch (Exception ex) { Console.WriteLine("Batch error: " + ex.Message); return 1; }
 
             int ok = 0, bad = 0, skip = 0;
@@ -131,9 +181,24 @@ namespace Gp
                 Console.WriteLine("FAIL " + o.Exe + "   (" + o.Summary + ")");
             }
 
-            Console.WriteLine("--batch done: " + ok + " patched, " + skip + " skipped, " + bad + " failed.");
-            if (bad > 0) return 1;
-            return ok > 0 ? 0 : 2;
+            Console.WriteLine("--batch done: " + ok + " patched, " + skip + " skipped, " + bad + " failed"
+                + (invalid > 0 ? ", " + invalid + " invalid" : "") + ".");
+            if (bad > 0 || invalid > 0) return 1;
+            if (ok == 0) return 2;
+            return skip > 0 || ok < items.Count ? 1 : 0;
+        }
+
+        static string ValidateBatchEntry(string exePart, string appId, out string reason)
+        {
+            reason = "";
+            if (exePart.Length == 0) { reason = "empty path"; return null; }
+            if (appId.Length > 0 && !AppIdDetector.IsValid(appId)) { reason = "invalid AppID \"" + appId + "\""; return null; }
+            string full;
+            try { full = Path.GetFullPath(exePart); }
+            catch { reason = "bad path"; return null; }
+            if (!File.Exists(full)) { reason = "file not found"; return null; }
+            if (!full.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) { reason = "not an .exe file"; return null; }
+            return full;
         }
     }
 
@@ -232,6 +297,11 @@ namespace Gp
             pulseTimer.Interval = 650;
             pulseTimer.Tick += delegate { pulseOn = !pulseOn; Invalidate(); };
         }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { pulseTimer.Stop(); pulseTimer.Dispose(); }
+            base.Dispose(disposing);
+        }
         public void Set(string text, Color dot) { StatusText = text; DotColor = dot; Invalidate(); }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -271,11 +341,17 @@ namespace Gp
         readonly StartupArgs startup;
         PatchRunner runner;
         CancellationTokenSource cts;
+        Task patchTask = Task.FromResult(0);
         volatile bool running;
+        bool waitingClose, allowClose;
         PatchResult lastResult;
         string[] lastActions = new string[0];
 
         System.Windows.Forms.Timer autoTimer;
+        Task autoTimerTask = Task.FromResult(0);
+        TaskCompletionSource<bool> autoSignal;
+        System.Windows.Forms.Timer exitTimer;
+        volatile bool closing;
 
         // appid card live state: "" = default hint, otherwise a status line (auto-detect result)
         string appidNote = "";
@@ -324,7 +400,8 @@ namespace Gp
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-                Ui.SpacedText(g, "STEAM APPID", Ui.F(7.5f, true), new SolidBrush(Ui.MutedC), new PointF(22, 14), 1.5f);
+                using (var b = new SolidBrush(Ui.MutedC))
+                    Ui.SpacedText(g, "STEAM APPID", Ui.F(7.5f, true), b, new PointF(22, 14), 1.5f);
 
                 var f8 = Ui.F(8.25f, false);
                 int ty = appIdCard.Height / 2 - 8;
@@ -396,7 +473,8 @@ namespace Gp
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-                Ui.SpacedText(g, "OPTIONS", Ui.F(7.5f, true), new SolidBrush(Ui.MutedC), new PointF(22, 13), 1.5f);
+                using (var b = new SolidBrush(Ui.MutedC))
+                    Ui.SpacedText(g, "OPTIONS", Ui.F(7.5f, true), b, new PointF(22, 13), 1.5f);
             };
 
             tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
@@ -407,7 +485,7 @@ namespace Gp
             tLookup = new Toggle("Auto-detect Steam AppID online", settings.LookupAppId);
             tOnlineFix.CheckedChanged += delegate
             {
-                appIdBox.Enabled = !running && !tOnlineFix.Checked;
+                appIdBox.Enabled = !closing && !running && !tOnlineFix.Checked;
                 RecalcLog();
             };
             tUnpack.Bounds = new Rectangle(24, 40, 370, 24);
@@ -456,8 +534,45 @@ namespace Gp
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape && running) CancelPatch(); };
 
             Shown += OnShownFirst;
-            FormClosing += (s, e) => { if (running) { try { cts.Cancel(); } catch { } } };
+            FormClosing += OnFormClosing;
             Resize += delegate { RecalcLog(); };
+        }
+
+        async void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (allowClose) return;
+            e.Cancel = true;
+            if (waitingClose) return;
+            waitingClose = true;
+            closing = true;
+            StopAutoTimer();
+            StopExitTimer();
+            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
+            CancelSelectionWork();
+            SetAppIdBusy(false);
+            CancelPatch();
+            statusBar.Set("Stopping safely – waiting for outstanding work…", Ui.WarnC);
+            var work = Task.WhenAll(selectionTasks.Concat(new[] { patchTask, autoTimerTask }));
+            await Task.Yield();
+            try { await work; }
+            catch (Exception ex) { if (!IsDisposed) Log(LogLevel.Error, "Shutdown: " + ex.Message); }
+            if (IsDisposed) return;
+            statusBar.Pulse = false;
+            if (cts != null) { cts.Dispose(); cts = null; }
+            allowClose = true;
+            Close();
+        }
+
+        void StopAutoTimer()
+        {
+            if (autoTimer != null) { autoTimer.Stop(); autoTimer.Dispose(); autoTimer = null; }
+            if (autoSignal != null) autoSignal.TrySetResult(true);
+        }
+
+        void StopExitTimer()
+        {
+            if (exitTimer != null) { exitTimer.Stop(); exitTimer.Dispose(); exitTimer = null; }
         }
 
         [DllImport("dwmapi.dll")]
@@ -503,25 +618,10 @@ namespace Gp
 
         void OnShownFirst(object s, EventArgs e)
         {
+            if (closing || IsDisposed) return;
             Log(LogLevel.Dim, "Goldberg Patcher ready. Drop a game .exe to begin.");
 
-            if (Payload.Count > 0)
-            {
-                int restored = Payload.ExtractMissing().Count;
-                Log(LogLevel.Dim, restored > 0
-                    ? "Self-contained payload: restored " + restored + "/" + Payload.Count + " bundled file(s)."
-                    : "Self-contained payload: all " + Payload.Count + " bundled file(s) verified.");
-                if (Payload.LastErrors != null)
-                    foreach (var err in Payload.LastErrors)
-                        Log(LogLevel.Error, "Payload restore failed for " + err);
-            }
-
-            var missing = Tools.Missing();
-            if (missing.Count > 0)
-            {
-                Log(LogLevel.Error, "Missing bundled tools: " + string.Join(", ", missing));
-                statusBar.Set("Setup incomplete", Ui.ErrC);
-            }
+            Log(LogLevel.Dim, startup.Initialization);
 
             if (!string.IsNullOrEmpty(startup.Exe))
             {
@@ -533,34 +633,59 @@ namespace Gp
                     autoTimer = new System.Windows.Forms.Timer();
                     autoTimer.Interval = 300;
                     int waitedMs = 0;
+                    autoSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                     autoTimer.Tick += delegate
                     {
                         waitedMs += 300;
                         bool boxHasId = appIdBox.Text.Trim().Length > 0;
                         bool go = boxHasId || (selectionResolved && !lookupPending) || waitedMs >= 30000;
                         if (!go || waitedMs < 600) return;
-                        autoTimer.Stop();
+                        StopAutoTimer();
+                        if (closing) return;
                         if (!StartPatch())
                         {
                             // Validation bailed (e.g. the AppID never resolved). With --exit-when-done the
                             // documented contract is exit code 3 – don't hang forever; without it, keep the
                             // window open so the user can type an AppID and retry.
                             Log(LogLevel.Error, "Auto-patch aborted – no valid Steam AppID could be resolved.");
-                            if (startup.ExitWhenDone) { Environment.ExitCode = 3; Close(); }
+                            if (startup.ExitWhenDone) { Environment.ExitCode = 3; BeginAutoExit(); }
                         }
                     };
                     autoTimer.Start();
+                    autoTimerTask = AutoPatchAsync();
                 }
             }
+        }
+
+        Task AutoPatchAsync()
+        {
+            return autoSignal != null ? autoSignal.Task : Task.FromResult(false);
+        }
+
+        void BeginAutoExit()
+        {
+            if (closing || IsDisposed || exitTimer != null) return;
+            var t = new System.Windows.Forms.Timer { Interval = 900 };
+            t.Tick += delegate
+            {
+                t.Stop();
+                StopExitTimer();
+                if (!closing && !IsDisposed) Close();
+            };
+            exitTimer = t;
+            t.Start();
         }
 
         // ---------------------------------------------------------- game selection
 
         void OnGameSelected(string path)
         {
+            if (closing || running || IsDisposed) return;
+            selectionResolved = false;
             banner.HideBanner();
             RecalcLog();
             SetAppIdNote("", Ui.MutedC);
+            CancelSelectionWork();
             lookupPending = false; // any in-flight detection from the previous game no longer matters
             appIdBox.Text = "";    // fresh AppID resolution on EVERY selection (folder cache → steam_appid.txt → online store)
             zoneTip.SetToolTip(zone, "Full path:\n" + path);
@@ -587,20 +712,36 @@ namespace Gp
 
             // deep scan can take a moment on big installs – run it off the UI thread
             int gen = ++selectGeneration;
-            System.Threading.Tasks.Task.Run(() => PatchRunner.FindSteamApiFiles(dir)).ContinueWith(t =>
-            {
-                if (gen != selectGeneration || IsDisposed) return;
-                UiInvoke(delegate
-                {
-                    if (gen != selectGeneration) return;
-                    var apis = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
-                        ? t.Result : new System.Collections.Generic.List<string>();
-                    ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
-                });
-            });
+            var scanSource = new CancellationTokenSource();
+            selectionCts = scanSource;
+            selectionTasks.RemoveAll(t => t.IsCompleted);
+            selectionTasks.Add(ScanSelectionAsync(gen, dir, archChip, sizeChip, scanSource));
         }
 
+        async Task ScanSelectionAsync(int gen, string dir, string archChip, string sizeChip, CancellationTokenSource source)
+        {
+            var apis = new List<string>();
+            try { apis = await Task.Run(() => PatchRunner.FindSteamApiFiles(dir, source.Token), source.Token); }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { if (!closing && gen == selectGeneration) Log(LogLevel.Warn, ex.Message); }
+            finally
+            {
+                if (selectionCts == source) selectionCts = null;
+                source.Dispose();
+            }
+            if (!closing && !IsDisposed && gen == selectGeneration) ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
+        }
+
+        void CancelSelectionWork()
+        {
+            selectGeneration++;
+            var source = Interlocked.Exchange(ref selectionCts, null);
+            if (source != null) { try { source.Cancel(); } catch { } }
+        }
+
+        readonly List<Task> selectionTasks = new List<Task>();
         int selectGeneration;
+        CancellationTokenSource selectionCts;
         bool lookupPending = false;
         bool selectionResolved = false; // ApplyApiSearch finished its AppID resolution for the current game
 
@@ -627,28 +768,44 @@ namespace Gp
 
             lookupPending = true;
             SetAppIdBusy(true);
-            System.Threading.Tasks.Task.Run(() =>
+            var lookupSource = new CancellationTokenSource();
+            selectionCts = lookupSource;
+            selectionTasks.RemoveAll(t => t.IsCompleted);
+            selectionTasks.Add(LookupSelectionAsync(gen, titles, lookupSource));
+        }
+
+        async Task LookupSelectionAsync(int gen, List<string> titles, CancellationTokenSource source)
+        {
+            SteamMatch match = null;
+            try
             {
-                SteamMatch match = null;
-                foreach (var t in titles)
+                match = await Task.Run(() =>
                 {
-                    match = SteamLookup.Search(t);
-                    if (match != null) break;
-                }
-                UiInvoke(delegate
-                {
-                    if (gen != selectGeneration || IsDisposed) return;
-                    lookupPending = false;
-                    if (appIdBox.Text.Trim().Length > 0) { SetAppIdBusy(false); return; } // user typed something meanwhile – don't clobber it
-                    if (match == null) { Log(LogLevel.Dim, "No Steam Store match found – enter the AppID manually."); SetAppIdNote("no store match – type it in manually", Ui.MutedC); }
-                    else { appIdBox.Text = match.AppId; Log(LogLevel.Ok, "Auto-detected Steam AppID " + match.AppId + "  (" + match.GameName + ") from the Steam Store – double-check it's the right game."); SetAppIdNote("matched · " + match.GameName, Ui.OkC); }
-                });
-            });
+                    foreach (var title in titles)
+                    {
+                        var result = SteamLookup.Search(title, source.Token);
+                        if (result != null) return result;
+                    }
+                    return null;
+                }, source.Token);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { if (!closing && gen == selectGeneration) Log(LogLevel.Warn, ex.Message); }
+            finally
+            {
+                if (selectionCts == source) selectionCts = null;
+                source.Dispose();
+            }
+            if (closing || gen != selectGeneration || IsDisposed) return;
+            lookupPending = false;
+            if (appIdBox.Text.Trim().Length > 0) { SetAppIdBusy(false); return; }
+            if (match == null) { Log(LogLevel.Dim, "No Steam Store match found – enter the AppID manually."); SetAppIdNote("no store match – type it in manually", Ui.MutedC); }
+            else { appIdBox.Text = match.AppId; Log(LogLevel.Ok, "Auto-detected Steam AppID " + match.AppId + "  (" + match.GameName + ") from the Steam Store – double-check it's the right game."); SetAppIdNote("matched · " + match.GameName, Ui.OkC); }
         }
 
         void OnInvalidDropped(string path)
         {
-            if (running) return;
+            if (running || closing) return;
             var name = Path.GetFileName(path);
             banner.Show(Banner.BannerKind.Warn, "That doesn't look like a Windows executable.\nDrop the game's .exe file (" + name + ") instead.");
             ShowBannerLayout(true);
@@ -705,7 +862,7 @@ namespace Gp
 
         bool StartPatch()
         {
-            if (running) return false;
+            if (running || closing || IsDisposed || Disposing || !patchTask.IsCompleted) return false;
 
             if (string.IsNullOrEmpty(zone.GamePath))
             {
@@ -715,8 +872,8 @@ namespace Gp
                 return false;
             }
             var ofix = tOnlineFix.Checked;
-            var id = appIdBox.Text.Trim();
-            if (!ofix && (id.Length == 0 || !id.All(char.IsDigit)))
+            var id = AppIdDetector.Normalize(appIdBox.Text);
+            if (!ofix && !AppIdDetector.IsValid(id))
             {
                 banner.Show(Banner.BannerKind.Warn, "Enter a valid numeric Steam AppID.\nYou can find it on steamdb.info by searching your game's name.");
                 ShowBannerLayout(true);
@@ -743,7 +900,8 @@ namespace Gp
             settings.OnlineFix = ofix;
             settings.LookupAppId = tLookup.Checked;
             if (id.Length > 0) settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id; // don't cache empty ids
-            settings.Save();
+            string saveError;
+            if (!settings.Save(out saveError)) Log(LogLevel.Error, saveError);
 
             running = true;
             cts = new CancellationTokenSource();
@@ -759,26 +917,32 @@ namespace Gp
             statusBar.Set("Patching… (Esc to cancel)", Ui.Accent);
 
             runner = new PatchRunner();
-            runner.LogLine += e => UiInvoke(delegate
-            {
-                log.AppendLine(e.Message, e.Level);
-                try
-                {
-                    var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
-                    Directory.CreateDirectory(dir);
-                    File.AppendAllText(Path.Combine(dir, "last_run.log"), DateTime.Now.ToString("HH:mm:ss") + "  " + e.Message + Environment.NewLine);
-                }
-                catch { }
-            });
+            var patchLog = new BufferedRunLog(log, "");
+            runner.LogLine += e => patchLog.Append(e.Message, e.Level);
             runner.ProgressChanged += p => UiInvoke(delegate { progress.SetValue(p); });
 
             var token = cts.Token;
-            runner.RunAsync(opts, token).ContinueWith(t =>
-            {
-                var res = t.Status == TaskStatus.RanToCompletion ? t.Result : new PatchResult { Success = false, Summary = "Internal error." };
-                UiInvoke(delegate { OnPatchDone(res); });
-            });
+            patchTask = CompletePatchAsync(runner.RunAsync(opts, token), patchLog);
             return true;
+        }
+
+        async Task CompletePatchAsync(Task<PatchResult> task, BufferedRunLog patchLog)
+        {
+            try
+            {
+                PatchResult res;
+                try { res = await task; }
+                catch (OperationCanceledException) { res = new PatchResult { Summary = "Cancelled.", Cancelled = true }; }
+                catch (Exception ex) { res = new PatchResult { Summary = "Internal error: " + ex.Message }; }
+                await patchLog.CompleteAsync();
+                if (!IsDisposed && !Disposing) OnPatchDone(res);
+            }
+            finally
+            {
+                patchLog.Dispose();
+                running = false;
+                if (cts != null) { cts.Dispose(); cts = null; }
+            }
         }
 
         // Marshals an action to the UI thread. Swallows ObjectDisposedException when a callback from a
@@ -786,10 +950,9 @@ namespace Gp
         // pool thread (unobserved) because IsDisposed can only be checked inside the delegate.
         void UiInvoke(Action a)
         {
-            // Wrap in an anonymous method – Action and MethodInvoker are unrelated delegate types, so a
-            // direct cast is not allowed.
-            try { BeginInvoke((MethodInvoker)delegate { a(); }); }
-            catch (ObjectDisposedException) { }
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) a(); }); }
+            catch (InvalidOperationException) { }
         }
 
         void CancelPatch()
@@ -806,10 +969,9 @@ namespace Gp
             lastResult = res;
             patchBtn.Kind = GradientButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
-            zone.Enabled = true;
-            appIdBox.Enabled = true;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = true;
-            appIdBox.Enabled = !tOnlineFix.Checked;
+            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = !closing;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = !closing;
+            appIdBox.Enabled = !closing && !tOnlineFix.Checked;
 
             if (res.Success)
             {
@@ -821,13 +983,13 @@ namespace Gp
                 ShowBannerLayout(true);
                 statusBar.Set("Done – game patched successfully", Ui.OkC);
             }
-            else if (res.Summary == "Cancelled.")
+            else if (res.Cancelled)
             {
                 progress.SetValue(0);
                 lastActions = new string[0];
-                banner.Show(Banner.BannerKind.Warn, "Patch cancelled.", new string[0]);
+                banner.Show(Banner.BannerKind.Warn, res.Summary + "\nSee the log below for details.", new string[0]);
                 ShowBannerLayout(true);
-                statusBar.Set("Cancelled", Ui.WarnC);
+                statusBar.Set(res.PartialChanges ? "Cancelled – partial changes remain" : "Cancelled", Ui.WarnC);
             }
             else
             {
@@ -841,9 +1003,7 @@ namespace Gp
             if (startup.ExitWhenDone)
             {
                 Environment.ExitCode = res.Success ? 0 : 3;
-                var t = new System.Windows.Forms.Timer(); t.Interval = 900;
-                t.Tick += delegate { t.Stop(); Close(); };
-                t.Start();
+                if (!closing) BeginAutoExit();
             }
         }
 
@@ -899,7 +1059,7 @@ namespace Gp
 
         void OpenBatch()
         {
-            if (running) return;
+            if (running || closing) return;
 
             var prefs = new BatchPrefs
             {
@@ -962,6 +1122,21 @@ namespace Gp
                     g.FillRectangle(b, clipRect);
                 }
             }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                closing = true;
+                StopAutoTimer();
+                StopExitTimer();
+                CancelSelectionWork();
+                if (notePulse != null) { notePulse.Dispose(); notePulse = null; }
+                if (zoneTip != null) { zoneTip.Dispose(); zoneTip = null; }
+                if (cts != null) { try { cts.Dispose(); } catch { } cts = null; }
+            }
+            base.Dispose(disposing);
         }
 
         protected override void OnPaint(PaintEventArgs e)
