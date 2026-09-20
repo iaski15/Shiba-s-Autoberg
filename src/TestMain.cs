@@ -22,6 +22,7 @@ static class TestMain
         // leaves a journal pointing at temp folders that are deleted before it returns.
         string undoDir = Path.Combine(Path.GetTempPath(), "gp_selftest_undo_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Recovery.JournalPathOverride = Path.Combine(undoDir, "journal.txt");
+        Recovery.StateRootOverride = undoDir;
 
         Console.WriteLine("== Goldberg Patcher self-test ==\n[PE analysis]");
         var root = AppDomain.CurrentDomain.BaseDirectory;
@@ -584,6 +585,50 @@ static class TestMain
             Check(stray.Length == 0, "preserve strands no .gp-recovery litter in the backup root",
                   stray.Length == 0 ? null : stray[0]);
 
+            // The startup sweep clears roots orphaned by a crash – the one case collection cannot reach,
+            // because a crash means no journal was ever written to describe them.
+            string sweepRoot = Path.Combine(rbDir, "sweep-root");
+            Directory.CreateDirectory(sweepRoot);
+            string staleRoot = Path.Combine(sweepRoot, ".gp-recovery");
+            string staleArea = Path.Combine(staleRoot, "stale");
+            Directory.CreateDirectory(staleArea);
+            string staleFile = Path.Combine(staleArea, "x.previous");
+            File.WriteAllText(staleFile, "old");
+            File.SetLastWriteTimeUtc(staleFile, DateTime.UtcNow.AddDays(-30));
+            Directory.SetLastWriteTimeUtc(staleArea, DateTime.UtcNow.AddDays(-30));
+            Directory.SetLastWriteTimeUtc(staleRoot, DateTime.UtcNow.AddDays(-30));
+
+            Recovery.SweepStale(new[] { sweepRoot }, 7);
+            Check(!Directory.Exists(staleRoot), "sweep removes an abandoned .gp-recovery root", staleRoot);
+
+            // A root written to recently is left alone...
+            string freshRoot = Path.Combine(sweepRoot, ".gp-recovery");
+            Directory.CreateDirectory(freshRoot);
+            string freshFile = Path.Combine(freshRoot, "y.previous");
+            File.WriteAllText(freshFile, "recent");
+            Recovery.SweepStale(new[] { sweepRoot }, 7);
+            Check(Directory.Exists(freshRoot), "sweep leaves a recently written .gp-recovery root alone", freshRoot);
+
+            // ...and so is one the undo journal still points at, however old it is: deleting it would
+            // silently break "Undo last patch" for the very patch it describes.
+            File.SetLastWriteTimeUtc(freshFile, DateTime.UtcNow.AddDays(-30));
+            Directory.SetLastWriteTimeUtc(freshRoot, DateTime.UtcNow.AddDays(-30));
+            Recovery.SaveJournal(new[]
+            {
+                new FileWriteRecord
+                {
+                    Destination = Path.Combine(sweepRoot, "kept.txt"),
+                    JournalPath = Path.Combine(freshRoot, "area", "kept.txt.journal.txt"),
+                    RecoveryPath = Path.Combine(freshRoot, "area", "kept.txt.previous"),
+                    Completed = true,
+                    PreviousHash = "aa",
+                    StagedHash = "bb",
+                },
+            }, true);
+            Recovery.SweepStale(new[] { sweepRoot }, 7);
+            Check(Directory.Exists(freshRoot), "sweep keeps a root the undo journal still references", freshRoot);
+            Recovery.ClearLastPatch();
+
             var empty = Recovery.Rollback(new List<RecoveryEntry>(), null);
             Check(empty.Restored == 0 && empty.Failed == 0 && empty.Summary == "Nothing to undo.",
                   "rolling back nothing is a no-op, not an error", empty.Summary);
@@ -600,6 +645,7 @@ static class TestMain
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 
         Recovery.JournalPathOverride = null;
+        Recovery.StateRootOverride = null;
         try { Directory.Delete(undoDir, true); } catch { }
         return fail == 0 ? 0 : 1;
     }

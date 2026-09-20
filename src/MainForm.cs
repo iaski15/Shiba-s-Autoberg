@@ -88,6 +88,7 @@ namespace Gp
                 return;
             }
             sa.Initialization = initialization;
+            SweepStaleRecovery();
             if (sa.Batch.Length > 0)
             {
                 Environment.Exit(RunBatchCli(sa));
@@ -100,7 +101,7 @@ namespace Gp
             {
                 try
                 {
-                    var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
+                    var dir = AppPaths.StateDir;
                     Directory.CreateDirectory(dir);
                     File.AppendAllText(Path.Combine(dir, "errors.log"),
                         DateTime.Now + "\n" + e.Exception + "\n\n");
@@ -109,6 +110,25 @@ namespace Gp
                 MessageBox.Show(e.Exception.Message, "Goldberg Patcher – unexpected error");
             };
             Application.Run(new MainForm(sa));
+        }
+
+        /// <summary>Clears out .gp-recovery areas left behind by a run that died before it could record or
+        /// collect them. Looks only at the app's own state directory and the last game's folder, and never
+        /// recurses into the game tree. Best-effort: a failure here must never stop the app starting.</summary>
+        static void SweepStaleRecovery()
+        {
+            try
+            {
+                var roots = new List<string>();
+                string lastExe = AppSettings.Load().LastExe;
+                if (!string.IsNullOrEmpty(lastExe))
+                {
+                    string dir = Path.GetDirectoryName(lastExe);
+                    if (!string.IsNullOrEmpty(dir)) roots.Add(dir);
+                }
+                Recovery.SweepStale(roots, 7);
+            }
+            catch { }
         }
 
         internal static bool InitializePayload(out string message)

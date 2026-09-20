@@ -520,6 +520,11 @@ namespace Gp
         /// directory so a self-test run cannot disturb a pending undo.</summary>
         internal static string JournalPathOverride;
 
+        /// <summary>Test hook: keeps the startup sweep out of the real application state directory.</summary>
+        internal static string StateRootOverride;
+
+        static string StateRoot { get { return StateRootOverride ?? AppPaths.StateDir; } }
+
         public static string JournalPath
         {
             get { return JournalPathOverride ?? AppPaths.LastPatchJournal; }
@@ -776,6 +781,70 @@ namespace Gp
                     Directory.Delete(root);
             }
             catch { }
+        }
+
+        /// <summary>Deletes .gp-recovery roots abandoned by a run that died before it could record or
+        /// collect them – the one case <see cref="CollectStaging"/> cannot reach, because the crash means
+        /// no journal was ever written.
+        ///
+        /// Granularity is the whole root, not the individual areas inside it: coarser, but it can never
+        /// delete part of a set the undo journal still needs. Deliberately bounded too – it only looks at
+        /// the application's own state directory plus the roots the caller names, never recurses into the
+        /// game tree, and skips any root the current undo journal refers to or that was written to within
+        /// <paramref name="olderThanDays"/>, so a concurrent run is never disturbed.</summary>
+        public static void SweepStale(IEnumerable<string> extraRoots, int olderThanDays)
+        {
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in LoadJournal(JournalPath))
+            {
+                string root = string.IsNullOrEmpty(e.Area) ? "" : Path.GetDirectoryName(e.Area);
+                if (!string.IsNullOrEmpty(root)) keep.Add(root);
+            }
+
+            // The application's own state directory never holds undo data – the journal lives in
+            // <state>\last-patch, not in .gp-recovery – so anything found there is orphaned by
+            // definition and only needs a short grace period to avoid disturbing a second instance
+            // that happens to be saving its settings right now.
+            SweepRoot(StateRoot, keep, DateTime.UtcNow.AddHours(-1));
+
+            // Game folders can hold the recovery copies of the current undo, so only old roots go.
+            DateTime cutoff = DateTime.UtcNow.AddDays(-Math.Max(1, olderThanDays));
+            if (extraRoots != null)
+                foreach (var root in extraRoots) SweepRoot(root, keep, cutoff);
+        }
+
+        static void SweepRoot(string root, HashSet<string> keep, DateTime cutoff)
+        {
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+            string[] candidates;
+            try { candidates = Directory.GetDirectories(root, ".gp-recovery"); }
+            catch { return; }
+            foreach (var dir in candidates)
+            {
+                if (keep.Contains(dir)) continue;
+                try
+                {
+                    if (NewestWriteUtc(dir) > cutoff) continue;
+                    Directory.Delete(dir, true);
+                }
+                catch { }
+            }
+        }
+
+        static DateTime NewestWriteUtc(string dir)
+        {
+            DateTime newest = DateTime.MinValue;
+            try
+            {
+                foreach (var file in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    DateTime t = File.GetLastWriteTimeUtc(file);
+                    if (t > newest) newest = t;
+                }
+                if (newest == DateTime.MinValue) newest = Directory.GetLastWriteTimeUtc(dir);
+            }
+            catch { }
+            return newest;
         }
 
         static IEnumerable<string> AreasOf(IEnumerable<FileWriteRecord> writes)

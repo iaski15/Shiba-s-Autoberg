@@ -387,8 +387,11 @@ worse than a child process writing a good one.
 > but deleting the recovery copies on success would make §10.3's undo-after-restart impossible. The scratch
 > half is collected on success; the recovery copies are kept for exactly one run.
 >
-> Left undone: the time-based sweep for areas orphaned by a crash between the last write and the journal
-> write. `Recovery.CollectStaging`/`PruneAreas` are the hooks if you want it.
+> Left undone from the original list: nothing. The time-based sweep for areas orphaned by a crash between
+> the last write and the journal write landed as `Recovery.SweepStale`, called once from `Program.Main`.
+> It scans only the app's own state directory (one-hour grace — nothing legitimate ever leaves a
+> `.gp-recovery` there) and the last game's folder (seven days), never recurses into the game tree, and
+> skips any root the current undo journal still refers to.
 
 ---
 

@@ -102,7 +102,12 @@ garbage at a much higher rate.
 > own two writes: they belong to no run journal, so nothing else would ever have collected them, and
 > `goldberg_backup` was accumulating `.gp-recovery` trees *inside itself*.
 >
-> Not done: the time-based sweep for folders orphaned by a crash between the last write and the journal write.
+> The startup sweep is in too (`Recovery.SweepStale`, called once from `Program.Main`), which covers the one
+> case collection cannot reach: a run that dies before it records anything. It is deliberately bounded — the
+> app's own state directory plus the last game's folder, never recursing into the game tree, and it skips any
+> root the current undo journal still refers to. The state directory gets a one-hour grace rather than the
+> game folders' seven days, because nothing legitimate ever leaves a `.gp-recovery` there — running it removed
+> the 18-file leak this very review had already accumulated.
 
 ### 3. The original game exe is stored twice on every unpack
 
