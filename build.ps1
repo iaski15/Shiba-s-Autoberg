@@ -28,28 +28,52 @@ function Compress-File([string]$source, [string]$destination) {
 # milliseconds. The recursive walk it replaces enumerated the entire VS tree - tens of
 # thousands of files on a machine with several versions and workloads - and then threw
 # almost all of them away. The walk survives only as a last resort.
+#
+# Every step here is defensive on purpose. `$env:ProgramFiles` and `$env:ProgramFiles(x86)`
+# are NOT guaranteed to be set - they are empty in some shells, including this project's
+# sandbox - and `Join-Path` with a null -Path is a terminating error under
+# `$ErrorActionPreference = 'Stop'`, which would kill the build before it compiled anything.
+# So: skip empty variables, fall back to the literal paths, and never let a discovery
+# failure escape a step. Finding the compiler is best-effort until all four steps fail.
+function Get-VisualStudioRoots {
+    $roots = @()
+    $bases = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, 'C:\Program Files (x86)', 'C:\Program Files')
+    foreach ($base in $bases) {
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        $root = Join-Path $base 'Microsoft Visual Studio'
+        if ($roots -notcontains $root -and (Test-Path -LiteralPath $root)) { $roots += $root }
+    }
+    return $roots
+}
+
 function Find-RoslynViaVsWhere {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere)) { return $null }
-    $found = @(& $vswhere -latest -products * -prerelease -find 'MSBuild\**\Bin\Roslyn\csc.exe' 2>$null)
-    if ($found.Count -gt 0 -and (Test-Path -LiteralPath $found[0])) { return $found[0] }
+    try {
+        foreach ($root in Get-VisualStudioRoots) {
+            $vswhere = Join-Path $root 'Installer\vswhere.exe'
+            if (-not (Test-Path -LiteralPath $vswhere)) { continue }
+            $found = @(& $vswhere -latest -products * -prerelease -find 'MSBuild\**\Bin\Roslyn\csc.exe' 2>$null)
+            if ($found.Count -gt 0 -and (Test-Path -LiteralPath $found[0])) { return $found[0] }
+        }
+    } catch { }
     return $null
 }
 
 function Find-RoslynByGlob {
     # Shallow, targeted globs: the compiler only ever lives at <edition>\MSBuild\<version>\Bin\Roslyn.
     # This reaches two directories deep instead of walking every file under the install root.
-    foreach ($base in @("${env:ProgramFiles(x86)}\Microsoft Visual Studio", "$env:ProgramFiles\Microsoft Visual Studio")) {
-        if (-not (Test-Path -LiteralPath $base)) { continue }
-        $hits = @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'MSBuild' -ErrorAction SilentlyContinue } |
-            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
-            ForEach-Object { Join-Path $_.FullName 'Bin\Roslyn\csc.exe' } |
-            Where-Object { Test-Path -LiteralPath $_ })
+    try {
+        $hits = @()
+        foreach ($root in Get-VisualStudioRoots) {
+            $hits += @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'MSBuild' -ErrorAction SilentlyContinue } |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
+                ForEach-Object { Join-Path $_.FullName 'Bin\Roslyn\csc.exe' } |
+                Where-Object { Test-Path -LiteralPath $_ })
+        }
         if ($hits.Count -gt 0) {
             return ($hits | Sort-Object @{Expression = { (Get-Item -LiteralPath $_).VersionInfo.FileVersionRaw }; Descending = $true})[0]
         }
-    }
+    } catch { }
     return $null
 }
 
@@ -58,17 +82,20 @@ if (-not $csc) { $csc = Find-RoslynViaVsWhere }
 if (-not $csc) { $csc = Find-RoslynByGlob }
 if (-not $csc) {
     Write-Warning "vswhere and the targeted glob both came up empty; falling back to a full recursive search."
-    $candidates = @(Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -like '*Roslyn*' } |
-        Sort-Object @{Expression = { $_.VersionInfo.FileVersionRaw }; Descending = $true}, FullName)
-    if ($candidates.Count -gt 0) { $csc = $candidates[0].FullName }
+    foreach ($root in (Get-VisualStudioRoots + 'C:\Program Files (x86)\Microsoft Visual Studio')) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $candidates = @(Get-ChildItem -LiteralPath $root -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*Roslyn*' } |
+            Sort-Object @{Expression = { $_.VersionInfo.FileVersionRaw }; Descending = $true}, FullName)
+        if ($candidates.Count -gt 0) { $csc = $candidates[0].FullName; break }
+    }
 }
 if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe not found; specify -CompilerPath." }
 
 # ---- version ----
 # One place to bump it. The assembly attribute is what the UI renders, so the number on
 # screen cannot drift from the build that produced it.
-$version = '0.4'
+$version = '0.5'
 $verFile = Join-Path $env:TEMP ('gp_version_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.cs')
 [IO.File]::WriteAllText($verFile, @"
 using System.Reflection;

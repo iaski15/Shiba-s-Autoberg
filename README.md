@@ -96,9 +96,9 @@ release/experimental/     experimental GSE builds (CPY dll crack support, overla
 release/tools/            GSE command-line helpers (generate_interfaces, lobby_connect)
 release/steam_settings.EXAMPLE   example config tree used when scaffolding settings
 build.ps1                 build script
-optimizations.md          code review: known flaws and their status
-plan.md                   phased integration plan
 ```
+
+The review notes (`optimizations.md`, `plan.md`), `AGENTS.md` and the local agent state folder are kept in the working copy but not published — they document in-progress work and internal decisions.
 
 ## Credits
 

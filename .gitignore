@@ -1,4 +1,10 @@
+# Local working documents - kept in the working copy, not published with the repo.
+# The review and the plan describe in-progress work and internal decisions; the agent
+# state folder is scratch. All three stay on disk and out of history.
 AGENTS.md
+optimizations.md
+plan.md
+.workbuddy-ai/
 
 # Payload verification cache, written next to the exe at runtime.
 .payload-ok
