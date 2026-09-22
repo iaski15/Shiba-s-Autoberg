@@ -244,6 +244,16 @@ before/after snapshot of the directory and pick the new file — filesystem trut
 **Fix:** replace with `System.Text.Json` (or a 60-line hand parser for the 3 fields actually used). This is
 a prerequisite for `plan.md` Phase 6.
 
+> **Deferred to `plan.md` Phase 6 - deliberately, not overlooked.** This is the one item the review's own
+> order of work leaves out, and that ordering is right: the real fix is the .NET 8 port, where
+> `System.Text.Json` is in-box. The hand-parser variant would remove the deprecated reference immediately,
+> but it has to handle JSON string escapes properly to be safe against game titles, and Phase 6 would
+> discard it - writing a throwaway parser to save a reference the port is about to remove anyway is not a
+> good trade. Say the word if you want the dependency gone sooner and I will write and test it.
+>
+> Worth noting the dependency is currently *load-bearing* for the build too: `build.ps1` lists
+> `System.Web.Extensions.dll` among the required references and throws if it is missing.
+
 ---
 
 ## P1 — Robustness
