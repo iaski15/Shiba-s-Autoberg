@@ -29,6 +29,20 @@ namespace Gp
         public static readonly Color WarnC = FromHex("#FBBF24");
         public static readonly Color ErrC = FromHex("#F87171");
 
+        // These were ad-hoc Ui.FromHex("#...") literals inside paint and log paths, where each call cost
+        // two Substring allocations and three Convert.ToInt32 parses - on every repaint, per control.
+        public static readonly Color DisabledC = FromHex("#5A6373");   // disabled label / toggle text
+        public static readonly Color KnobOffC = FromHex("#6E7688");    // disabled toggle knob
+        public static readonly Color CancelA = FromHex("#B23A47");
+        public static readonly Color CancelB = FromHex("#8E2F3A");
+        public static readonly Color SuccessA = FromHex("#1F9D66");
+        public static readonly Color SuccessB = FromHex("#157A4F");
+        public static readonly Color OkBorderC = FromHex("#1E5C44");
+        public static readonly Color ErrBorderC = FromHex("#6B2B31");
+        public static readonly Color WarnBorderC = FromHex("#6B5623");
+        public static readonly Color DimC = FromHex("#67707F");        // dim log lines
+        public static readonly Color LogTextC = FromHex("#B9C1CE");    // normal log lines
+
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
         static Ui()
         {
@@ -80,11 +94,32 @@ namespace Gp
 
         public static void FillRound(Graphics g, Rectangle r, int rad, Color c)
         {
-            using (var b = new SolidBrush(c)) using (var p = RoundPath(r, rad)) g.FillPath(b, p);
+            using (var b = new SolidBrush(c)) g.FillPath(b, ScratchPath(r, rad));
         }
         public static void StrokeRound(Graphics g, Rectangle r, int rad, Color c, float w)
         {
-            using (var pen = new Pen(c, w)) using (var p = RoundPath(r, rad)) g.DrawPath(pen, p);
+            using (var pen = new Pen(c, w)) g.DrawPath(pen, ScratchPath(r, rad));
+        }
+
+        // FillRound/StrokeRound run several times per control per paint, and a control repainting at a
+        // steady size fills the SAME rectangle every frame. Reusing one path per thread means those
+        // repaints stop allocating a four-arc GraphicsPath each. The fill-then-stroke pattern also now
+        // shares a single path, which is the common case.
+        //
+        // Deliberately not a general (rect -> path) cache: keys are rectangles, so the table would grow
+        // with every resize step, and every existing caller disposes what RoundPath hands back - a cache
+        // entry handed to one of those would be destroyed underneath it.
+        [ThreadStatic] static GraphicsPath scratchPath;
+        [ThreadStatic] static string scratchKey;
+
+        static GraphicsPath ScratchPath(Rectangle r, int rad)
+        {
+            string key = r.X + "," + r.Y + "," + r.Width + "," + r.Height + "," + rad;
+            if (scratchPath != null && scratchKey == key) return scratchPath;
+            if (scratchPath != null) scratchPath.Dispose();
+            scratchPath = RoundPath(r, rad);
+            scratchKey = key;
+            return scratchPath;
         }
 
         public static string TruncMiddle(Graphics g, string s, Font f, int maxW)
@@ -243,7 +278,7 @@ namespace Gp
             // title
             var tsz = Ui.MeasureSpaced(g, "GOLDBERG PATCHER", Ui.F(9, true), 1.6f);
             Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, Ui.S(new PointF(52, 15)), 1.6f);
-            TextRenderer.DrawText(g, "v0.4", Ui.F(7.75f, false), new Rectangle((int)(Ui.S(52) + tsz.Width + Ui.S(10)), Ui.S(17), Ui.S(60), Ui.S(16)), Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "v" + BuildInfo.Version, Ui.F(7.75f, false), new Rectangle((int)(Ui.S(52) + tsz.Width + Ui.S(10)), Ui.S(17), Ui.S(60), Ui.S(16)), Ui.MutedC, TextFormatFlags.NoPadding);
 
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, Height - 1, Width, Height - 1);
         }
@@ -257,10 +292,6 @@ namespace Gp
         internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-        [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-        internal static extern IntPtr ExtractAssociatedIcon(IntPtr hInst, string lpszFile);
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        internal static extern bool DestroyIcon(IntPtr hIcon);
     }
 
     // ─────────────────────────────────────────────── drop zone
@@ -369,10 +400,21 @@ namespace Gp
             base.OnMouseMove(e);
         }
         protected override void OnMouseLeave(EventArgs e) { overChange = false; Invalidate(); base.OnMouseLeave(e); }
-        Rectangle changeRect = Rectangle.Empty;
+
+        /// <summary>Where the CHANGE link sits. Derived from the width, the font and the DPI scale, so it
+        /// is answerable before the control has ever painted. It used to be assigned inside OnPaint and
+        /// read by OnMouseMove, which meant the hit region was Rectangle.Empty - and the link unclickable
+        /// and never hover-highlighted - until something happened to repaint.</summary>
+        Rectangle ChangeLinkBounds()
+        {
+            var cf = Ui.F(8f, true);
+            int w = TextRenderer.MeasureText("CHANGE", cf, Size.Empty, TextFormatFlags.NoPadding).Width;
+            return new Rectangle(Width - Ui.S(18) - w - Ui.S(4), Ui.S(20), w + Ui.S(8), Ui.S(18));
+        }
+
         bool MouseIsOverChange(Point pt)
         {
-            return changeRect.Contains(pt);
+            return ChangeLinkBounds().Contains(pt);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -434,8 +476,7 @@ namespace Gp
 
                 // CHANGE link top-right
                 var cf = Ui.F(8f, true);
-                var csz = TextRenderer.MeasureText("CHANGE", cf, Size.Empty, TextFormatFlags.NoPadding);
-                changeRect = new Rectangle(Width - pad - csz.Width - Ui.S(4), Ui.S(20), csz.Width + Ui.S(8), Ui.S(18));
+                var changeRect = ChangeLinkBounds();
                 TextRenderer.DrawText(g, "CHANGE", cf, changeRect, overChange ? Ui.Accent2 : Ui.MutedC,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
@@ -512,10 +553,10 @@ namespace Gp
             if (press && Enabled) Ui.FillRound(g, pill, pillH / 2, Color.FromArgb(40, 0, 0, 0));
             int knobD = pillH - Ui.S(6);
             var knob = new Rectangle(Checked ? pill.Right - knobD - Ui.S(3) : pill.X + Ui.S(3), pill.Y + Ui.S(3), knobD, knobD);
-            using (var b = new SolidBrush(Enabled ? Color.White : Ui.FromHex("#6E7688"))) g.FillEllipse(b, knob);
+            using (var b = new SolidBrush(Enabled ? Color.White : Ui.KnobOffC)) g.FillEllipse(b, knob);
 
             TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + Ui.S(10), 0, Math.Max(0, Width - pill.Right - Ui.S(10)), Height),
-                Enabled ? Ui.TextC : Ui.FromHex("#5A6373"), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                Enabled ? Ui.TextC : Ui.DisabledC, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -1, -1), Ui.TextC, Ui.Surface);
         }
     }
@@ -548,9 +589,9 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             var rect = ClientRectangle;
             Color fill1, fill2, txt;
-            if (!Enabled) { fill1 = fill2 = Ui.Surface2; txt = Ui.FromHex("#5A6373"); }
-            else if (Kind == BtnKind.Cancel) { fill1 = Ui.FromHex("#B23A47"); fill2 = Ui.FromHex("#8E2F3A"); txt = Color.White; }
-            else if (Kind == BtnKind.Success) { fill1 = Ui.FromHex("#1F9D66"); fill2 = Ui.FromHex("#157A4F"); txt = Color.White; }
+            if (!Enabled) { fill1 = fill2 = Ui.Surface2; txt = Ui.DisabledC; }
+            else if (Kind == BtnKind.Cancel) { fill1 = Ui.CancelA; fill2 = Ui.CancelB; txt = Color.White; }
+            else if (Kind == BtnKind.Success) { fill1 = Ui.SuccessA; fill2 = Ui.SuccessB; txt = Color.White; }
             else if (Kind == BtnKind.Secondary) { fill1 = Ui.Surface2; fill2 = Ui.Tint(Ui.Surface2, Color.Black, 0.25); txt = Ui.TextC; }
             else { fill1 = Ui.Accent; fill2 = Ui.Accent2; txt = Color.White; }
 
@@ -670,9 +711,9 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             var rect = ClientRectangle;
             Color bg, bd, fg;
-            if (Kind == BannerKind.Success) { bg = Ui.Tint(Ui.Bg, Ui.OkC, 0.09); bd = Ui.FromHex("#1E5C44"); fg = Ui.OkC; }
-            else if (Kind == BannerKind.Error) { bg = Ui.Tint(Ui.Bg, Ui.ErrC, 0.09); bd = Ui.FromHex("#6B2B31"); fg = Ui.ErrC; }
-            else { bg = Ui.Tint(Ui.Bg, Ui.WarnC, 0.08); bd = Ui.FromHex("#6B5623"); fg = Ui.WarnC; }
+            if (Kind == BannerKind.Success) { bg = Ui.Tint(Ui.Bg, Ui.OkC, 0.09); bd = Ui.OkBorderC; fg = Ui.OkC; }
+            else if (Kind == BannerKind.Error) { bg = Ui.Tint(Ui.Bg, Ui.ErrC, 0.09); bd = Ui.ErrBorderC; fg = Ui.ErrC; }
+            else { bg = Ui.Tint(Ui.Bg, Ui.WarnC, 0.08); bd = Ui.WarnBorderC; fg = Ui.WarnC; }
             Ui.FillRound(g, rect, Ui.S(12), bg);
             Ui.StrokeRound(g, rect, Ui.S(12), bd, 1f);
 
@@ -723,8 +764,8 @@ namespace Gp
                 case LogLevel.Ok: c = Ui.OkC; break;
                 case LogLevel.Warn: c = Ui.WarnC; break;
                 case LogLevel.Error: c = Ui.ErrC; break;
-                case LogLevel.Dim: c = Ui.FromHex("#67707F"); break;
-                default: c = Ui.FromHex("#B9C1CE"); break;
+                case LogLevel.Dim: c = Ui.DimC; break;
+                default: c = Ui.LogTextC; break;
             }
             string text = msg + Environment.NewLine;
             lineCount += CountLines(text);

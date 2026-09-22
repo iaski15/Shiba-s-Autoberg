@@ -48,6 +48,32 @@ namespace Gp
         }
     }
 
+    /// <summary>The release version, read from the assembly attribute that build.ps1 injects rather than
+    /// hardcoded in the paint method that displays it - the two drifted apart the first time the literal
+    /// was forgotten. Lives here, not in Ui.cs, so the self-test can assert it.</summary>
+    public static class BuildInfo
+    {
+        static string version;
+
+        public static string Version
+        {
+            get
+            {
+                if (version != null) return version;
+                try
+                {
+                    var attrs = typeof(BuildInfo).Assembly
+                        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+                    if (attrs.Length > 0)
+                        version = ((System.Reflection.AssemblyInformationalVersionAttribute)attrs[0]).InformationalVersion;
+                }
+                catch { }
+                if (string.IsNullOrEmpty(version)) version = "0.0";   // unbuilt/unknown, never blank
+                return version;
+            }
+        }
+    }
+
     /// <summary>Single source of truth for where the app keeps its own state. The
     /// %APPDATA%\GoldbergPatcher path used to be duplicated across Core, Batch and MainForm.</summary>
     public static class AppPaths
@@ -661,12 +687,17 @@ namespace Gp
     /// The journal is mirrored into %APPDATA% so the undo survives a restart.</summary>
     public static class Recovery
     {
+        // Both hooks are assigned only by TestMain.cs, which is compiled into _selftest.exe and not into
+        // the app - so the app's own compilation sees them as never assigned. They are not dead: the test
+        // host depends on them, and they are what keeps a self-test run out of real application state.
+#pragma warning disable 0649
         /// <summary>Test hook: redirects the undo journal away from the real application state
         /// directory so a self-test run cannot disturb a pending undo.</summary>
         internal static string JournalPathOverride;
 
         /// <summary>Test hook: keeps the startup sweep out of the real application state directory.</summary>
         internal static string StateRootOverride;
+#pragma warning restore 0649
 
         static string StateRoot { get { return StateRootOverride ?? AppPaths.StateDir; } }
 
@@ -1436,7 +1467,39 @@ namespace Gp
             // Refresh the stamp when it was unusable (first run, or a new build) or when something was
             // restored. A clean pass against a valid stamp needs no rewrite.
             if (LastErrors.Count == 0 && (!stampUsable || written.Count > 0)) WriteStamp(manifestHash);
+            if (LastErrors.Count == 0) PruneOldBuilds();
             return written;
+        }
+
+        /// <summary>Removes payload folders left behind by earlier builds. Extraction is scoped by the
+        /// manifest hash, so any build that changes the payload creates a fresh ~22 MB folder and nothing
+        /// else would ever delete the previous one.
+        ///
+        /// Only runs after a clean pass, only ever touches siblings of the current folder, and refuses to
+        /// act unless the parent is literally named "payload" - the fallback path points Root at the
+        /// application directory, and guessing there would mean deleting the user's own folders.</summary>
+        static void PruneOldBuilds()
+        {
+            try
+            {
+                string current = Root;
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent)) return;
+                if (!string.Equals(Path.GetFileName(parent), "payload", StringComparison.OrdinalIgnoreCase)) return;
+
+                DateTime cutoff = DateTime.UtcNow.AddHours(-1);   // leave a second instance starting up alone
+                foreach (var dir in Directory.GetDirectories(parent))
+                {
+                    if (string.Equals(dir, current, StringComparison.OrdinalIgnoreCase)) continue;
+                    try
+                    {
+                        if (Directory.GetLastWriteTimeUtc(dir) > cutoff) continue;
+                        Directory.Delete(dir, true);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         static bool Sha256Matches(string path, string expectedHex)
@@ -1509,7 +1572,6 @@ namespace Gp
                 // covers executables that load the library dynamically.
                 string importedApi = ImportedSteamApiName(exePath);
                 string preferredName = importedApi ?? (pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll");
-                string otherName = preferredName == "steam_api64.dll" ? "steam_api.dll" : "steam_api64.dll";
                 if (importedApi != null)
                     Log(LogLevel.Dim, "Imports " + importedApi + " – that is the name the emulator will be installed under.");
 
@@ -1574,10 +1636,7 @@ namespace Gp
                             // The import table does not change when Steamless rewrites the exe, so the
                             // imported name stands. Only the architecture-derived fallback is recomputed.
                             if (importedApi == null)
-                            {
                                 preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
-                                otherName = preferredName == "steam_api64.dll" ? "steam_api.dll" : "steam_api64.dll";
-                            }
                         }
                     }
                     catch { /* keep the pre-unpack analysis */ }
@@ -1850,6 +1909,27 @@ namespace Gp
             return exePath;
         }
 
+        /// <summary>Condenses a child process's stdout/stderr into one short line for the log: the last few
+        /// non-empty lines, joined, capped so it cannot flood the log view. Slicing the raw string at a
+        /// character offset instead starts mid-line and drags embedded newlines into what is meant to be a
+        /// single log entry.</summary>
+        static string Tail(string stdOut, string stdErr, int lineCount, int maxChars)
+        {
+            var all = new List<string>();
+            foreach (var chunk in new[] { stdErr, stdOut })
+            {
+                if (string.IsNullOrEmpty(chunk)) continue;
+                foreach (var raw in chunk.Split('\n'))
+                {
+                    string t = raw.Trim();
+                    if (t.Length > 0) all.Add(t);
+                }
+            }
+            if (all.Count == 0) return "";
+            string joined = string.Join(" | ", all.Skip(Math.Max(0, all.Count - lineCount)).ToArray());
+            return joined.Length > maxChars ? "…" + joined.Substring(joined.Length - maxChars) : joined;
+        }
+
         private string TryGenerateInterfaces(List<string> foundApi, string gameDir, string preferredName, CancellationToken ct)
         {
             if (foundApi.Count == 0) return null;
@@ -1914,8 +1994,9 @@ namespace Gp
                 }
                 // Report the exit code and the tool's own output: without them a failure here reads as
                 // "the dll does not export interfaces", which sends people after the wrong problem.
-                string detail = (stdErr + " " + stdOut).Trim();
-                if (detail.Length > 300) detail = detail.Substring(detail.Length - 300);
+                // The tail is taken line-wise and joined, not sliced at a character offset - a raw
+                // substring starts mid-line and drags embedded newlines into what should be one log line.
+                string detail = Tail(stdOut, stdErr, 3, 240);
                 Log(LogLevel.Warn, "Interface dump produced nothing (generate_interfaces exit code " + exit + ")"
                     + (detail.Length > 0 ? ": " + detail : " – the dll may not export interfaces."));
                 return null;
@@ -2143,10 +2224,15 @@ namespace Gp
             catch (OperationCanceledException) { throw; }
             catch { }
             ct.ThrowIfCancellationRequested();
-            return results.OrderBy(r => r.Length).ToList();
+            // No ordering here: PickApiTarget recomputes depth properly, and sorting by string length was a
+            // proxy that could disagree with it for equal-length paths at different depths.
+            return results;
         }
 
-        public string FindExistingAppId(params string[] dirs)
+        /// <summary>Reads a steam_appid.txt from the first of the given directories that has one. Static
+        /// because it uses no instance state - two call sites used to construct a throwaway PatchRunner
+        /// just to reach it.</summary>
+        public static string FindExistingAppId(params string[] dirs)
         {
             foreach (var d in dirs.Where(d => !string.IsNullOrEmpty(d)))
             {
@@ -2285,7 +2371,7 @@ namespace Gp
             var found = new AppIdDetection();
             try
             {
-                var id = new PatchRunner().FindExistingAppId(AppIdCandidateDirs(dir).ToArray());
+                var id = PatchRunner.FindExistingAppId(AppIdCandidateDirs(dir).ToArray());
                 if (!string.IsNullOrEmpty(id)) { found.AppId = id; found.Source = "steam_appid.txt"; }
             }
             catch { }
@@ -2417,7 +2503,6 @@ namespace Gp
                             Backup = prefs.Backup,
                             WriteAppIdTxt = prefs.WriteAppIdTxt,
                             CreateSettings = prefs.CreateSettings,
-                            GenerateInterfaces = true,
                             OnlineFix = ofix,
                         };
                         o.AppIdUsed = opts.EffectiveAppId;
@@ -2580,6 +2665,9 @@ namespace Gp
             }
             catch (ArgumentException) { list.Clear(); }
             catch (InvalidOperationException) { list.Clear(); }
+            catch (NotSupportedException) { list.Clear(); }
+            catch (IndexOutOfRangeException) { list.Clear(); }
+            catch (FormatException) { list.Clear(); }
             return list;
         }
 
@@ -2676,7 +2764,6 @@ namespace Gp
         public bool Backup = true;
         public bool WriteAppIdTxt = true;
         public bool CreateSettings = false;
-        public bool GenerateInterfaces = true;
         public bool OnlineFix = false;
         public bool LookupAppId = true;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -2704,7 +2791,6 @@ namespace Gp
                         case "backup": s.Backup = v == "1"; break;
                         case "appidsrc": s.WriteAppIdTxt = v == "1"; break;
                         case "settings": s.CreateSettings = v == "1"; break;
-                        case "interfaces": s.GenerateInterfaces = v == "1"; break;
                         case "onlinefix": s.OnlineFix = v == "1"; break;
                         case "lookup": s.LookupAppId = v == "1"; break;
                         default:
@@ -2731,7 +2817,6 @@ namespace Gp
                 sb.AppendLine("backup=" + (Backup ? "1" : "0"));
                 sb.AppendLine("appidsrc=" + (WriteAppIdTxt ? "1" : "0"));
                 sb.AppendLine("settings=" + (CreateSettings ? "1" : "0"));
-                sb.AppendLine("interfaces=" + (GenerateInterfaces ? "1" : "0"));
                 sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)

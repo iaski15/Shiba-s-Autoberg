@@ -24,14 +24,58 @@ function Compress-File([string]$source, [string]$destination) {
 }
 
 # ---- locate Roslyn csc ----
+# vswhere is the supported way to ask where Visual Studio put things, and it answers in
+# milliseconds. The recursive walk it replaces enumerated the entire VS tree - tens of
+# thousands of files on a machine with several versions and workloads - and then threw
+# almost all of them away. The walk survives only as a last resort.
+function Find-RoslynViaVsWhere {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) { return $null }
+    $found = @(& $vswhere -latest -products * -prerelease -find 'MSBuild\**\Bin\Roslyn\csc.exe' 2>$null)
+    if ($found.Count -gt 0 -and (Test-Path -LiteralPath $found[0])) { return $found[0] }
+    return $null
+}
+
+function Find-RoslynByGlob {
+    # Shallow, targeted globs: the compiler only ever lives at <edition>\MSBuild\<version>\Bin\Roslyn.
+    # This reaches two directories deep instead of walking every file under the install root.
+    foreach ($base in @("${env:ProgramFiles(x86)}\Microsoft Visual Studio", "$env:ProgramFiles\Microsoft Visual Studio")) {
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        $hits = @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'MSBuild' -ErrorAction SilentlyContinue } |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
+            ForEach-Object { Join-Path $_.FullName 'Bin\Roslyn\csc.exe' } |
+            Where-Object { Test-Path -LiteralPath $_ })
+        if ($hits.Count -gt 0) {
+            return ($hits | Sort-Object @{Expression = { (Get-Item -LiteralPath $_).VersionInfo.FileVersionRaw }; Descending = $true})[0]
+        }
+    }
+    return $null
+}
+
 $csc = $CompilerPath
+if (-not $csc) { $csc = Find-RoslynViaVsWhere }
+if (-not $csc) { $csc = Find-RoslynByGlob }
 if (-not $csc) {
+    Write-Warning "vswhere and the targeted glob both came up empty; falling back to a full recursive search."
     $candidates = @(Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -like '*Roslyn*' } |
         Sort-Object @{Expression = { $_.VersionInfo.FileVersionRaw }; Descending = $true}, FullName)
     if ($candidates.Count -gt 0) { $csc = $candidates[0].FullName }
 }
 if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe not found; specify -CompilerPath." }
+
+# ---- version ----
+# One place to bump it. The assembly attribute is what the UI renders, so the number on
+# screen cannot drift from the build that produced it.
+$version = '0.4'
+$verFile = Join-Path $env:TEMP ('gp_version_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.cs')
+[IO.File]::WriteAllText($verFile, @"
+using System.Reflection;
+[assembly: AssemblyVersion("$version.0.0")]
+[assembly: AssemblyFileVersion("$version.0.0")]
+[assembly: AssemblyInformationalVersion("$version")]
+"@, (New-Object System.Text.UTF8Encoding($false)))
 
 # ---- reference assemblies (.NET Framework 4.8) ----
 $refDir = $ReferencePath
@@ -70,7 +114,7 @@ function Compile($sources, $out, $extra) {
 }
 
 # ---- self test host (console) ----
-Compile @("`"$src\Core.cs`"", "`"$src\TestMain.cs`"") (Join-Path $root '_selftest.exe') $null
+Compile @("`"$src\Core.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") (Join-Path $root '_selftest.exe') $null
 
 # ---- embedded payload (tools the app needs at runtime) ----
 $pay = @(
@@ -79,7 +123,11 @@ $pay = @(
 )
 $pluginsDir = Join-Path $root 'steamless\Plugins'
 if (Test-Path $pluginsDir) {
-    Get-ChildItem $pluginsDir -Filter '*.dll' | ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
+    # ExamplePlugin is Steamless's sample/template plugin - it implements the API and does nothing.
+    # Shipping it only means the CLI loads a no-op plugin on every run. The file stays in the vendored
+    # tree (the fork is meant to be rebasable); it just is not part of the payload.
+    Get-ChildItem $pluginsDir -Filter '*.dll' | Where-Object { $_.Name -ne 'ExamplePlugin.dll' } |
+        ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
 }
 $pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
 $pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'release\tools\generate_interfaces\generate_interfaces_x64.exe')
@@ -128,11 +176,12 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $verFile -Force -ErrorAction SilentlyContinue
 }
 
 if ($Verify) {

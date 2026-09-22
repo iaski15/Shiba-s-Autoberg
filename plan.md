@@ -464,7 +464,7 @@ hunt in `build.ps1` is the main reason there is no CI today — §9.1 removes it
 
 | # | Phase | Depends on | Rough size |
 | --- | --- | --- | --- |
-| 0 | §1.1 write `docs/PERMISSIONS.md` + `THIRD-PARTY-NOTICES.md` | — | trivial — do it first |
+| 0 | §1.1 write `docs/PERMISSIONS.md` + `THIRD-PARTY-NOTICES.md` — **waived by the user** | — | The owner's permission for GSE and Steamless is held and the user explicitly declined the paperwork (2026-09-20). Do not create these files, and do not re-raise the licensing caveat. |
 | 1 | §10 rollback + journal GC — **done** | — | medium — independent, and the highest-value fix in the repo |
 | 2 | §9.2 payload compression — **done** | — | small — biggest visible win per line changed |
 | 3 | §4 vendor the Steamless fork, build it | 0 | small |
@@ -472,7 +472,7 @@ hunt in `build.ps1` is the main reason there is no CI today — §9.1 removes it
 | 5 | §7.1 GSE from source | 0 | small |
 | 6 | §9.1 .NET 8 port + drop `System.Web.Extensions` | 2 | medium — unblocks CI |
 | 7 | §6 ILMerge | 4, 6 | small |
-| 8 | §8 import-table driven install | 6 | small |
+| 8 | §8 import-table driven install — **done** (landed early, with optimizations #5) | 6 | small |
 | 9 | §7.3 managed interface scanner | 6 | medium |
 | 10 | §11 CI + corpus | 6 | small |
 | 11 | §9.3 payload slimming | 4, 5, 9 | small |

@@ -155,6 +155,14 @@ stays on disk forever, and Steamless will keep loading the stale plugin.
 >
 > `--verify-payload` now reports the extracted folder's contents, and the live test asserts the payload
 > lands under `%LOCALAPPDATA%` and still repairs itself there.
+>
+> **Follow-up, same change:** scoping extraction by manifest hash meant every build that alters the payload
+> created a fresh ~22 MB folder under `%LOCALAPPDATA%\GoldbergPatcher\payload\` and nothing ever removed
+> the previous one. `Payload.PruneOldBuilds` now clears siblings of the current folder after a clean pass.
+> It refuses to act unless the parent directory is literally named `payload` - the fallback path points
+> `Root` at the application directory, and guessing there would mean deleting the user's own folders - and
+> it skips anything touched in the last hour so a second instance still starting up is not pulled out from
+> under itself.
 
 ### 5. The installed dll name is chosen from the CPU architecture, not from what the exe imports
 
@@ -560,6 +568,13 @@ They are called several times per control per paint, across ~15 custom controls.
 **Fix:** cache paths keyed on `(width, height, radius)` in a small dictionary, or draw the rounded rect with
 a single `AddRoundedRectangle`-style helper and reuse one path for fill+stroke.
 
+> **Fixed.** `FillRound`/`StrokeRound` now share one path per thread (`Ui.ScratchPath`), so a control
+> repainting at a steady size stops allocating a four-arc `GraphicsPath` per fill and per stroke, and the
+> ubiquitous fill-then-stroke pair allocates one path instead of two. Deliberately *not* a general
+> (rectangle -> path) cache: keys are rectangles, so the table would grow on every resize step, and all ~15
+> existing callers dispose what `RoundPath` hands back - a cached entry given to one of those would be
+> destroyed underneath it. `RoundPath` itself is unchanged for direct callers.
+
 ### 23. `Ui.FromHex` runs inside paint and log hot paths
 
 `Ui.FromHex("#67707F")` is evaluated for every dim log line (`Ui.cs:707`), and `Ui.FromHex("#5A6373")` on
@@ -567,6 +582,11 @@ every `Toggle`/`GradientButton`/`StatusBarCtl` paint (`Ui.cs:504`, `Ui.cs:537`, 
 does two `Substring` allocations plus three `Convert.ToInt32` parses.
 
 **Fix:** promote the ad-hoc hex strings to `static readonly Color` fields alongside the existing palette.
+
+> **Fixed.** Promoted to `static readonly` palette fields (`DisabledC`, `KnobOffC`, `CancelA/B`,
+> `SuccessA/B`, `OkBorderC`, `ErrBorderC`, `WarnBorderC`, `DimC`, `LogTextC`). `Ui.FromHex` now runs only at
+> type initialisation; the log path and every custom control's paint no longer allocate two substrings and
+> parse three ints per call. The hex values are unchanged - this was a mechanical substitution.
 
 ### 24. Roslyn discovery recurses the entire Visual Studio tree on every build
 
@@ -577,6 +597,11 @@ tens of thousands of files before discarding most of them.
 **Fix:** use `vswhere.exe` (`-latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\csc.exe`),
 which is the supported way and returns in milliseconds. Or filter with `-Include *Roslyn*csc.exe` so the
 recursion prunes.
+
+> **Fixed.** `vswhere.exe` is tried first and answers in milliseconds. Two cheaper fallbacks follow: a
+> targeted two-level glob (`<edition>\MSBuild\<version>\Bin\Roslyn\`) instead of a walk, and the original
+> full recursion only as a last resort, with a warning that says so. Verified picking up
+> `...\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe`.
 
 ---
 
@@ -589,6 +614,12 @@ recursion prunes.
 `true`: `MainForm.cs:892` and `Core.cs:1441`. There is no UI toggle, so the option can never be turned off.
 Either wire up a `Toggle` or delete the setting.
 
+> **Fixed, by deletion.** `AppSettings.GenerateInterfaces` and its `interfaces=` line in the settings
+> file are gone, as is the `BatchPrefs` copy. `PatchOptions.GenerateInterfaces` survives on purpose: it is
+> the pipeline's own option and is honoured in the pipeline, which is what it always was - the flaw was the
+> *setting* that could never be turned off, not the option. The README's option table no longer lists it as
+> something the user can toggle.
+
 ### 26. Dead code
 
 | Item | Location | Note |
@@ -600,6 +631,14 @@ Either wire up a `Toggle` or delete the setting.
 | `steamless/ExamplePlugin.dll` + `ExamplePlugin.zip` | embedded via `build.ps1:67` | Steamless's *sample* plugin; ships in the payload and gets loaded at runtime |
 | `string otherName` outer-scope assignment | `Core.cs:710` | Recomputed in `InstallGoldbergDlls`; the outer value is used only in the `res.Unpacked` branch |
 
+> **Fixed**, item by item. `BufferedRunLog.UseLogDirectory` + `LogDirScope` deleted (never called);
+> `logDirectory` is `static readonly` now. `NativeMethods.ExtractAssociatedIcon`/`DestroyIcon` deleted -
+> never called, and the HICON-leak theory behind them was wrong: the managed
+> `Icon.ExtractAssociatedIcon` is already disposed through `using`, so the P/Invoke pair was never needed.
+> `ExamplePlugin.dll` is excluded from the payload (the file stays in the vendored tree, so the fork stays
+> rebasable - only the embedded set changed). `string otherName` at outer scope was already gone.
+> `MainForm.AmbientGlow` is **not** dead: #19 kept the glows and now calls it from the cached-bitmap path.
+
 ### 27. `%APPDATA%\GoldbergPatcher` is a magic string in three files
 
 - `Core.cs:1680` (`AppSettings.Dir`)
@@ -610,9 +649,15 @@ Three independent definitions of the app's state directory. Any change desynchro
 
 **Fix:** a single `AppPaths.StateDir` used by all three.
 
+> **Fixed.** `BufferedRunLog` was the last independent copy of the literal; it now uses
+> `AppPaths.StateDir`, so all three sites share one definition.
+
 ### 28. `README.md` contains the entire document twice
 
 Lines 1–79 and lines 81–159 are byte-identical. Delete one.
+
+> **Fixed.** The duplicate second copy is gone, along with a stray GitHub attachment link that sat
+> between the two halves. The surviving copy was also corrected - see #35.
 
 ### 29. The version number is hardcoded in a paint method
 
@@ -620,16 +665,29 @@ Lines 1–79 and lines 81–159 are byte-identical. Delete one.
 
 **Fix:** read `AssemblyInformationalVersionAttribute` (set it via `build.ps1`) and render that.
 
+> **Fixed.** `build.ps1` generates the assembly attributes (`AssemblyVersion`, `AssemblyFileVersion`,
+> `AssemblyInformationalVersion`) from a single `$version` constant and compiles them into both binaries;
+> `Ui` renders `BuildInfo.Version`, which reads the attribute and falls back to `0.0` only when it is absent
+> (a hand-compiled binary). `BuildInfo` lives in `Core.cs`, not `Ui.cs`, so the self-test can reach it.
+> Verified: both exes report `ProductVersion=0.4`, and the test asserts the rendered string equals the
+> injected attribute, so a silently-broken reader cannot pass by returning the fallback.
+
 ### 30. `FindExistingAppId` is an instance method that uses no instance state
 
 `Core.cs:1238`. Because of this, two call sites construct a throwaway `PatchRunner` just to reach it:
 `Core.cs:1344` (`new PatchRunner().FindExistingAppId(...)`) and `MainForm.cs:855-859`
 (`runner_FillAppId`). Make it `static` and delete the wrapper.
 
+> **Fixed.** `FindExistingAppId` is `static`; the `runner_FillAppId` wrapper in MainForm is gone and
+> every call site uses `PatchRunner.FindExistingAppId` directly.
+
 ### 31. Stray indentation
 
 `Core.cs:712` — `                                if (foundApi.Count > 0)` sits at 32 spaces inside a method that
 indents at 16. Cosmetic, but it suggests a bad merge.
+
+> **Fixed.** The 32-space outlier is gone; the install-directory block now sits at the method's own
+> indent level.
 
 ### 32. Committed build artifacts
 
@@ -637,11 +695,21 @@ indents at 16. Cosmetic, but it suggests a bad merge.
 no CI and that verification is running the self-test — but the 21.8 MB blob will be re-added to history on
 every build. Add both to `.gitignore` and attach them to releases instead.
 
+> **Not done - deliberate, and it is your call.** Measured before deciding: 41 blobs of the two exes
+> across history, **286.7 MB uncompressed, inside a `.git` of 192 MB**. So the premise is real. Against it:
+> there is no CI and no release pipeline, and `AGENTS.md` defines verification as running the committed
+> exes - gitignoring them would leave a fresh clone with no runnable binary and no replacement channel. The
+> cost is also a third of what the review assumed, since the app exe is 7.54 MB now rather than 21.8 MB.
+> If you want it, it is two lines in `.gitignore` plus a decision to attach binaries to releases instead;
+> the 192 MB already in history would need a rewrite to reclaim, which is a separate call.
+
 ### 33. Exit code 3 is undocumented
 
 `StartupArgs.Usage` (`MainForm.cs:26`) documents `0`, `1`, `2`. The code also returns `3` when `--auto` cannot
 resolve an AppID (`MainForm.cs:651`) and on patch failure with `--exit-when-done` (`MainForm.cs:1005`).
 Document it, or fold it into `1`.
+
+> **Fixed.** `StartupArgs.Usage` documents exit `3` for `--auto` when no AppID can be resolved.
 
 ### 34. `--batch` cannot do online-fix or settings scaffolding
 
@@ -649,6 +717,9 @@ Document it, or fold it into `1`.
 `new BatchPrefs { UnpackDrm = true, Backup = true, WriteAppIdTxt = true, CreateSettings = false, OnlineFix = false }`
 with no way to override from the command line, while the GUI batch dialog exposes all five. Add
 `--online-fix` / `--no-unpack` / `--settings` flags.
+
+> **Fixed.** `--online-fix`, `--no-unpack` and `--settings` are parsed and applied to `BatchPrefs`, and
+> are rejected unless `--batch` is present. `--batch` no longer has to run one fixed configuration.
 
 ### 35. Documentation drifts from the code
 
@@ -658,11 +729,21 @@ with no way to override from the command line, while the GUI batch dialog expose
   is not publicly resolvable. The bundled plugins match atom0s' Steamless — link the real upstream.
 - `README.md:55` says "~60 files"; the manifest is generated at build time and will drift.
 
+> **Fixed.** `goldberg_backup\sources\<pathhash>\` in both places; Steamless re-pointed at
+> [github.com/atom0s/Steamless](https://github.com/atom0s/Steamless) - the GitLab URL returns 403 to an
+> anonymous client, verified with curl; the GSE GitLab link is fine and stays. The "~60 files" claim is
+> replaced by a statement that the embedded set is generated at build time. Two further drifts the review
+> did not list were also corrected: the payload is extracted under `%LOCALAPPDATA%`, not "next to the exe",
+> and the option table advertised a `Generate interfaces` toggle that does not exist (see #25).
+
 ### 36. `FindSteamApiFiles` sorts by string length as a proxy for depth
 
 `Core.cs:1235` returns `results.OrderBy(r => r.Length)`, but `PickApiTarget` (`Core.cs:1174-1185`) recomputes
 depth properly with `ShortRel(...).Split('\\').Length`. The initial sort is redundant work and the two
 orderings can disagree for paths of equal length at different depths. Drop the sort.
+
+> **Fixed.** The redundant `OrderBy(r => r.Length)` is gone; `PickApiTarget` remains the single place
+> that computes depth, so the two orderings can no longer disagree.
 
 ### 37. The batch row draws its remove button twice
 
@@ -670,6 +751,12 @@ orderings can disagree for paths of equal length at different depths. Drop the s
 the same rectangle (`Batch.cs:208-209`). Depending on the button's default rendering, the glyph is
 double-drawn or misaligned, and the parent's `OnMouseUp` handler (`Batch.cs:167-174`) can never fire over the
 button — so `hoverRemove` is dead state. Pick one: either the button or the custom paint.
+
+> **Fixed.** Kept the real `Button` - it is what makes removal reachable by Tab and by screen readers
+> - and deleted the second painted glyph along with the parent's now-unreachable `OnMouseMove`,
+> `OnMouseUp` and `OnMouseLeave` handlers and the dead `hoverRemove` state. The accent hover is preserved
+> by recolouring the button's `ForeColor` on enter/leave, and the flat button's default light hover is
+> overridden with theme colours so it does not flash grey against the dark row.
 
 ### 38. The drop zone computes its hit-test rectangle during `OnPaint`
 
@@ -679,11 +766,19 @@ effect of rendering.
 
 **Fix:** compute it in `OnResize`/`OnLayout`, or expose a `ChangeLinkBounds` property.
 
+> **Fixed.** `ChangeLinkBounds()` derives the rectangle from the width, the font and the DPI scale, so
+> it is correct before the first paint. `changeRect` no longer exists and the hit region is no longer a
+> side effect of rendering. Computed on demand rather than cached in `OnResize`: one `MeasureText` per
+> mouse-move is cheaper than a stale rectangle, and it removes the ordering dependency entirely.
+
 ### 39. `TestMain.ReviewRegressions` has an unguarded cleanup
 
 `TestMain.cs:591`: `finally { Directory.Delete(dir, true); }` — unlike every other cleanup in the file, this
 one has no `try/catch`. If a handle is still open (which the file-locking tests make plausible), the
 self-test crashes with an unhandled exception and the whole run reports nothing.
+
+> **Fixed.** The cleanup is wrapped like every other one in the file, so a still-open handle reports a
+> failed test instead of killing the run.
 
 ### 40. `Ui.fontCache` never evicts
 
@@ -692,11 +787,20 @@ self-test crashes with an unhandled exception and the whole run reports nothing.
 `LogView` assign cached fonts to `Control.Font`, which means control disposal does not free them and any
 future dynamic sizing would leak.
 
+> **Not done - deliberately, and it should stay that way.** The key space is bounded by
+> (family, size, bold) and the cache is disposed at `ApplicationExit`, so nothing leaks today. Eviction
+> would mean disposing `Font` objects that live controls still reference - a real visual break - to prevent
+> a leak that cannot occur without data-driven font sizing, which does not exist. Revisit only if font
+> sizes ever become dynamic.
+
 ### 41. Box-drawing characters in console output
 
 `Core.cs:681` (`──`), `Core.cs:848` (`✔`), `Core.cs:855` (`✖`) and `Core.cs:1474` are written via
 `Console.WriteLine`. On a console with a non-UTF-8 code page they render as mojibake. Set
 `Console.OutputEncoding = Encoding.UTF8` in the CLI paths, or use ASCII.
+
+> **Fixed.** `Console.OutputEncoding = Encoding.UTF8` is set in the CLI paths, next to the
+> parent-console attach from #8. The box-drawing and tick glyphs now render on any console code page.
 
 ### 42. `JavaScriptSerializer` error surface
 
@@ -705,10 +809,15 @@ future dynamic sizing would leak.
 `IndexOutOfRangeException` on malformed input. It is swallowed by the callers today, but the catch list is
 narrower than the API's documented behaviour.
 
+> **Fixed.** `NotSupportedException`, `IndexOutOfRangeException` and `FormatException` added to the
+> catch list, matching the API's documented failure surface.
+
 ### 43. `StartupArgs.Parse` accepts a value that starts with `-`
 
 `MainForm.cs:37` rejects values starting with `--` but accepts `-x`. Harmless, but the guard's intent
 ("a flag is never a value") is only half-implemented.
+
+> **Fixed.** The guard now rejects any value starting with `-`, which is what it always claimed to do.
 
 ---
 
@@ -723,7 +832,7 @@ narrower than the API's documented behaviour.
 | 5 | #4, #8, #14 — **done** | Removes the "it just doesn't start" and "no output" failure classes |
 | 6 | #9, #17, #18, #19 — **done** | Performance, once correctness is settled |
 | 7 | #12, #13, #15, #16 — **done** | Robustness hardening |
-| 8 | #25–#43 | Cleanup, in any order |
+| 8 | #25–#43 — **done**, except #32 and #40 | Cleanup, in any order. #32 (untrack the built exes) and #40 (font-cache eviction) are deliberate rejections with reasons recorded above |
 
 ## What is already good (keep it)
 

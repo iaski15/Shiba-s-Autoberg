@@ -290,7 +290,7 @@ static class TestMain
             // ---- appid prefill helper ----
             Console.WriteLine("\n[helpers]");
             var r2 = new PatchRunner();
-            var found = r2.FindExistingAppId(gameDir, work);
+            var found = PatchRunner.FindExistingAppId(gameDir, work);
             Check(found == "1250", "FindExistingAppId reads steam_appid.txt", found ?? "(null)");
 
             var near = PatchRunner.FindSteamApiFiles(gameDir);
@@ -722,6 +722,23 @@ static class TestMain
         }
         finally { Dpi.Scale = savedScale; }
 
+        Console.WriteLine("\n[build version]");
+        // The UI renders this instead of a literal, so it has to come back non-empty even when the
+        // attribute is missing (a hand-compiled binary), and it has to be the number build.ps1 injected.
+        var ver = BuildInfo.Version;
+        Check(ver.Length > 0, "the version is never blank", ver);
+        Check(BuildInfo.Version == ver, "the version is cached consistently", ver);
+
+        // Compare against the attribute directly: if it is present, the fallback must NOT have been used,
+        // so a reader that silently broke cannot pass by returning "0.0".
+        var attr = (System.Reflection.AssemblyInformationalVersionAttribute[])typeof(BuildInfo).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+        if (attr.Length > 0 && !string.IsNullOrEmpty(attr[0].InformationalVersion))
+            Check(ver == attr[0].InformationalVersion,
+                  "the rendered version is the attribute build.ps1 injected", ver + " vs " + attr[0].InformationalVersion);
+        else
+            Check(ver == "0.0", "without the attribute the version falls back rather than throwing", ver);
+
         Console.WriteLine("\n[appid directory scan]");
         string appDir = Path.Combine(Path.GetTempPath(), "gp_selftest_appid_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         try
@@ -943,7 +960,7 @@ static class TestMain
                       "batch cancellation uses flag with partial-change suffix and stops subsequent items");
             }
         }
-        finally { Directory.Delete(dir, true); }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     // ---- synthetic PE builders ----

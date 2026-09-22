@@ -21,7 +21,6 @@ namespace Gp
 
         readonly TextBox idBox;
         Rectangle removeRect = Rectangle.Empty;
-        bool hoverRemove = false;
         bool updatingText = false;
         int detectionGeneration;
         readonly Button removeButton;
@@ -76,14 +75,22 @@ namespace Gp
                     has ? "AppID · entered manually" : "enter a valid Steam AppID");
             };
 
+            // A real Button, not a painted glyph: it keeps the remove action reachable by Tab and by
+            // screen readers. The row used to do BOTH - draw a "x" at this rectangle and place a Button
+            // on top of it - so the two glyphs landed a few pixels apart, and the parent's own
+            // hover/click handlers could never fire because the Button swallowed the mouse events.
             removeButton = new Button
             {
-                Text = "×", TabStop = true, FlatStyle = FlatStyle.Flat,
+                Text = "\u00D7", TabStop = true, FlatStyle = FlatStyle.Flat,
                 ForeColor = Ui.MutedC, BackColor = Ui.Surface,
                 AccessibleName = "Remove " + Path.GetFileName(ExePath),
                 AccessibleRole = AccessibleRole.PushButton
             };
             removeButton.FlatAppearance.BorderSize = 0;
+            removeButton.FlatAppearance.MouseOverBackColor = Ui.Surface2;
+            removeButton.FlatAppearance.MouseDownBackColor = Ui.Tint(Ui.Surface2, Ui.Accent, 0.18);
+            removeButton.MouseEnter += delegate { removeButton.ForeColor = Ui.Accent; };
+            removeButton.MouseLeave += delegate { removeButton.ForeColor = Ui.MutedC; };
             removeButton.Click += delegate { if (!Locked) { var h = Removed; if (h != null) h(this); } };
             Controls.Add(removeButton);
             Height = 64;
@@ -157,22 +164,6 @@ namespace Gp
             if (idBox != null) idBox.SetBounds(Width - Ui.S(32) - Ui.S(8) - Ui.S(106), (Height - Ui.S(30)) / 2, Ui.S(106), Ui.S(30));
         }
 
-        protected override void OnMouseLeave(EventArgs e) { hoverRemove = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            bool h = !Locked && removeRect.Contains(e.Location);
-            if (h != hoverRemove) { hoverRemove = h; Cursor = h ? Cursors.Hand : Cursors.Default; Invalidate(); }
-            base.OnMouseMove(e);
-        }
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
-            if (e.Button == MouseButtons.Left && !Locked && removeRect.Contains(e.Location))
-            {
-                var h = Removed; if (h != null) h(this);
-            }
-            base.OnMouseUp(e);
-        }
-
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -204,9 +195,7 @@ namespace Gp
             Ui.FillRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.Surface2);
             Ui.StrokeRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.BorderC, 1f);
 
-            // remove button
-            using (var b = new SolidBrush(hoverRemove && !Locked ? Ui.Accent : Ui.MutedC))
-                g.DrawString("\u00D7", Ui.F(11.5f, true), b, removeRect.X + 6, Height / 2 - 13);
+            // The remove glyph is not painted here - removeButton owns that rectangle (see the ctor).
 
             if (Locked)
                 using (var b = new SolidBrush(Color.FromArgb(140, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
@@ -224,8 +213,9 @@ namespace Gp
         readonly System.Windows.Forms.Timer timer;
         readonly Task writer;
         static readonly object fileLock = new object();
-        static string logDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
+        // Was a second, independent copy of the %APPDATA%\GoldbergPatcher literal. Now the same
+        // AppPaths.StateDir the rest of the app uses, so the three cannot drift apart.
+        static readonly string logDirectory = AppPaths.StateDir;
         int pendingCount, dropped;
         bool completed;
         string writeError;
@@ -238,19 +228,6 @@ namespace Gp
             timer = new System.Windows.Forms.Timer { Interval = 100 };
             timer.Tick += delegate { Drain(); };
             timer.Start();
-        }
-
-        public static IDisposable UseLogDirectory(string dir)
-        {
-            var prev = Interlocked.Exchange(ref logDirectory, dir);
-            return new LogDirScope(prev);
-        }
-
-        sealed class LogDirScope : IDisposable
-        {
-            readonly string restore;
-            public LogDirScope(string restoreTo) { restore = restoreTo; }
-            public void Dispose() { Interlocked.Exchange(ref logDirectory, restore); }
         }
 
         public void Append(string message, LogLevel level = LogLevel.Info)

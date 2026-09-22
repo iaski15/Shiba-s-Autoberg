@@ -24,10 +24,16 @@ namespace Gp
         /// <summary>Ignore the payload verification cache and hash every bundled file.</summary>
         public bool VerifyPayload;
 
+        /// <summary>Batch-mode overrides. Without these, --batch could only ever run one fixed
+        /// configuration while the GUI batch dialog exposed all five options.</summary>
+        public bool BatchOnlineFix;
+        public bool BatchNoUnpack;
+        public bool BatchSettings;
+
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\"\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -38,7 +44,9 @@ namespace Gp
                 var s = (a[i] ?? "").ToLowerInvariant();
                 if (s == "--exe" || s == "--appid" || s == "--batch")
                 {
-                    if (i + 1 >= a.Length || string.IsNullOrWhiteSpace(a[i + 1]) || a[i + 1].StartsWith("--"))
+                    // Any leading dash means a flag, not a value. The guard used to reject only "--", so a
+                    // mistyped "-appid" was silently accepted as the value of the previous flag.
+                    if (i + 1 >= a.Length || string.IsNullOrWhiteSpace(a[i + 1]) || a[i + 1].StartsWith("-"))
                         throw new ArgumentException("Missing value for " + s);
                     string value = a[++i];
                     if (s == "--exe") r.Exe = value;
@@ -51,10 +59,15 @@ namespace Gp
                 else if (s == "--auto") r.Auto = true;
                 else if (s == "--exit-when-done") r.ExitWhenDone = true;
                 else if (s == "--verify-payload") r.VerifyPayload = true;
+                else if (s == "--online-fix") r.BatchOnlineFix = true;
+                else if (s == "--no-unpack") r.BatchNoUnpack = true;
+                else if (s == "--settings") r.BatchSettings = true;
                 else throw new ArgumentException("Unknown argument: " + s);
             }
             if (r.Batch.Length > 0 && (r.Exe.Length > 0 || r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("--batch cannot be combined with single-game flags.");
+            if (r.Batch.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings))
+                throw new ArgumentException("--online-fix, --no-unpack and --settings require --batch.");
             if (r.Batch.Length == 0 && r.Exe.Length == 0 && (r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("Single-game flags require --exe.");
             if (r.Exe.Length > 0 && (!File.Exists(r.Exe) || !r.Exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
@@ -122,7 +135,13 @@ namespace Gp
             Ui.InitializeScale();
 
             // Any of the CLI modes may be run from a shell that gave this process no console.
-            if (args != null && args.Length > 0) AttachParentConsole();
+            if (args != null && args.Length > 0)
+            {
+                AttachParentConsole();
+                // The CLI output uses box-drawing characters and ticks; on a non-UTF-8 console code page
+                // they render as mojibake, which made the batch log look corrupted rather than misconfigured.
+                try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            }
 
             StartupArgs sa;
             try { sa = StartupArgs.Parse(args); }
@@ -206,9 +225,12 @@ namespace Gp
                 var errors = new List<string>();
                 if (Payload.LastErrors != null) errors.AddRange(Payload.LastErrors);
                 errors.AddRange(Tools.Missing());
+                // The parenthetical describes how the pass ran, which only means anything when nothing
+                // needed rewriting - "80 restored (cached)" said two contradictory things at once.
                 message = errors.Count > 0 ? "Payload initialization failed: " + string.Join("; ", errors)
                     : "Payload verified: " + Payload.Count + " bundled files, " + restored + " restored"
-                      + (Payload.LastPassHashed ? " (hashed)." : " (cached).");                return errors.Count == 0;
+                      + (restored > 0 ? "." : (Payload.LastPassHashed ? " (hashed)." : " (cached)."));
+                return errors.Count == 0;
             }
             catch (Exception ex) { message = "Payload initialization failed: " + ex.Message; return false; }
         }
@@ -252,7 +274,14 @@ namespace Gp
 
             Console.WriteLine("Goldberg Patcher --batch: " + items.Count + (items.Count == 1 ? " game" : " games")
                 + (invalid > 0 ? ", " + invalid + " invalid entr" + (invalid == 1 ? "y" : "ies") + " (counted as failures)" : ""));
-            var prefs = new BatchPrefs { UnpackDrm = true, Backup = true, WriteAppIdTxt = true, CreateSettings = false, OnlineFix = false };
+            var prefs = new BatchPrefs
+            {
+                UnpackDrm = !sa.BatchNoUnpack,
+                Backup = true,
+                WriteAppIdTxt = true,
+                CreateSettings = sa.BatchSettings,
+                OnlineFix = sa.BatchOnlineFix,
+            };
             var patcher = new BatchPatcher();
             patcher.LogLine += e => Console.WriteLine("  [" + e.Level.ToString().ToLowerInvariant() + "] " + e.Message);
 
@@ -402,7 +431,7 @@ namespace Gp
             using (var b = new SolidBrush(DotColor)) g.FillEllipse(b, 26, Height / 2 - 4, 8, 8);
             TextRenderer.DrawText(g, StatusText, Ui.F(8.25f, false), new Point(44, Height / 2 - 8), Ui.MutedC, TextFormatFlags.NoPadding);
             var sz = TextRenderer.MeasureText(RightText, Ui.F(7.75f, false), Size.Empty, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, RightText, Ui.F(7.75f, false), new Point(Width - sz.Width - 26, Height / 2 - 8), Ui.FromHex("#5A6373"), TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, RightText, Ui.F(7.75f, false), new Point(Width - sz.Width - 26, Height / 2 - 8), Ui.DisabledC, TextFormatFlags.NoPadding);
         }
     }
 
@@ -951,19 +980,13 @@ namespace Gp
                     // a stale copy in some deep subfolder must not beat it.
                     var dirs = new List<string> { dir };
                     foreach (var a in apis) dirs.Add(Path.GetDirectoryName(a));
-                    appIdBox.Text = runner_FillAppId(dirs);
+                    appIdBox.Text = PatchRunner.FindExistingAppId(dirs.ToArray());
                 }
             }
 
             // nothing local (cache / steam_appid.txt) found the id – try the Steam Store online
             if (appIdBox.Text.Trim().Length == 0 && tLookup.Checked) StartOnlineLookup(gen, dir);
             selectionResolved = true;
-        }
-
-        string runner_FillAppId(System.Collections.Generic.List<string> dirs)
-        {
-            var tmp = new PatchRunner();
-            return tmp.FindExistingAppId(dirs.ToArray());
         }
 
         // ---------------------------------------------------------- patching
@@ -997,7 +1020,6 @@ namespace Gp
                 Backup = tBackup.Checked,
                 WriteAppIdTxt = tAppid.Checked,
                 CreateSettings = tSettings.Checked,
-                GenerateInterfaces = true,
                 OnlineFix = ofix,
             };
             settings.LastAppId = id;
