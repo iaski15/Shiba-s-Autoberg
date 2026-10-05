@@ -52,12 +52,16 @@ The GUI executable is also headless-capable, which is how the live test drives i
 ```text
 Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
 Goldberg Patcher.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings]
+Goldberg Patcher.exe --check <game.exe> [--appid <id>] [--online-fix]
 Goldberg Patcher.exe --verify-payload
 ```
 
 - `--auto` is what actually starts a run; `--appid` on its own only pre-fills the box.
 - `--batch` is the only mode that ignores `settings.ini`, so it is the way to script a patch without the GUI's saved options interfering.
-- Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
+- `--check` verifies an already-patched install without changing anything: SteamStub removed, the Steamworks library the game actually loads is the emulator (or Valve's original for online-fix, inferred when every `steam_appid.txt` says 480 and no library is the emulator), architecture match, and the AppID. The same check runs automatically after every patch.
+- Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
+
+For development, `_selftest.exe --corpus <folder>` compares the built-in SteamStub unpacker against the Steamless CLI on every protected exe under a folder (it works on temp copies and never writes into the folder).
 
 ## Building from source
 
