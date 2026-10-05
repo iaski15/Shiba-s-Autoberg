@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using Gp;
-using SteamlessNative;
+using Shibaless;
 
 static class TestMain
 {
@@ -17,7 +17,112 @@ static class TestMain
         else { fail++; Console.WriteLine("  FAIL  " + name + (string.IsNullOrEmpty(detail) ? "" : "   -> " + detail)); }
     }
 
-    static int Main()
+    static int Main(string[] args)
+    {
+        if (args != null && args.Length == 2 && args[0] == "--corpus") return Corpus(args[1]);
+        return SelfTest();
+    }
+
+    /// <summary>Differential check of Shibaless, our in-process Steamless fork (third_party/shibaless), against the official
+    /// Steamless.CLI binary on real games: proves our patch to the fork changed nothing but where the output
+    /// goes. Every exe under the folder that carries a .bind section is COPIED to a temp folder first - the
+    /// CLI writes its output beside its input, and nothing may be written into a game install - then unpacked
+    /// both ways and compared byte for byte. Exit 0 = every comparable exe identical.</summary>
+    static int Corpus(string dir)
+    {
+        string root = AppDomain.CurrentDomain.BaseDirectory;
+        string cli = Path.Combine(root, @"tools\steamless\Steamless.CLI.exe");
+        if (!Directory.Exists(dir) || !File.Exists(cli)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>  (needs tools\\steamless\\ - the official binaries - beside it)"); return 2; }
+        string work = Path.Combine(Path.GetTempPath(), "gp_corpus_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(work);
+        int same = 0, differ = 0, nativeOnlyFail = 0, cliFail = 0, total = 0;
+        try
+        {
+            IEnumerable<string> files;
+            try { files = Directory.EnumerateFiles(dir, "*.exe", SearchOption.AllDirectories).ToList(); }
+            catch (Exception ex) { Console.WriteLine("cannot list " + dir + ": " + ex.Message); return 2; }
+            foreach (string exe in files)
+            {
+                if (ShibalessUnpacker.HasStubSection(exe) != true) continue;
+                total++;
+                string copy = Path.Combine(work, total + "_" + Path.GetFileName(exe));
+                File.Copy(exe, copy);
+                var native = ShibalessUnpacker.UnpackToMemory(copy);   // in-process fork
+                var psi = new System.Diagnostics.ProcessStartInfo(cli, "\"" + copy + "\"")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli) };
+                string cliOut;
+                using (var p = System.Diagnostics.Process.Start(psi)) { cliOut = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd(); p.WaitForExit(); }
+                string cliPath = copy + ".unpacked.exe";
+                byte[] cliBytes = File.Exists(cliPath) ? File.ReadAllBytes(cliPath) : null;
+                string variant = native.Unpacker != null ? native.Unpacker
+                    : (cliOut.Split('\n').Select(l => { int k = l.IndexOf("packed with ", StringComparison.OrdinalIgnoreCase); return k < 0 ? null : l.Substring(k + 12).Trim().TrimEnd('!'); })
+                        .FirstOrDefault(l => l != null) ?? "?") + " (via CLI)";
+                string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
+                if (cliBytes == null)
+                {
+                    cliFail++;
+                    Console.WriteLine("  CLI-FAIL  " + label + "  [" + variant + "]  native: " + (native.Success ? "ok" : native.Error));
+                }
+                else if (!native.Success)
+                {
+                    nativeOnlyFail++;
+                    Console.WriteLine("  NATIVE-FAIL " + label + "  [" + variant + "]  " + native.ErrorCode + ": " + native.Error);
+                }
+                else if (native.Output.SequenceEqual(cliBytes))
+                {
+                    same++;
+                    Console.WriteLine("  SAME      " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0") + " bytes");
+                }
+                else if (OnlyCertificatePointerDiffers(native.Output, cliBytes))
+                {
+                    // Deliberate: we move the certificate-table pointer along with the overlay when .bind is
+                    // dropped; upstream Steamless leaves it pointing at the old offset.
+                    same++;
+                    Console.WriteLine("  SAME*     " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0")
+                        + " bytes (*except the certificate pointer, which only we relocate)");
+                }
+                else
+                {
+                    differ++;
+                    int n = Math.Min(native.Output.Length, cliBytes.Length), at = 0;
+                    while (at < n && native.Output[at] == cliBytes[at]) at++;
+                    int diffs = 0; for (int i = 0; i < n; i++) if (native.Output[i] != cliBytes[i]) diffs++;
+                    Console.WriteLine("  DIFFER    " + label + "  [" + variant + "]  native " + native.Output.Length.ToString("N0")
+                        + " vs cli " + cliBytes.Length.ToString("N0") + " bytes; first diff at 0x" + at.ToString("X") + ", " + diffs.ToString("N0") + " differing bytes");
+                    // contiguous differing ranges, with both sides' bytes
+                    int shown = 0;
+                    for (int i = 0; i < n && shown < 6; i++)
+                    {
+                        if (native.Output[i] == cliBytes[i]) continue;
+                        int j = i; while (j < n && j - i < 32 && native.Output[j] != cliBytes[j]) j++;
+                        Console.WriteLine("            @0x" + i.ToString("X") + " len " + (j - i) + "  native " + BitConverter.ToString(native.Output, i, j - i)
+                            + "  cli " + BitConverter.ToString(cliBytes, i, j - i));
+                        shown++; i = j;
+                    }
+                }
+                try { File.Delete(copy); File.Delete(cliPath); } catch { }
+            }
+        }
+        finally { try { Directory.Delete(work, true); } catch { } }
+        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} in-process-only failures (CLI handled them), {4} the CLI could not unpack.",
+            total, same, differ, nativeOnlyFail, cliFail));
+        return differ == 0 ? 0 : 1;
+    }
+
+    static bool OnlyCertificatePointerDiffers(byte[] a, byte[] b)
+    {
+        if (a.Length != b.Length || a.Length < 0x40) return false;
+        int nt = BitConverter.ToInt32(a, 0x3C);
+        if (nt < 0 || nt + 26 > a.Length) return false;
+        int opt = nt + 24;
+        bool is64 = BitConverter.ToUInt16(a, opt) == 0x20B;
+        int certOffsetField = opt + (is64 ? 112 : 96) + 4 * 8;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i] != b[i] && (i < certOffsetField || i >= certOffsetField + 4)) return false;
+        return true;
+    }
+
+    static int SelfTest()
     {
         // The pipeline tests below run the real PatchRunner, which persists an undo journal. Redirect it
         // to a throwaway file for the whole run: otherwise the self-test clobbers a real pending undo and
@@ -37,7 +142,7 @@ static class TestMain
         Check(p86.Machine == 0x14c, "x86 dll machine=I386", "0x" + p86.Machine.ToString("X"));
         Check(p86.Arch == ExeArch.X86, "x86 dll arch resolved", p86.MachineText);
 
-        var cli = PeReader.Analyze(Path.Combine(root, @"steamless\Steamless.CLI.exe"));
+        var cli = PeReader.Analyze(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
         Check(cli.Managed, "Steamless CLI detected as .NET", cli.MachineText);
         var expectedAnyCpu = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
         Check(cli.Arch == ExeArch.X86 && !cli.AnyCpu, "Steamless CLI 32-bit execution flags", cli.MachineText);
@@ -47,7 +152,7 @@ static class TestMain
         Console.WriteLine("\n[import table]");
         // The import table decides which name the emulator must be installed under, so it has to be read
         // correctly from real binaries - not just synthetic fixtures.
-        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"steamless\Steamless.CLI.exe"));
+        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
         Check(cliImports.Any(n => string.Equals(n, "mscoree.dll", StringComparison.OrdinalIgnoreCase)),
               "managed exe reports its mscoree.dll import", string.Join(", ", cliImports.ToArray()));
 
@@ -63,7 +168,7 @@ static class TestMain
         var api86Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
         Check(api86Imports.Count > 0, "32-bit dll import table is parsed too", api86Imports.Count.ToString());
 
-        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"steamless\Steamless.CLI.exe")) == null,
+        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe")) == null,
               "an exe importing no Steamworks dll reports null rather than guessing", null);
         Check(PatchRunner.IsSteamApiName("steam_api.dll") && PatchRunner.IsSteamApiName("STEAM_API64.DLL")
               && !PatchRunner.IsSteamApiName("steam_api_extra.dll") && !PatchRunner.IsSteamApiName("mscoree.dll"),
@@ -78,7 +183,7 @@ static class TestMain
         }
         finally { try { File.Delete(junkPath); } catch { } }
 
-        Console.WriteLine("\n[native Steamless unpacker]");
+        Console.WriteLine("\n[Shibaless, in-process]");
         string nativeDir = Path.Combine(Path.GetTempPath(), "gp_selftest_native_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(nativeDir);
         try
@@ -87,39 +192,258 @@ static class TestMain
             {
                 string architecture = is64 ? "x64" : "x86";
                 string packed = Path.Combine(nativeDir, "stub31-" + architecture + ".exe");
-                string unpacked = Path.Combine(nativeDir, "unpacked-" + architecture + ".exe");
                 WriteSteamStub31(packed, is64);
-                VariantInfo detected = SteamlessUnpacker.Detect(packed);
-                Check(detected != null && detected.IsX64 == is64 && detected.HeaderSize == 0xF0,
-                      "synthetic Variant 3.1 " + architecture + " detection", detected == null ? "(null)" : detected.Name);
-                File.WriteAllBytes(unpacked, new byte[] { 1, 2, 3, 4 });
-                UnpackResult unpackedResult = SteamlessUnpacker.Unpack(packed, unpacked);
+                var lines = new List<string>();
+                UnpackResult unpackedResult = ShibalessUnpacker.UnpackToMemory(packed, lines.Add);
                 Check(unpackedResult.Success && unpackedResult.ErrorCode == UnpackErrorCode.None
-                      && unpackedResult.Payload != null && unpackedResult.SteamDrmp != null
-                      && File.Exists(unpackedResult.DestinationPath),
-                      "synthetic Variant 3.1 " + architecture + " unpack", unpackedResult.Error);
-                Check(PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
+                      && unpackedResult.Unpacker != null && unpackedResult.Unpacker.Contains("3.1") && unpackedResult.Unpacker.Contains(architecture),
+                      "synthetic Variant 3.1 " + architecture + " is claimed and unpacked by the 3.1 " + architecture + " unpacker",
+                      unpackedResult.Error + " / " + unpackedResult.Unpacker);
+                Check(lines.Any(l => l.Contains("Variant 3.1")) && !lines.Any(l => l.Contains("File Saved As")),
+                      "unpacker log reaches the caller, minus the never-written output path (" + architecture + ")", string.Join(" | ", lines.ToArray()));
+                string unpacked = Path.Combine(nativeDir, "unpacked-" + architecture + ".exe");
+                if (unpackedResult.Output != null) File.WriteAllBytes(unpacked, unpackedResult.Output);
+                Check(File.Exists(unpacked) && PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
                       "synthetic Variant 3.1 " + architecture + " output PE", null);
-                byte[] packedHash = File.ReadAllBytes(packed);
-                UnpackResult aliasResult = SteamlessUnpacker.Unpack(packed, packed);
-                Check(!aliasResult.Success && aliasResult.ErrorCode == UnpackErrorCode.InvalidDestination
-                      && File.ReadAllBytes(packed).SequenceEqual(packedHash),
-                      "native unpacker rejects source/output aliasing", aliasResult.Error);
-                string already = Path.Combine(nativeDir, "already-" + architecture + ".exe");
-                File.Copy(unpacked, already);
-                string rejected = Path.Combine(nativeDir, "rejected-" + architecture + ".exe");
-                UnpackResult negative = SteamlessUnpacker.Unpack(already, rejected);
-                Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && !File.Exists(rejected),
+                UnpackResult negative = ShibalessUnpacker.UnpackToMemory(unpacked);
+                Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && negative.Output == null,
                       "already-unpacked " + architecture + " negative control", negative.Error);
             }
-            string missing = Path.Combine(nativeDir, "missing.exe");
-            string missingOutput = Path.Combine(nativeDir, "missing-output.exe");
-            UnpackResult missingResult = SteamlessUnpacker.Unpack(missing, missingOutput);
-            Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput
-                  && missingResult.Payload.Length == 0 && missingResult.SteamDrmp.Length == 0 && !File.Exists(missingOutput),
-                  "missing native input returns a structured result", missingResult.Error);
+            // the 2.x unpackers need SharpDisasm; it must come from the exe's own resource, not a file on disk
+            System.Reflection.Assembly disasm = null;
+            try { disasm = System.Reflection.Assembly.Load(new System.Reflection.AssemblyName("SharpDisasm")); } catch { }
+            Check(disasm != null && disasm.Location == "" && disasm.GetType("SharpDisasm.Disassembler") != null,
+                  "SharpDisasm resolves from the embedded resource", disasm == null ? "(not found)" : disasm.Location);
+            UnpackResult missingResult = ShibalessUnpacker.UnpackToMemory(Path.Combine(nativeDir, "missing.exe"));
+            Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput && missingResult.Output == null,
+                  "missing input returns a structured result", missingResult.Error);
+
+            // header-only stub probe: decides whether anything is loaded or hashed at all
+            string probePacked = Path.Combine(nativeDir, "probe-packed.exe");
+            WriteSteamStub31(probePacked, true);
+            string probePlain = Path.Combine(nativeDir, "probe-plain.exe");
+            WriteNativeX64Pe(probePlain);
+            string probeJunk = Path.Combine(nativeDir, "probe-junk.exe");
+            File.WriteAllBytes(probeJunk, new byte[] { 0x4D, 0x5A, 0, 0 });
+            Check(ShibalessUnpacker.HasStubSection(probePacked) == true
+                  && ShibalessUnpacker.HasStubSection(probePlain) == false
+                  && ShibalessUnpacker.HasStubSection(probeJunk) == null
+                  && ShibalessUnpacker.HasStubSection(Path.Combine(nativeDir, "nope.exe")) == null,
+                  "header-only .bind probe: packed / plain / junk / missing", null);
+
+            // in-memory unpack hands back the image and a hash of exactly what it read - and writes nothing
+            int filesBefore = Directory.GetFiles(nativeDir).Length;
+            UnpackResult inMemory = ShibalessUnpacker.UnpackToMemory(probePacked);
+            Check(inMemory.Success && inMemory.Output != null && inMemory.SourceSha256 == SafePersistence.Hash(probePacked)
+                  && Directory.GetFiles(nativeDir).Length == filesBefore,
+                  "UnpackToMemory returns output and the source hash, writes nothing", inMemory.Error);
+            Check(ShibalessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
+                  && SafePersistence.Hash(inMemory.Output) != inMemory.SourceSha256,
+                  "in-memory output differs from the packed input", null);
+
+            // real code-section decryption, including the ECB-encrypted IV (the v0.5 bug)
+            foreach (bool is64 in new[] { true, false })
+            {
+                var plain = new byte[0x210];
+                new Random(is64 ? 64 : 32).NextBytes(plain);
+                string enc = Path.Combine(nativeDir, "encrypted-" + (is64 ? "x64" : "x86") + ".exe");
+                WriteSteamStub31(enc, is64, true, plain);
+                var dec = ShibalessUnpacker.UnpackToMemory(enc);
+                bool ok = dec.Success && dec.Output.Length >= 0x400 + 0x200;
+                int expected = is64 ? 0x210 : 0x200;   // x64 writes stolen+section, x86 truncates to the section
+                for (int i = 0; ok && i < expected; i++) ok = dec.Output[0x400 + i] == plain[i];
+                Check(ok, "encrypted code section decrypts exactly, first block included (" + (is64 ? "x64" : "x86") + ")", dec.Error);
+            }
+
+            // output guard: an entry point outside executable code is refused, not shipped
+            string noExec = Path.Combine(nativeDir, "noexec.exe");
+            WriteSteamStub31(noExec, true, false);
+            UnpackResult guarded = ShibalessUnpacker.UnpackToMemory(noExec);
+            Check(!guarded.Success && guarded.ErrorCode == UnpackErrorCode.OutputValidationFailed && guarded.Output == null,
+                  "entry point in a non-executable section fails output validation", guarded.Error);
+
+            // overlay + certificate table move together when .bind is dropped
+            foreach (bool is64 in new[] { true, false })
+            {
+                string withOverlay = Path.Combine(nativeDir, "overlay-" + (is64 ? "x64" : "x86") + ".exe");
+                WriteSteamStub31(withOverlay, is64);
+                byte[] packedBytes = File.ReadAllBytes(withOverlay);
+                byte[] overlay = Encoding.ASCII.GetBytes("CERTIFICATE-TABLE-AND-OVERLAY-DATA-0123456789");
+                int optOff = 0x80 + 24, certEntry = optOff + (is64 ? 112 : 96) + 4 * 8;
+                W32(packedBytes, certEntry, (uint)packedBytes.Length);
+                W32(packedBytes, certEntry + 4, (uint)overlay.Length);
+                File.WriteAllBytes(withOverlay, packedBytes.Concat(overlay).ToArray());
+                UnpackResult moved = ShibalessUnpacker.UnpackToMemory(withOverlay);
+                bool ok = moved.Success;
+                if (ok)
+                {
+                    byte[] o = moved.Output;
+                    int newCert = BitConverter.ToInt32(o, certEntry);
+                    ok = newCert + overlay.Length == o.Length && newCert < packedBytes.Length
+                         && o.Skip(newCert).Take(overlay.Length).SequenceEqual(overlay);
+                }
+                Check(ok, "overlay kept and certificate pointer follows it (" + (is64 ? "x64" : "x86") + ")", moved.Error);
+            }
         }
         finally { try { Directory.Delete(nativeDir, true); } catch { } }
+
+        Console.WriteLine("\n[integration: packed game]");
+        string packedWork = Path.Combine(Path.GetTempPath(), "gp_selftest_packed_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            string gameDir = Directory.CreateDirectory(Path.Combine(packedWork, "Packed")).FullName;
+            string exe = Path.Combine(gameDir, "Packed.exe");
+            WriteSteamStub31(exe, true);
+            string packedHash = SafePersistence.Hash(exe);
+            string expectedUnpacked = SafePersistence.Hash(ShibalessUnpacker.UnpackToMemory(exe).Output);
+            var prunner = new PatchRunner();
+            var plog = new List<string>();
+            prunner.LogLine += e => plog.Add(e.Message);
+            var pres = prunner.Run(new PatchOptions { GameExe = exe, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
+            Check(pres.Success && pres.Unpacked, "packed game is unpacked in-process", pres.Summary);
+            Check(SafePersistence.Hash(exe) == expectedUnpacked, "exe on disk is exactly the in-memory output", null);
+            Check(!Directory.GetFiles(gameDir, "*.unpacked.exe").Any(), "no temporary .unpacked.exe is left behind", null);
+            Check(plog.Any(l => l.Contains("SteamStub Variant 3.1")),
+                  "the Shibaless unpacker's own log lines reach the patch log", null);
+            var exeWrite = pres.Writes.FirstOrDefault(w => string.Equals(w.Destination, Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase));
+            Check(exeWrite != null && exeWrite.PreviousHash == packedHash && exeWrite.StagedHash == expectedUnpacked
+                  && exeWrite.ExternalRecovery && File.Exists(exeWrite.RecoveryPath) && SafePersistence.Hash(exeWrite.RecoveryPath) == packedHash,
+                  "journal records the packed original (via the verified backup) and the unpacked result", null);
+            var undo = Recovery.RollbackWrites(pres.Writes, (lvl, m) => { });
+            Check(undo.Failed == 0 && SafePersistence.Hash(exe) == packedHash, "undo restores the packed exe byte for byte", undo.Summary);
+        }
+        finally { try { Directory.Delete(packedWork, true); } catch { } }
+
+        Console.WriteLine("\n[install check]");
+        string icWork = Path.Combine(Path.GetTempPath(), "gp_selftest_check_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            string gse64 = Path.Combine(root, @"release\regular\x64\steam_api64.dll");
+            string gse86 = Path.Combine(root, @"release\regular\x86\steam_api.dll");
+            Check(InstallCheck.IsEmulatorDll(gse64) && InstallCheck.IsEmulatorDll(gse86),
+                  "bundled GSE dlls are recognised as the emulator", null);
+            Func<string, string, List<InstallCheckItem>> setup = (name, dll) =>
+            {
+                string d = Directory.CreateDirectory(Path.Combine(icWork, name)).FullName;
+                string e = Path.Combine(d, "Game.exe");
+                WritePeWithImport(e, "steam_api64.dll");
+                if (dll != null) File.Copy(dll, Path.Combine(d, "steam_api64.dll"));
+                File.WriteAllText(Path.Combine(d, "steam_appid.txt"), "1250\r\n");
+                return null;
+            };
+            Func<string, string, bool, List<InstallCheckItem>> run = (name, appId, onlineFix) =>
+                InstallCheck.Run(Path.Combine(icWork, name, "Game.exe"), appId, onlineFix);
+            Func<List<InstallCheckItem>, string> dump = l => string.Join(" | ", l.Select(i => i.ToString()).ToArray());
+
+            setup("good", gse64);
+            var good = run("good", "1250", false);
+            Check(good.All(i => i.Status == CheckStatus.Pass), "patched install passes every check", dump(good));
+
+            string valveLike = Path.Combine(icWork, "valve_like.dll");
+            WriteNativeX64Pe(valveLike);
+            Check(!InstallCheck.IsEmulatorDll(valveLike), "a non-emulator dll is not mistaken for GSE", null);
+            setup("shadowed", valveLike);
+            var shadowed = run("shadowed", "1250", false);
+            Check(shadowed.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("loads the emulator")),
+                  "Valve's dll beside the exe fails the check", dump(shadowed));
+            var onlineFixOk = run("shadowed", null, true);
+            Check(!onlineFixOk.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("loads")),
+                  "online-fix expects Valve's dll, not the emulator", dump(onlineFixOk));
+
+            setup("wrongarch", gse86);
+            var wrongArch = run("wrongarch", "1250", false);
+            Check(wrongArch.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("architecture")),
+                  "a 32-bit emulator under a 64-bit exe fails the architecture check", dump(wrongArch));
+
+            setup("missing", null);
+            var missingDll = run("missing", "1250", false);
+            Check(missingDll.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("beside the exe")),
+                  "a statically imported dll that is absent fails", dump(missingDll));
+
+            var wrongId = run("good", "730", false);
+            Check(wrongId.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("730")),
+                  "an AppID other than the expected one fails", dump(wrongId));
+
+            // Unreal layout: <root>\Launcher.exe, <root>\Proj\Binaries\Win64\Proj-Win64-Shipping.exe,
+            // <root>\Engine\Binaries\ThirdParty\Steamworks\SteamvX\Win64\steam_api64.dll
+            string ue = Directory.CreateDirectory(Path.Combine(icWork, "ue")).FullName;
+            string launcher = Path.Combine(ue, "Proj.exe");
+            WriteNativeX64Pe(launcher);
+            string ship = Path.Combine(Directory.CreateDirectory(Path.Combine(ue, @"Proj\Binaries\Win64")).FullName, "Proj-Win64-Shipping.exe");
+            WriteSteamStub31(ship, true);
+            string sdkDir = Directory.CreateDirectory(Path.Combine(ue, @"Engine\Binaries\ThirdParty\Steamworks\Steamv157\Win64")).FullName;
+            File.Copy(valveLike, Path.Combine(sdkDir, "steam_api64.dll"));
+            Check(string.Equals(PatchRunner.SearchRoot(ship), ue, StringComparison.OrdinalIgnoreCase)
+                  && string.Equals(PatchRunner.SearchRoot(launcher), ue, StringComparison.OrdinalIgnoreCase),
+                  "Unreal: the Steamworks search starts at the game root from either exe", PatchRunner.SearchRoot(ship));
+            Check(string.Equals(PatchRunner.UnrealCompanion(launcher), ship, StringComparison.OrdinalIgnoreCase)
+                  && PatchRunner.UnrealCompanion(ship) == null,
+                  "Unreal: the launcher's -Shipping exe is found, and the Shipping exe has no companion", null);
+
+            var uer = new PatchRunner();
+            var ueRes = uer.Run(new PatchOptions { GameExe = launcher, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
+            Check(ueRes.Success && ShibalessUnpacker.HasStubSection(ship) == false,
+                  "Unreal: patching the launcher also unpacks the -Shipping exe", ueRes.Summary);
+            Check(InstallCheck.IsEmulatorDll(Path.Combine(sdkDir, "steam_api64.dll")) && !File.Exists(Path.Combine(ue, "steam_api64.dll"))
+                  && ueRes.FirstFailedCheck == null,
+                  "Unreal: the emulator goes into Engine\\...\\Steamworks, not beside the launcher, and the check passes",
+                  string.Join(" | ", ueRes.Checks.Select(i => i.ToString()).ToArray()));
+            Recovery.RollbackWrites(ueRes.Writes, (l, m) => { });
+
+            // pre-flight protection scan from section names only
+            string vmp = Path.Combine(icWork, "vmp.exe");
+            WriteSteamStub31(vmp, true);
+            byte[] vmpBytes = File.ReadAllBytes(vmp);
+            int bindAt = Encoding.ASCII.GetString(vmpBytes).IndexOf(".bind", StringComparison.Ordinal);
+            Encoding.ASCII.GetBytes(".vmp1").CopyTo(vmpBytes, bindAt);
+            File.WriteAllBytes(vmp, vmpBytes);
+            var vmpFound = ProtectionScan.Detect(vmp);
+            Check(vmpFound.Count == 1 && vmpFound[0] == "VMProtect" && ProtectionScan.Detect(gse64).Count == 0
+                  && ProtectionScan.Detect(Path.Combine(icWork, "nope.exe")).Count == 0,
+                  "protection pre-flight: VMProtect section found, clean dll and missing file report nothing", string.Join(",", vmpFound.ToArray()));
+
+            string stubDir = Directory.CreateDirectory(Path.Combine(icWork, "stub")).FullName;
+            WriteSteamStub31(Path.Combine(stubDir, "Game.exe"), true);
+            var stubbed = run("stub", null, false);
+            Check(stubbed.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("SteamStub")),
+                  "an exe that still carries SteamStub fails", dump(stubbed));
+        }
+        finally { try { Directory.Delete(icWork, true); } catch { } }
+
+        Console.WriteLine("\n[hash-on-write]");
+        string howDir = Path.Combine(Path.GetTempPath(), "gp_selftest_how_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(howDir);
+        try
+        {
+            string src = Path.Combine(howDir, "src.bin");
+            var data = new byte[3 * 1024 * 1024 + 17];
+            new Random(7).NextBytes(data);
+            File.WriteAllBytes(src, data);
+            string dst = Path.Combine(howDir, "dst.bin");
+            var rec = SafePersistence.Copy(src, dst);
+            Check(rec.StagedHash == SafePersistence.Hash(dst) && rec.StagedHash == SafePersistence.Hash(data),
+                  "hash taken while writing equals a full re-read", null);
+            File.WriteAllText(dst, "keep me");
+            bool rejected = false;
+            try { SafePersistence.Copy(src, dst, null, null, null, new string('0', 64)); }
+            catch (IOException ex) { rejected = ex.InnerException is InvalidDataException; }
+            Check(rejected && File.ReadAllText(dst) == "keep me", "a wrong known source hash is caught before anything is replaced", null);
+
+            // a backup taken by v0.5 (full 64-digit key folder) must still be found and restored
+            string legacyRoot = Path.Combine(howDir, "goldberg_backup");
+            string live = Path.Combine(howDir, "Game.exe");
+            File.WriteAllText(live, "patched content");
+            string legacyBackup = Path.Combine(legacyRoot, "sources", SafePersistence.PathKey(live), "Game.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(legacyBackup));
+            File.WriteAllText(legacyBackup, "original content");
+            File.WriteAllText(legacyBackup + ".source.txt", Path.GetFullPath(live) + "\r\n" + SafePersistence.Hash(legacyBackup) + "\r\n");
+            Check(OriginalBackups.Find(legacyRoot, live) == legacyBackup && OriginalBackups.Location(legacyRoot, live) != legacyBackup
+                  && OriginalBackups.Location(legacyRoot, live).Length < legacyBackup.Length - 40,
+                  "new backup folders are 48 characters shorter, and legacy ones are still found", null);
+            OriginalBackups.Restore(legacyRoot, live);
+            Check(File.ReadAllText(live) == "original content", "restore works from a legacy-layout backup", null);
+        }
+        finally { try { Directory.Delete(howDir, true); } catch { } }
 
         // ---- synthetic PEs: regression tests for the PeReader offset bugs (bug 1) ----
         Console.WriteLine("\n[PE analysis: synthetic]");
@@ -252,7 +576,7 @@ static class TestMain
             var gameDir = Path.Combine(work, "MyGame");
             Directory.CreateDirectory(gameDir);
             var dummyExe = Path.Combine(gameDir, "MyGame.exe");
-            File.Copy(Path.Combine(root, @"steamless\Steamless.CLI.exe"), dummyExe);
+            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), dummyExe);
             var exeHash = SafePersistence.Hash(dummyExe);
             var stalePaths = new[] { dummyExe + ".unpacked.exe", Path.Combine(gameDir, "MyGame.unpacked.exe"), Path.Combine(gameDir, "unrelated.unpacked.exe") };
             foreach (var stale in stalePaths)
@@ -261,8 +585,12 @@ static class TestMain
                 File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(1));
             }
 
-            byte[] origDllBytes = File.ReadAllBytes(Path.Combine(root, @"release\regular\x64\steam_api64.dll"));
-            origDllBytes[origDllBytes.Length - 1] ^= 1;
+            // A Valve-like original: a valid x64 PE carrying interface version strings and no GSE marker.
+            string valveTmp = Path.Combine(work, "valve_original.tmp");
+            WriteNativeX64Pe(valveTmp);
+            byte[] origDllBytes = File.ReadAllBytes(valveTmp)
+                .Concat(Encoding.ASCII.GetBytes("\0SteamUser021\0SteamFriends017\0SteamClient017\0STEAMAPPS_INTERFACE_VERSION008\0")).ToArray();
+            File.Delete(valveTmp);
             File.WriteAllBytes(Path.Combine(gameDir, "steam_api.dll"), origDllBytes);
 
             // nested copy deep in the tree SHOULD be picked up by the full-folder scan
@@ -329,8 +657,8 @@ static class TestMain
             var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.ini");
             Check(File.Exists(settingsIni), "steam_settings copied & '.EXAMPLE' stripped", settingsIni);
             var iface = Path.Combine(gameDir, "steam_settings", "steam_interfaces.txt");
-            Check(File.Exists(iface) && File.ReadAllLines(iface).Any(l => l.Trim().Length > 0),
-                  "steam_interfaces.txt generated into steam_settings");
+            Check(File.Exists(iface) && File.ReadAllLines(iface).SequenceEqual(new[] { "STEAMAPPS_INTERFACE_VERSION008", "SteamClient017", "SteamFriends017", "SteamUser021" }),
+                  "steam_interfaces.txt generated in-process, in upstream pattern order", File.Exists(iface) ? File.ReadAllText(iface).Replace("\r\n", ",") : "(missing)");
 
             // ---- appid prefill helper ----
             Console.WriteLine("\n[helpers]");
@@ -378,7 +706,7 @@ static class TestMain
         {
             var gameDir2 = Directory.CreateDirectory(Path.Combine(work2, "OFGame")).FullName;
             var exe2 = Path.Combine(gameDir2, "OFGame.exe");
-            File.Copy(Path.Combine(root, @"steamless\Steamless.CLI.exe"), exe2);
+            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), exe2);
 
             var opts2 = new PatchOptions
             {
@@ -950,36 +1278,7 @@ static class TestMain
 
             string input = Path.Combine(dir, "input.exe");
             WriteAnyCpuDotNetPe(input);
-            string output = input + ".unpacked.exe";
-            WriteNativeX64Pe(output);
-            var invocation = new InvocationOutputs(input);
-            File.SetLastWriteTimeUtc(output, DateTime.UtcNow.AddDays(1));
-            Check(!invocation.IsCurrent(output), "timestamp-only stale output rejected");
-            var changed = File.ReadAllBytes(output);
-            changed[changed.Length - 1] ^= 1;
-            File.WriteAllBytes(output, changed);
-            Check(invocation.IsCurrent(output), "rewritten output fingerprint accepted");
-            string oldInputHash = SafePersistence.Hash(input);
-            File.WriteAllText(input, "concurrent update");
-            bool updateRejected = false;
-            try { invocation.CopyAndDelete(output, null, oldInputHash); }
-            catch (IOException) { updateRejected = true; }
-            Check(updateRejected && File.ReadAllText(input) == "concurrent update" && File.Exists(output),
-                  "concurrent executable update preserved and output retained");
-            WriteAnyCpuDotNetPe(input);
-            var copied = new List<FileWriteRecord>();
-            invocation.CopyAndDelete(output, copied, SafePersistence.Hash(input));
-            Check(copied.Count == 1 && copied[0].Completed && !File.Exists(output) && File.ReadAllBytes(input).SequenceEqual(changed),
-                  "confirmed output copy deletes produced output");
-            var next = new InvocationOutputs(input);
-            Check(!next.IsCurrent(output), "next invocation cannot reuse consumed output");
-            File.WriteAllText(output, "not a PE");
             string intactHash = SafePersistence.Hash(input);
-            bool invalidRejected = false;
-            try { next.CopyAndDelete(output, null, intactHash); }
-            catch (IOException) { invalidRejected = true; }
-            Check(invalidRejected && SafePersistence.Hash(input) == intactHash && File.Exists(output),
-                  "output validator failure retains original and failed output");
 
             var denied = new UnauthorizedAccessException("injected access denial");
             bool deniedPreserved = false;
@@ -1014,7 +1313,10 @@ static class TestMain
     static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
     static void W64(byte[] b, int off, ulong v) { W32(b, off, (uint)v); W32(b, off + 4, (uint)(v >> 32)); }
 
-    static void WriteSteamStub31(string path, bool is64)
+    /// <param name="plainCode">When set (0x210 bytes), the code section is genuinely AES-encrypted the way
+    /// SteamStub 3.1 does it: CBC over stolen-block + section, with the header holding the IV ECB-encrypted
+    /// under the same key. Unpacking must give these bytes back exactly.</param>
+    static void WriteSteamStub31(string path, bool is64, bool executableText = true, byte[] plainCode = null)
     {
         var b = new byte[0x1600];
         W16(b, 0x00, 0x5A4D);
@@ -1041,6 +1343,8 @@ static class TestMain
         W32(b, sec + 12, 0x1000);
         W32(b, sec + 16, 0x200);
         W32(b, sec + 20, 0x400);
+        if (executableText) W32(b, sec + 36, 0x60000020);   // CODE | EXECUTE | READ, as every real .text has
+        else W32(b, sec + 36, 0x40000040);                  // initialised data, read-only
         sec += 40;
         Array.Copy(Encoding.ASCII.GetBytes(".bind"), 0, b, sec, 5);
         W32(b, sec + 8, 0x1000);
@@ -1095,6 +1399,21 @@ static class TestMain
             W32(header, 76, 0);
             W32(header, 80, 0x200);
             W32(header, 84, 0);
+        }
+        if (plainCode != null)
+        {
+            var aesKey = new byte[32]; for (int i = 0; i < 32; i++) aesKey[i] = (byte)(i * 7 + 3);
+            var ivReal = new byte[16]; for (int i = 0; i < 16; i++) ivReal[i] = (byte)(0xA0 + i);
+            byte[] cipher, ivStored;
+            using (var aes = new System.Security.Cryptography.AesManaged { Key = aesKey, IV = ivReal, Mode = System.Security.Cryptography.CipherMode.CBC, Padding = System.Security.Cryptography.PaddingMode.None })
+            using (var enc = aes.CreateEncryptor()) cipher = enc.TransformFinalBlock(plainCode, 0, plainCode.Length);
+            using (var ecb = new System.Security.Cryptography.AesManaged { Key = aesKey, Mode = System.Security.Cryptography.CipherMode.ECB, Padding = System.Security.Cryptography.PaddingMode.None })
+            using (var enc = ecb.CreateEncryptor()) ivStored = enc.TransformFinalBlock(ivReal, 0, 16);
+            W32(header, 60, 0);                                  // flags: code section IS encrypted
+            Array.Copy(aesKey, 0, header, 88, 32);
+            Array.Copy(ivStored, 0, header, 120, 16);
+            Array.Copy(cipher, 0, header, 136, 16);              // the "stolen" first block
+            Array.Copy(cipher, 16, b, 0x400, cipher.Length - 16); // the rest lives in .text
         }
         uint key = 0x12345678;
         for (int i = 4; i < header.Length; i += 4)

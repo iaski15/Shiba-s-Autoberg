@@ -32,8 +32,11 @@ namespace Gp
 
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
+
+        /// <summary>--check: verify an already-patched install and exit, changing nothing.</summary>
+        public string Check = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Goldberg Patcher.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -42,7 +45,7 @@ namespace Gp
             for (int i = 0; i < a.Length; i++)
             {
                 var s = (a[i] ?? "").ToLowerInvariant();
-                if (s == "--exe" || s == "--appid" || s == "--batch")
+                if (s == "--exe" || s == "--appid" || s == "--batch" || s == "--check")
                 {
                     // Any leading dash means a flag, not a value. The guard used to reject only "--", so a
                     // mistyped "-appid" was silently accepted as the value of the previous flag.
@@ -50,6 +53,7 @@ namespace Gp
                         throw new ArgumentException("Missing value for " + s);
                     string value = a[++i];
                     if (s == "--exe") r.Exe = value;
+                    else if (s == "--check") r.Check = value;
                     else if (s == "--appid")
                     {
                         if (!AppIdDetector.TryNormalize(value, out r.AppId)) throw new ArgumentException("Invalid --appid value.");
@@ -64,9 +68,17 @@ namespace Gp
                 else if (s == "--settings") r.BatchSettings = true;
                 else throw new ArgumentException("Unknown argument: " + s);
             }
+            if (r.Check.Length > 0)
+            {
+                if (r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchNoUnpack || r.BatchSettings)
+                    throw new ArgumentException("--check only combines with --appid and --online-fix.");
+                if (!File.Exists(r.Check) || !r.Check.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("--check must name an existing .exe file.");
+                return r;
+            }
             if (r.Batch.Length > 0 && (r.Exe.Length > 0 || r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("--batch cannot be combined with single-game flags.");
-            if (r.Batch.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings))
+            if (r.Batch.Length == 0 && r.Check.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings))
                 throw new ArgumentException("--online-fix, --no-unpack and --settings require --batch.");
             if (r.Batch.Length == 0 && r.Exe.Length == 0 && (r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("Single-game flags require --exe.");
@@ -169,6 +181,12 @@ namespace Gp
                 return;
             }
 
+            if (sa.Check.Length > 0)
+            {
+                Environment.ExitCode = RunCheckCli(sa);
+                return;
+            }
+
             SweepStaleRecovery();
             if (sa.Batch.Length > 0)
             {
@@ -233,6 +251,22 @@ namespace Gp
                 return errors.Count == 0;
             }
             catch (Exception ex) { message = "Payload initialization failed: " + ex.Message; return false; }
+        }
+
+        static int RunCheckCli(StartupArgs sa)
+        {
+            bool onlineFix = sa.BatchOnlineFix;
+            Console.WriteLine("Install check: " + Path.GetFullPath(sa.Check));
+            if (!onlineFix && sa.AppId.Length == 0 && InstallCheck.LooksLikeOnlineFix(sa.Check))
+            {
+                onlineFix = true;
+                Console.WriteLine("  (every steam_appid.txt says 480 – checking as an online-fix install; pass --appid to override)");
+            }
+            var items = InstallCheck.Run(sa.Check, sa.AppId.Length > 0 ? sa.AppId : null, onlineFix);
+            foreach (var item in items) Console.WriteLine("  " + item);
+            int failed = items.Count(i => i.Status == CheckStatus.Fail);
+            Console.WriteLine(failed == 0 ? "All checks passed." : failed + " check(s) failed.");
+            return failed == 0 ? 0 : 1;
         }
 
         static int RunBatchCli(StartupArgs sa)
@@ -607,7 +641,7 @@ namespace Gp
                 Ui.SectionLabel(g, "OPTIONS", new Point(Ui.S(22), Ui.S(14)));
             };
 
-            tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
+            tUnpack = new Toggle("Auto-unpack Steam DRM (Shibaless)", settings.UnpackDrm);
             tBackup = new Toggle("Back up replaced files", settings.Backup);
             tAppid = new Toggle("Write steam_appid.txt", settings.WriteAppIdTxt);
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
@@ -860,7 +894,14 @@ namespace Gp
                 archChip = "INVALID EXE"; sizeChip = "";
             }
 
-            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0);
+            var protections = ProtectionScan.Detect(path);
+            string companion = PatchRunner.UnrealCompanion(path);
+            if (companion != null) protections.AddRange(ProtectionScan.Detect(companion).Where(x => !protections.Contains(x)));
+            string warnChip = protections.Count > 0 ? string.Join(" + ", protections.ToArray()).ToUpperInvariant() : "";
+            if (protections.Count > 0)
+                Log(LogLevel.Warn, string.Join(" and ", protections.ToArray()) + " detected – the emulator cannot remove "
+                    + (protections.Count == 1 ? "this protection" : "these protections") + "; the game may refuse to start offline.");
+            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0, warnChip);
 
             // deep scan can take a moment on big installs – run it off the UI thread
             int gen = ++selectGeneration;
@@ -873,7 +914,8 @@ namespace Gp
         async Task ScanSelectionAsync(int gen, string dir, string archChip, string sizeChip, CancellationTokenSource source)
         {
             var apis = new List<string>();
-            try { apis = await Task.Run(() => PatchRunner.FindSteamApiFiles(dir, source.Token), source.Token); }
+            string searchRoot = PatchRunner.SearchRoot(zone.GamePath);
+            try { apis = await Task.Run(() => PatchRunner.FindSteamApiFiles(searchRoot, source.Token), source.Token); }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { if (!closing && gen == selectGeneration) Log(LogLevel.Warn, ex.Message); }
             finally
@@ -1125,9 +1167,19 @@ namespace Gp
                 if (!string.IsNullOrEmpty(res.FinalExe) && File.Exists(res.FinalExe)) actions.Add("Play game");
                 if (Recovery.HasLastPatch()) actions.Add("Undo patch");
                 lastActions = actions.ToArray();
-                banner.Show(Banner.BannerKind.Success, res.Summary, lastActions);
+                var failed = res.FirstFailedCheck;
+                if (failed == null)
+                {
+                    banner.Show(Banner.BannerKind.Success, res.Summary, lastActions);
+                    statusBar.Set("Done – game patched and verified", Ui.OkC);
+                }
+                else
+                {
+                    banner.Show(Banner.BannerKind.Warn, "Patched, but the install check failed: " + failed.Title
+                        + (failed.Detail.Length > 0 ? "\n" + failed.Detail : ""), lastActions);
+                    statusBar.Set("Patched – install check failed (see the log)", Ui.WarnC);
+                }
                 ShowBannerLayout(true);
-                statusBar.Set("Done – game patched successfully", Ui.OkC);
             }
             else if (res.Cancelled)
             {

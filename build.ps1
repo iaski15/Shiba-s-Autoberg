@@ -113,7 +113,7 @@ if (-not $refDir) {
         Write-Warning "4.8 targeting pack unavailable; using installed Framework assemblies. Pin -ReferencePath for reproducible references."
     }
 }
-$refs = @('mscorlib.dll','System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll') |
+$refs = @('mscorlib.dll','System.dll','System.Core.dll','Microsoft.CSharp.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Runtime.Serialization.dll','System.Xml.dll','System.Xml.Linq.dll') |
     ForEach-Object {
         if (-not (Test-Path -LiteralPath (Join-Path $refDir $_))) { throw "Required reference missing: $refDir\$_" }
         "/r:`"$refDir\$_`""
@@ -140,24 +140,28 @@ function Compile($sources, $out, $extra) {
     Write-Host "built: $out"
 }
 
+# ---- Shibaless: our fork of Steamless (third_party\shibaless, see VENDORED.md) ----
+# Compiled straight into both exes; the unpackers run in-process (src\Unpacker\ShibalessUnpacker.cs).
+# Left out: AssemblyInfo (it would clash with ours) and the two WPF-only view-model files no unpacker uses.
+$shibalessDir = Join-Path $root 'third_party\shibaless'
+$shibalessSrc = @(Get-ChildItem -LiteralPath $shibalessDir -Recurse -File |
+    Where-Object { $_.Extension -eq '.cs' -and $_.Directory.Name -ne 'Properties' -and $_.Name -ne 'ViewModelBase.cs' -and $_.Name -ne 'NavigatedEventArgs.cs' } |
+    Sort-Object FullName | ForEach-Object { "`"$($_.FullName)`"" })
+# SharpDisasm (used by the 2.x unpackers) is a prebuilt upstream binary: referenced, and embedded so the
+# exe stays self-contained (deflated, 220 KB -> 71 KB) - ShibalessUnpacker resolves it from the resource.
+$sharpDisasm = Join-Path $shibalessDir 'Shibaless.Unpacker.Variant21.x86\SharpDisasm.dll'
+$sharpDisasmDeflated = Join-Path $env:TEMP ('gp_sharpdisasm_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.bin')
+Compress-File $sharpDisasm $sharpDisasmDeflated
+$shibalessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDisasm.dll.deflate")
+
 # ---- self test host (console) ----
-Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") (Join-Path $root '_selftest.exe') $null
+Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
-$pay = @(
-    'steamless\Steamless.CLI.exe',
-    'steamless\Steamless.CLI.exe.config'
-)
-$pluginsDir = Join-Path $root 'steamless\Plugins'
-if (Test-Path $pluginsDir) {
-    # ExamplePlugin is Steamless's sample/template plugin - it implements the API and does nothing.
-    # Shipping it only means the CLI loads a no-op plugin on every run. The file stays in the vendored
-    # tree (the fork is meant to be rebasable); it just is not part of the payload.
-    Get-ChildItem $pluginsDir -Filter '*.dll' | Where-Object { $_.Name -ne 'ExamplePlugin.dll' } |
-        ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
-}
-$pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
-$pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'release\tools\generate_interfaces\generate_interfaces_x64.exe')
+# Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (third_party\shibaless).
+# tools\steamless\ holds the official binaries only for the self-test's --corpus comparison.
+$pay = @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
+# generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
 Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
 $payRes = @()
@@ -203,12 +207,13 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $verFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sharpDisasmDeflated -Force -ErrorAction SilentlyContinue
 }
 
 if ($Verify) {

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -11,8 +10,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Web.Script.Serialization;
-using SteamlessNative;
+using System.Runtime.Serialization.Json;
+using System.Xml;
+using System.Xml.Linq;
+using Shibaless;
 
 namespace Gp
 {
@@ -324,13 +325,70 @@ namespace Gp
         }
     }
 
+    /// <summary>Write-through stream that hashes every byte on its way to the inner stream, so the hash of
+    /// staged content falls out of the copy itself instead of costing a second full read of the file.</summary>
+    internal sealed class HashingStream : Stream
+    {
+        readonly Stream inner;
+        readonly SHA256 sha = SHA256.Create();
+        string hex;
+
+        internal HashingStream(Stream inner) { this.inner = inner; }
+
+        /// <summary>Hex SHA-256 of everything written so far. Finalises the hash: write nothing after reading it.</summary>
+        internal string Hex
+        {
+            get
+            {
+                if (hex == null) { sha.TransformFinalBlock(new byte[0], 0, 0); hex = SafePersistence.ToHex(sha.Hash); }
+                return hex;
+            }
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (hex != null) throw new InvalidOperationException("Hash already finalised.");
+            sha.TransformBlock(buffer, offset, count, null, 0);
+            inner.Write(buffer, offset, count);
+        }
+        public override void WriteByte(byte value) { Write(new[] { value }, 0, 1); }
+        public override void Flush() { inner.Flush(); }
+        public override bool CanRead { get { return false; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return true; } }
+        public override long Length { get { return inner.Length; } }
+        public override long Position { get { return inner.Position; } set { throw new NotSupportedException(); } }
+        public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        protected override void Dispose(bool disposing) { if (disposing) sha.Dispose(); base.Dispose(disposing); }
+    }
+
     public static class SafePersistence
     {
+        const int IoBuffer = 1 << 20;
+
         public static string Hash(string path)
         {
-            using (var input = File.OpenRead(path))
+            // A large sequential buffer: the default 4 KB FileStream buffer turns a multi-hundred-MB exe
+            // into tens of thousands of tiny reads.
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, IoBuffer, FileOptions.SequentialScan))
             using (var sha = SHA256.Create())
-                return BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
+                return ToHex(sha.ComputeHash(input));
+        }
+
+        public static string Hash(byte[] data)
+        {
+            using (var sha = SHA256.Create()) return ToHex(sha.ComputeHash(data));
+        }
+
+        static readonly char[] HexDigits = "0123456789abcdef".ToCharArray();
+
+        internal static string ToHex(byte[] bytes)
+        {
+            var c = new char[bytes.Length * 2];
+            for (int i = 0; i < bytes.Length; i++) { c[2 * i] = HexDigits[bytes[i] >> 4]; c[2 * i + 1] = HexDigits[bytes[i] & 15]; }
+            return new string(c);
         }
 
         internal static string PathKey(string path)
@@ -380,14 +438,24 @@ namespace Gp
         /// <param name="externalRecovery">Path to an already-verified copy of the current destination
         /// content (the goldberg_backup original). When supplied, no second copy is taken inside the
         /// staging area – the caller has already paid for one – and rollback restores from there.</param>
+        /// <param name="expectedStagedHash">When set, the bytes written must hash to exactly this, or the write
+        /// is abandoned before anything is replaced. Checked against the hash taken while writing, so it costs
+        /// no extra read.</param>
+        /// <param name="knownPreviousHash">Hash of what rollback will restore - the external recovery file, or
+        /// the destination's current content - when the caller has already established it. Saves a full read
+        /// of a file that can be hundreds of megabytes.</param>
         public static FileWriteRecord Write(string path, Action<Stream> write, Action<string> validate = null,
-            List<FileWriteRecord> journal = null, Action<string> checkpoint = null, string externalRecovery = null)
+            List<FileWriteRecord> journal = null, Action<string> checkpoint = null, string externalRecovery = null,
+            string expectedStagedHash = null, string knownPreviousHash = null)
         {
             path = Path.GetFullPath(path);
             return Locked(path, () =>
             {
                 string parent = Path.GetDirectoryName(path);
-                string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N"));
+                // 12 hex digits, not 32: these areas nest inside goldberg_backup under Unreal's already deep
+                // Engine\Binaries\ThirdParty\Steamworks\...\Win64 folders, and the full GUID pushed staging
+                // paths past the 260-character MAX_PATH limit.
+                string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N").Substring(0, 12));
                 Directory.CreateDirectory(area);
                 string name = Path.GetFileName(path);
                 bool external = !string.IsNullOrEmpty(externalRecovery);
@@ -404,21 +472,24 @@ namespace Gp
                 if (journal != null) journal.Add(record);
                 try
                 {
-                    using (var stream = new FileStream(record.StagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    using (var stream = new FileStream(record.StagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, IoBuffer))
+                    using (var hashing = new HashingStream(stream))
                     {
-                        write(stream);
+                        write(hashing);
+                        hashing.Flush();
                         stream.Flush(true);
+                        record.StagedHash = hashing.Hex;
                     }
+                    if (expectedStagedHash != null && record.StagedHash != expectedStagedHash)
+                        throw new InvalidDataException("Staged copy hash mismatch: " + path);
                     if (validate != null) validate(record.StagedPath);
                     if (checkpoint != null) checkpoint("staged");
                     // For a local recovery copy, File.Replace will move the destination's current
                     // content there, so the destination is what we must hash. For an external recovery
                     // the copy already exists and is what rollback will restore from.
-                    string oldHash = external
-                        ? Hash(record.RecoveryPath)
-                        : (record.RecoveryPath.Length == 0 ? "absent" : Hash(path));
+                    string oldHash = record.RecoveryPath.Length == 0 && !external ? "absent"
+                        : knownPreviousHash ?? (external ? Hash(record.RecoveryPath) : Hash(path));
                     record.PreviousHash = oldHash;
-                    record.StagedHash = Hash(record.StagedPath);
                     var j = new StringBuilder();
                     j.AppendLine("destination=" + path);
                     j.AppendLine("staged=" + record.StagedPath);
@@ -455,19 +526,20 @@ namespace Gp
             });
         }
 
+        /// <param name="knownSourceHash">The source's hash when the caller already holds it. The copy is
+        /// still checked against it byte for byte (hash-on-write), so a source that changed in between is
+        /// caught exactly as before - only the separate up-front read is skipped.</param>
         public static FileWriteRecord Copy(string source, string destination, List<FileWriteRecord> journal = null,
-            Action<string> validate = null, string externalRecovery = null)
+            Action<string> validate = null, string externalRecovery = null, string knownSourceHash = null,
+            string knownPreviousHash = null)
         {
             if (!File.Exists(source)) throw new FileNotFoundException("Source file for staged copy not found: " + source, source);
-            string expected = Hash(source);
+            string expected = knownSourceHash ?? Hash(source);
             return Write(destination, output =>
             {
-                using (var input = File.OpenRead(source)) input.CopyTo(output);
-            }, staged =>
-            {
-                if (Hash(staged) != expected) throw new InvalidDataException("Staged copy hash mismatch: " + source);
-                if (validate != null) validate(staged);
-            }, journal, null, externalRecovery);
+                using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, IoBuffer, FileOptions.SequentialScan))
+                    input.CopyTo(output, IoBuffer);
+            }, validate, journal, null, externalRecovery, expected, knownPreviousHash);
         }
 
         public static FileWriteRecord WriteText(string path, string text, List<FileWriteRecord> journal = null,
@@ -478,57 +550,31 @@ namespace Gp
         }
     }
 
-    internal sealed class InvocationOutputs
-    {
-        readonly string directory;
-        readonly string input;
-        readonly Dictionary<string, string> before = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        internal InvocationOutputs(string inputPath)
-        {
-            input = Path.GetFullPath(inputPath);
-            directory = Path.GetDirectoryName(input);
-            foreach (string path in Directory.GetFiles(directory))
-                if (IsCandidate(path)) before.Add(Path.GetFullPath(path), SafePersistence.Hash(path));
-        }
-
-        bool IsCandidate(string path)
-        {
-            return !string.Equals(path, input, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(Path.GetDirectoryName(path), directory, StringComparison.OrdinalIgnoreCase)
-                && path.EndsWith(".unpacked.exe", StringComparison.OrdinalIgnoreCase);
-        }
-
-        internal bool IsCurrent(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            path = Path.GetFullPath(path);
-            if (!IsCandidate(path) || !File.Exists(path)) return false;
-            string hash;
-            return !before.TryGetValue(path, out hash) || hash != SafePersistence.Hash(path);
-        }
-
-        internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash,
-            string externalRecovery = null)
-        {
-            if (!IsCurrent(path)) throw new IOException("No current invocation output: " + path);
-            string expected = SafePersistence.Hash(path);
-            SafePersistence.Copy(path, input, journal, staged =>
-            {
-                if (SafePersistence.Hash(staged) != expected || SafePersistence.Hash(input) != expectedInputHash)
-                    throw new IOException("Executable or output changed during processing: " + input);
-                if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
-                    throw new InvalidDataException("Unsupported unpacked executable architecture.");
-            }, externalRecovery);
-            if (SafePersistence.Hash(path) == expected) File.Delete(path);
-        }
-    }
-
     public static class OriginalBackups
     {
+        /// <summary>Where the backup of <paramref name="source"/> is kept. The folder is the first 16 hex digits
+        /// of the path hash - ample to keep the handful of files in one backup root apart, and 48 characters
+        /// shorter than the full hash, which put staging paths under Unreal games past MAX_PATH.</summary>
         public static string Location(string root, string source)
         {
+            return Path.Combine(root, "sources", SafePersistence.PathKey(source).Substring(0, 16), Path.GetFileName(source));
+        }
+
+        /// <summary>The full-hash location used by releases up to 0.5. Still read, so a backup taken by an
+        /// older version is found instead of a fresh "original" being taken from the already patched file.</summary>
+        static string LegacyLocation(string root, string source)
+        {
             return Path.Combine(root, "sources", SafePersistence.PathKey(source), Path.GetFileName(source));
+        }
+
+        /// <summary>The backup of <paramref name="source"/> as it exists on disk - current or legacy layout -
+        /// or the current location when neither exists.</summary>
+        public static string Find(string root, string source)
+        {
+            string current = Location(root, source);
+            if (File.Exists(current)) return current;
+            string legacy = LegacyLocation(root, source);
+            return File.Exists(legacy) ? legacy : current;
         }
 
         static string VerifiedHash(string backup, string source)
@@ -568,7 +614,7 @@ namespace Gp
 
         static string Existing(string root, string source, out string hash, Action<LogLevel, string> log)
         {
-            string destination = Location(root, source);
+            string destination = Find(root, source);
             IOException failure = null;
             hash = null;
             if (File.Exists(destination))
@@ -603,27 +649,50 @@ namespace Gp
 
         public static string Preserve(string root, string source, Action<LogLevel, string> log = null)
         {
+            string ignored;
+            return Preserve(root, source, log, null, out ignored);
+        }
+
+        /// <param name="knownSourceHash">Hash of <paramref name="source"/> when the caller already has it.</param>
+        /// <param name="backupHash">Hash of the backup that is returned, so callers can hand it on instead
+        /// of reading the backup again.</param>
+        public static string Preserve(string root, string source, Action<LogLevel, string> log, string knownSourceHash, out string backupHash)
+        {
             string destination = Location(root, source);
-            return SafePersistence.Locked(destination, () =>
+            string result = null, resultHash = null;
+            SafePersistence.Locked(destination, () =>
             {
                 string hash;
                 string existing = Existing(root, source, out hash, log);
-                if (existing != null && File.Exists(destination)) return existing;
+                if (existing != null && File.Exists(destination)) { result = existing; resultHash = hash; return true; }
                 string content = existing ?? source;
-                if (!Eligible(content)) return null;
-                hash = hash ?? SafePersistence.Hash(content);
+                if (!Eligible(content)) return true;
+                if (hash == null && existing == null) hash = knownSourceHash;
                 // These two writes are the backup itself, so they need no undo record of their own –
                 // and they are not part of any run's journal, so nothing else would ever collect their
                 // staging areas. Drop them here or goldberg_backup accumulates .gp-recovery litter.
-                var backupWrite = SafePersistence.Copy(content, destination, null, staged =>
+                // Copy verifies the bytes it wrote against 'hash' (or hashes the source first when no hash
+                // is known); either way a source that changes mid-copy is rejected.
+                FileWriteRecord backupWrite;
+                try
                 {
-                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
-                        throw new IOException("Original changed while preserving: " + content);
-                });
+                    backupWrite = SafePersistence.Copy(content, destination, null, staged =>
+                    {
+                        if (!Eligible(staged)) throw new IOException("Original changed while preserving: " + content);
+                    }, null, hash);
+                }
+                catch (IOException ex) when (ex.InnerException is InvalidDataException)
+                {
+                    throw new IOException("Original changed while preserving: " + content, ex);
+                }
+                hash = backupWrite.StagedHash;
                 var manifestWrite = SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + hash + "\r\n");
                 Recovery.Discard(new[] { backupWrite, manifestWrite });
-                return destination;
+                result = destination; resultHash = hash;
+                return true;
             });
+            backupHash = resultHash;
+            return result;
         }
 
         public static void Restore(string root, string source, List<FileWriteRecord> journal = null, Action<LogLevel, string> log = null)
@@ -633,11 +702,18 @@ namespace Gp
                 string hash;
                 string backup = Existing(root, source, out hash, log);
                 if (backup == null) throw new IOException("No verified or eligible legacy original backup exists for " + source);
-                var write = SafePersistence.Copy(backup, source, journal, staged =>
+                FileWriteRecord write;
+                try
                 {
-                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
-                        throw new IOException("Original backup changed while restoring: " + backup);
-                });
+                    write = SafePersistence.Copy(backup, source, journal, staged =>
+                    {
+                        if (!Eligible(staged)) throw new IOException("Original backup changed while restoring: " + backup);
+                    }, null, hash);
+                }
+                catch (IOException ex) when (ex.InnerException is InvalidDataException)
+                {
+                    throw new IOException("Original backup changed while restoring: " + backup, ex);
+                }
                 // When no run journal was supplied nothing will collect this staging area.
                 if (journal == null) Recovery.Discard(new[] { write });
                 return true;
@@ -1113,6 +1189,14 @@ namespace Gp
 
         public List<FileWriteRecord> Writes = new List<FileWriteRecord>();
         public SettingsOutcome Settings = new SettingsOutcome();
+
+        /// <summary>Post-patch install checks (see <see cref="InstallCheck"/>); empty when the run failed.</summary>
+        public List<InstallCheckItem> Checks = new List<InstallCheckItem>();
+
+        public InstallCheckItem FirstFailedCheck
+        {
+            get { return Checks.FirstOrDefault(c => c.Status == CheckStatus.Fail); }
+        }
     }
 
     public enum SettingsStatus { NotRequested, Copied, AlreadyPresent, Missing, Failed }
@@ -1200,18 +1284,13 @@ namespace Gp
         /// <summary>Root of the extracted payload. Everything below hangs off this, so pointing it at
         /// %LOCALAPPDATA% is what lets the app run from a read-only application directory.</summary>
         public static string BaseDir { get { return Payload.Root; } }
-        public static string SteamlessCli { get { return Path.Combine(BaseDir, @"steamless\Steamless.CLI.exe"); } }
-        public static string SteamlessDir { get { return Path.Combine(BaseDir, "steamless"); } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
         public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api64.dll"); } }
-        public static string GenInterfaces86 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x86.exe"); } }
-        public static string GenInterfaces64 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x64.exe"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"release\steam_settings.EXAMPLE"); } }
 
         public static List<string> Missing()
         {
             var missing = new List<string>();
-            if (!File.Exists(SteamlessCli)) missing.Add("steamless\\Steamless.CLI.exe");
             if (!File.Exists(ApiDll86)) missing.Add("release\\regular\\x86\\steam_api.dll");
             if (!File.Exists(ApiDll64)) missing.Add("release\\regular\\x64\\steam_api64.dll");
             return missing;
@@ -1533,6 +1612,11 @@ namespace Gp
     }
 
     /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
+    /// <summary>Preserves <paramref name="source"/> in goldberg_backup. <paramref name="knownSourceHash"/>
+    /// spares a re-read when the caller already hashed the source; <paramref name="backupHash"/> returns the
+    /// backup's hash for the same reason. Returns null when backups are off or the file is not eligible.</summary>
+    public delegate string BackupTaker(string source, string knownSourceHash, out string backupHash);
+
     public class PatchRunner
     {
         public event Action<PatchLogEntry> LogLine;
@@ -1581,10 +1665,17 @@ namespace Gp
                     Path.GetFileName(exePath), pe.MachineText, Math.Max(pe.SizeBytes / 1048576.0, 0.01)));
                 if (pe.Arch == ExeArch.Unknown)
                     throw new Exception("Unknown CPU architecture – cannot pick a matching steam_api dll.");
+                foreach (var target in new[] { exePath, UnrealCompanion(exePath) }.Where(t => t != null))
+                    foreach (var protection in ProtectionScan.Detect(target))
+                        Log(LogLevel.Warn, protection + " detected on " + Path.GetFileName(target)
+                            + " – the emulator replaces Steam's API but cannot remove this protection; the game may refuse to start offline.");
 
                 // ---- locate steam api install dir ------------------------------
                 Pct(8);
-                var foundApi = FindSteamApiFiles(gameDir, ct);
+                string searchRoot = SearchRoot(exePath);
+                if (!string.Equals(searchRoot, gameDir, StringComparison.OrdinalIgnoreCase))
+                    Log(LogLevel.Dim, "Unreal project layout – searching for Steamworks from the game root: " + searchRoot);
+                var foundApi = FindSteamApiFiles(searchRoot, ct);
                 string installDir = gameDir;
                 // Prefer the name the loader will actually ask for; the architecture only breaks ties and
                 // covers executables that load the library dynamically.
@@ -1595,7 +1686,7 @@ namespace Gp
 
                 if (foundApi.Count > 0)
                 {
-                    var best = PickApiTarget(foundApi, gameDir, preferredName);
+                    var best = PickApiTarget(foundApi, searchRoot, preferredName);
                     installDir = Path.GetDirectoryName(best);
                     Log(LogLevel.Ok, "Found Steamworks dll(s): " +
                         string.Join(", ", foundApi.Select(f => ShortRel(gameDir, f))));
@@ -1615,29 +1706,37 @@ namespace Gp
                 // ---- backup dir ----------------------------------------------
                 string backupDir = Path.Combine(installDir, "goldberg_backup");
                 bool anyBackup = false;
-                Func<string, string> backup = (src) =>
+                BackupTaker backup = (string src, string known, out string backupHash) =>
                 {
+                    backupHash = null;
                     if (!o.Backup) return null;
-                    var dst = OriginalBackups.Preserve(backupDir, src, Log);
+                    var dst = OriginalBackups.Preserve(backupDir, src, Log, known, out backupHash);
                     if (dst != null) anyBackup = true;
                     return dst;
                 };
                 res.BackupDir = o.Backup ? backupDir : "";
 
-                // ---- unpack DRM (Steamless) ------------------------------------
+                // ---- unpack DRM (Shibaless) ------------------------------------
                 string finalExe = exePath;
                 if (o.UnpackDrm)
                 {
                     Pct(12);
                     finalExe = TryUnpack(exePath, backup, res, ct);
+                    string companion = UnrealCompanion(exePath);
+                    if (companion != null)
+                    {
+                        Pct(30);
+                        Log(LogLevel.Info, "Unreal launcher – also checking the game exe it starts: " + ShortRel(gameDir, companion));
+                        TryUnpack(companion, backup, res, ct);
+                    }
                     Pct(48);
                 }
-                else Log(LogLevel.Dim, "Steamless auto-unpack disabled – skipping.");
+                else Log(LogLevel.Dim, "Shibaless auto-unpack disabled – skipping.");
                 res.FinalExe = finalExe;
                 ct.ThrowIfCancellationRequested();
 
                 // ---- re-analyze after unpack ------------------------------------
-                // Steamless rewrote the exe in place. The packed file's machine type was used above to pick the
+                // Shibaless rewrote the exe in place. The packed file's machine type was used above to pick the
                 // install target, but the dll that actually gets loaded must match what will run. Unpackers preserve
                 // architecture in practice; if the new file disagrees we trust it and warn.
                 if (res.Unpacked)
@@ -1651,7 +1750,7 @@ namespace Gp
                         if (pe2.Arch != ExeArch.Unknown)
                         {
                             pe = pe2;
-                            // The import table does not change when Steamless rewrites the exe, so the
+                            // The import table does not change when Shibaless rewrites the exe, so the
                             // imported name stands. Only the architecture-derived fallback is recomputed.
                             if (importedApi == null)
                                 preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
@@ -1665,7 +1764,7 @@ namespace Gp
                 if (o.GenerateInterfaces && !o.OnlineFix)
                 {
                     Pct(52);
-                    interfacesTxt = TryGenerateInterfaces(foundApi, gameDir, preferredName, ct);
+                    interfacesTxt = TryGenerateInterfaces(foundApi, searchRoot, preferredName, ct);
                 }
 
                 // ---- dlls --------------------------------------------------------
@@ -1720,6 +1819,14 @@ namespace Gp
                     Log(LogLevel.Ok, "steam_interfaces.txt written (move into steam_settings later if you create one).");
                 }
 
+                // ---- verify the install as a whole ---------------------------------
+                Pct(96);
+                Log(LogLevel.Dim, "Checking the finished install…");
+                res.Checks = InstallCheck.Run(finalExe, o.EffectiveAppId, o.OnlineFix, ct);
+                foreach (var c in res.Checks)
+                    Log(c.Status == CheckStatus.Pass ? LogLevel.Ok : c.Status == CheckStatus.Warn ? LogLevel.Warn : LogLevel.Error,
+                        (c.Status == CheckStatus.Pass ? "✔ " : c.Status == CheckStatus.Warn ? "! " : "✖ ") + c.Title + (c.Detail.Length > 0 ? " – " + c.Detail : ""));
+
                 // ---- done ---------------------------------------------------------
                 Pct(100);
                 res.Success = true;
@@ -1727,11 +1834,16 @@ namespace Gp
                     ? string.Format("Online-fix ready (Spacewar · 480). Start Steam, then launch {0} – it will show up as playing Spacewar.", Path.GetFileName(finalExe))
                     : string.Format("Patched with AppID {0}. Goldberg dll installed to: {1}",
                         o.EffectiveAppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
-                Log(LogLevel.Ok, res.Summary);
+                var failedCheck = res.FirstFailedCheck;
+                if (failedCheck != null)
+                    res.Summary += " – but the install check failed: " + failedCheck.Title + (failedCheck.Detail.Length > 0 ? " (" + failedCheck.Detail + ")" : "") + ".";
+                Log(failedCheck == null ? LogLevel.Ok : LogLevel.Warn, res.Summary);
                 if (o.OnlineFix)
                     Log(LogLevel.Dim, "Multiplayer traffic is routed through Steam's own servers under Spacewar's AppID.");
                 if (anyBackup && res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
-                Log(LogLevel.Ok, "✔ Done! Launch the game to test.");
+                Log(failedCheck == null ? LogLevel.Ok : LogLevel.Warn, failedCheck == null
+                    ? "✔ Done! Launch the game to test."
+                    : "Done, with a failed check – fix the item above or the game may not start offline.");
             }
             catch (OperationCanceledException)
             {
@@ -1803,197 +1915,62 @@ namespace Gp
 
         // ------------------------------------------------------------------ steps
 
-        private string TryUnpack(string exePath, Func<string, string> backup, PatchResult res, CancellationToken ct)
+        private string TryUnpack(string exePath, BackupTaker backup, PatchResult res, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            VariantInfo nativeVariant = SteamlessUnpacker.Detect(exePath);
-            if (nativeVariant != null)
+
+            // Every SteamStub variant lives in a .bind section. Reading just the headers settles the common
+            // DRM-free case without loading the whole exe or hashing it.
+            bool? hasStub = ShibalessUnpacker.HasStubSection(exePath);
+            if (hasStub == false)
             {
-                Log(LogLevel.Info, "Detected " + nativeVariant.Name + " – using the built-in unpacker.");
-                var nativeOutputs = new InvocationOutputs(exePath);
-                string nativeInputHash = SafePersistence.Hash(exePath);
-                string nativeOutputPath = exePath + ".unpacked.exe";
-                UnpackResult nativeResult;
-                try { nativeResult = SteamlessUnpacker.Unpack(exePath, nativeOutputPath); }
-                catch (Exception ex) { nativeResult = null; Log(LogLevel.Warn, "Built-in Steamless unpack crashed: " + ex.Message); }
-
-                string nativeProblem = null;
-                if (nativeResult == null) nativeProblem = "the built-in unpacker crashed";
-                else if (!nativeResult.Success) nativeProblem = "built-in unpack failed: " + nativeResult.Error;
-                else if (!nativeOutputs.IsCurrent(nativeOutputPath)) nativeProblem = "built-in output could not be verified";
-                else
-                {
-                    try { PeReader.Analyze(nativeOutputPath); }
-                    catch (Exception ex) { nativeProblem = "built-in output is not a valid PE (" + ex.Message + ")"; }
-                }
-
-                if (nativeProblem == null)
-                {
-                    string nativeBackup = backup(exePath);
-                    try
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        nativeOutputs.CopyAndDelete(nativeOutputPath, res.Writes, nativeInputHash, nativeBackup);
-                    }
-                    catch (IOException ex)
-                    {
-                        throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
-                    }
-                    res.Unpacked = true;
-                    Log(LogLevel.Ok, "DRM removed with the built-in unpacker!");
-                    if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
-                    return exePath;
-                }
-
-                // A failed in-process attempt used to end the unpack step outright, leaving the DRM in place
-                // even though the bundled Steamless CLI handles the same variant. Remove what this attempt
-                // wrote (only if it is ours - a pre-existing file is left alone) and let the CLI try.
-                Log(LogLevel.Warn, "Steamless: " + nativeProblem + " – falling back to the Steamless CLI.");
-                try { if (nativeOutputs.IsCurrent(nativeOutputPath)) File.Delete(nativeOutputPath); } catch { }
-                ct.ThrowIfCancellationRequested();
-            }
-
-            if (!File.Exists(Tools.SteamlessCli))
-            {
-                Log(LogLevel.Warn, "Steamless CLI not found – skipping DRM unpack. (" + Tools.SteamlessCli + ")");
+                Log(LogLevel.Info, "No SteamStub section (.bind) – no Steam DRM to remove.");
                 return exePath;
             }
 
-            Log(LogLevel.Info, "Running Steamless to check/remove SteamStub DRM…");
-            var outputs = new InvocationOutputs(exePath);
-            string inputHash = SafePersistence.Hash(exePath);
-            var outputLines = new List<string>();
-            bool timedOut = false;
+            var before = new FileInfo(exePath);
+            long stampLength = before.Length; DateTime stampTime = before.LastWriteTimeUtc;
+            UnpackResult native;
+            Log(LogLevel.Info, "SteamStub section found – unpacking with Shibaless…");
+            try { native = ShibalessUnpacker.UnpackToMemory(exePath, line => Log(LogLevel.Dim, "   " + line)); }
+            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Shibaless unpack crashed: " + ex.Message); }
 
-            var psi = new ProcessStartInfo
+            if (native != null && native.Success)
             {
-                FileName = Tools.SteamlessCli,
-                Arguments = "\"" + exePath + "\"",
-                WorkingDirectory = Tools.SteamlessDir,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-
-            try
-            {
-                using (var p = Process.Start(psi))
-                {
-                    p.OutputDataReceived += (s, e) => { if (e.Data != null) lock (outputLines) outputLines.Add(e.Data); };
-                    p.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (outputLines) outputLines.Add(e.Data); };
-                    p.BeginOutputReadLine();
-                    p.BeginErrorReadLine();
-
-                    // wait with cancellation support (max 10 minutes)
-                    var sw = Stopwatch.StartNew();
-                    while (!p.HasExited)
-                    {
-                        if (ct.IsCancellationRequested) { try { p.Kill(); } catch { } throw new OperationCanceledException(ct); }
-                        if (sw.Elapsed.TotalMinutes > 10) { timedOut = true; Log(LogLevel.Warn, "Steamless took over 10 minutes – killing it."); try { p.Kill(); } catch { } break; }
-                        Thread.Sleep(120);
-                    }
-                    p.WaitForExit(2000);
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                Log(LogLevel.Warn, "Steamless could not run: " + ex.Message);
-                return exePath;
-            }
-
-            // find the produced file
-            string outPath = null;
-            // Discover the output from the filesystem rather than by scraping Steamless' stdout. The regex
-            // this used to depend on required an absolute, backslash-separated path - forward slashes,
-            // quoted paths and \\?\ prefixes all failed to match - and it silently changed behaviour between
-            // Steamless versions. InvocationOutputs already fingerprints the directory before and after the
-            // run, so filesystem truth was always available and is now the only mechanism.
-            {
-                var cand1 = exePath + ".unpacked.exe";
-                var nameOnly = Path.GetFileNameWithoutExtension(exePath);
-                var cand2 = Path.Combine(Path.GetDirectoryName(exePath), nameOnly + ".unpacked.exe");
-                var cands = new[] { cand1, cand2 }
-                    .Concat(SafeFiles(Path.GetDirectoryName(exePath)))
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(outputs.IsCurrent)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).ToList();
-                outPath = cands.FirstOrDefault();
-            }
-
-            bool successMsg = false;
-            lock (outputLines)
-            {
-                successMsg = outputLines.Any(l => l.IndexOf("Successfully unpacked", StringComparison.OrdinalIgnoreCase) >= 0);
-                foreach (var l in outputLines.TakeLastVisible(50)) // echo only the tail – Steamless can be verbose
-                {
-                    var t = l.TrimEnd();
-                    if (t.Length == 0) continue;
-                    if (t.StartsWith("[Steamless]", StringComparison.OrdinalIgnoreCase)) t = t.Substring(11).Trim();
-                    Log(LogLevel.Dim, "   " + t);
-                }
-            }
-
-            if (outPath != null && File.Exists(outPath))
-            {
-                // Never replace the original with a file we can't verify as a real PE. On timeout in
-                // particular, Steamless was killed mid-write and the .unpacked.exe may be half-written.
-                bool validPe;
-                try { PeReader.Analyze(outPath); validPe = true; }
-                catch { validPe = false; }
-                if (!validPe)
-                {
-                    Log(LogLevel.Error, "Steamless output \"" + Path.GetFileName(outPath) + "\" is not a valid PE"
-                        + (timedOut ? " – the unpack was killed after 10 minutes and the file may be incomplete." : ".")
-                        + "\nKeeping the original exe untouched; delete the .unpacked.exe manually if you're sure it's junk.");
-                    return exePath;
-                }
-
-                var origBackup = backup(exePath);
+                string backupHash;
+                string nativeBackup = backup(exePath, native.SourceSha256, out backupHash);
+                byte[] output = native.Output;
                 try
                 {
                     ct.ThrowIfCancellationRequested();
-                    // origBackup already holds a hash-verified copy of the packed exe, so the write
-                    // reuses it as the recovery source instead of storing a second copy of a file
-                    // that can be hundreds of megabytes.
-                    outputs.CopyAndDelete(outPath, res.Writes, inputHash, origBackup);
+                    SafePersistence.Write(exePath, stream => stream.Write(output, 0, output.Length), staged =>
+                    {
+                        // Prove the exe on disk is still the one that was unpacked. Size and timestamp settle
+                        // it for free; only if either moved is the file hashed.
+                        var now = new FileInfo(exePath);
+                        if ((now.Length != stampLength || now.LastWriteTimeUtc != stampTime)
+                            && SafePersistence.Hash(exePath) != native.SourceSha256)
+                            throw new IOException("Executable changed during processing: " + exePath);
+                        if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
+                            throw new InvalidDataException("Unsupported unpacked executable architecture.");
+                    }, res.Writes, null, nativeBackup, null, nativeBackup != null ? backupHash : native.SourceSha256);
                 }
                 catch (IOException ex)
                 {
                     throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
                 }
                 res.Unpacked = true;
-                Log(LogLevel.Ok, "DRM removed! Unpacked exe is now: " + Path.GetFileName(exePath));
-                if (origBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
+                Log(LogLevel.Ok, "DRM removed! (" + native.Unpacker + ")");
+                if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
                 return exePath;
             }
 
-            if (successMsg)
-                Log(LogLevel.Warn, "Steamless reported success but no output file was found – continuing with original exe.");
-            else
-                Log(LogLevel.Info, "No Steam DRM detected on this exe – continuing as-is.");
+            // Nothing replaced the exe; the post-patch check reports the .bind that is still there.
+            if (native != null && native.ErrorCode == UnpackErrorCode.UnsupportedVariant)
+                Log(LogLevel.Warn, "The exe has a .bind section, but no Shibaless unpacker recognised the SteamStub variant – continuing with the original exe.");
+            else if (native != null)
+                Log(LogLevel.Warn, "Shibaless could not unpack the exe (" + native.Error + ") – keeping the original exe untouched.");
             return exePath;
-        }
-
-        /// <summary>Condenses a child process's stdout/stderr into one short line for the log: the last few
-        /// non-empty lines, joined, capped so it cannot flood the log view. Slicing the raw string at a
-        /// character offset instead starts mid-line and drags embedded newlines into what is meant to be a
-        /// single log entry.</summary>
-        static string Tail(string stdOut, string stdErr, int lineCount, int maxChars)
-        {
-            var all = new List<string>();
-            foreach (var chunk in new[] { stdErr, stdOut })
-            {
-                if (string.IsNullOrEmpty(chunk)) continue;
-                foreach (var raw in chunk.Split('\n'))
-                {
-                    string t = raw.Trim();
-                    if (t.Length > 0) all.Add(t);
-                }
-            }
-            if (all.Count == 0) return "";
-            string joined = string.Join(" | ", all.Skip(Math.Max(0, all.Count - lineCount)).ToArray());
-            return joined.Length > maxChars ? "…" + joined.Substring(joined.Length - maxChars) : joined;
         }
 
         private string TryGenerateInterfaces(List<string> foundApi, string gameDir, string preferredName, CancellationToken ct)
@@ -2004,14 +1981,14 @@ namespace Gp
             // On a re-patch the live dll is the emulator installed last time. Dumping that would replace a
             // correct steam_interfaces.txt with every interface the emulator knows about, so read the
             // preserved original instead - or skip, leaving any earlier dump in place.
-            if (LooksLikeBundledGoldberg(target))
+            if (InstallCheck.IsEmulatorDll(target))
             {
                 string original = null;
                 try
                 {
-                    string candidate = OriginalBackups.Location(
+                    string candidate = OriginalBackups.Find(
                         Path.Combine(Path.GetDirectoryName(target), "goldberg_backup"), target);
-                    if (File.Exists(candidate) && !LooksLikeBundledGoldberg(candidate)) original = candidate;
+                    if (File.Exists(candidate) && !InstallCheck.IsEmulatorDll(candidate)) original = candidate;
                 }
                 catch { }
                 if (original == null)
@@ -2023,79 +2000,21 @@ namespace Gp
                 target = original;
             }
 
-            // Architecture from the PE header, never from the file name. A 64-bit library can legitimately be
-            // named steam_api.dll, and running the 32-bit tool against it silently produces nothing.
-            ExeArch arch = ExeArch.Unknown;
-            try { arch = PeReader.Analyze(target).Arch; }
-            catch { }
-            if (arch == ExeArch.Unknown)
-            {
-                Log(LogLevel.Warn, "Could not determine the architecture of " + Path.GetFileName(target)
-                    + " – skipping the interface dump rather than guessing at the tool.");
-                return null;
-            }
-            string tool = arch == ExeArch.X64 ? Tools.GenInterfaces64 : Tools.GenInterfaces86;
-            if (!File.Exists(tool))
-            {
-                Log(LogLevel.Dim, "generate_interfaces tool not found – skipping interface dump.");
-                return null;
-            }
-            string tmp = Path.Combine(Path.GetTempPath(), "gp_iface_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            try
-            {
-                Directory.CreateDirectory(tmp);
-                string dllCopy = Path.Combine(tmp, Path.GetFileName(target));
-                File.Copy(target, dllCopy, true);
-                var psi = new ProcessStartInfo
-                {
-                    FileName = tool,
-                    Arguments = "\"" + dllCopy + "\"",
-                    WorkingDirectory = tmp,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                string stdOut = "", stdErr = "";
-                int exit = -1;
-                using (var p = Process.Start(psi))
-                {
-                    // Drain both pipes while waiting, or a chatty tool fills its buffer and deadlocks.
-                    var outTask = p.StandardOutput.ReadToEndAsync();
-                    var errTask = p.StandardError.ReadToEndAsync();
-                    var sw = Stopwatch.StartNew();
-                    while (!p.HasExited)
-                    {
-                        if (ct.IsCancellationRequested) { try { p.Kill(); } catch { } throw new OperationCanceledException(); }
-                        if (sw.Elapsed.TotalSeconds > 60) { try { p.Kill(); } catch { } break; }
-                        Thread.Sleep(80);
-                    }
-                    try { stdOut = outTask.Result; } catch { }
-                    try { stdErr = errTask.Result; } catch { }
-                    try { exit = p.ExitCode; } catch { }
-                }
-                var outFile = Path.Combine(tmp, "steam_interfaces.txt");
-                if (File.Exists(outFile) && File.ReadAllLines(outFile).Any(l => l.Trim().Length > 0))
-                {
-                    Log(LogLevel.Ok, "Generated steam_interfaces.txt from the original dll.");
-                    return File.ReadAllText(outFile);
-                }
-                // Report the exit code and the tool's own output: without them a failure here reads as
-                // "the dll does not export interfaces", which sends people after the wrong problem.
-                // The tail is taken line-wise and joined, not sliced at a character offset - a raw
-                // substring starts mid-line and drags embedded newlines into what should be one log line.
-                string detail = Tail(stdOut, stdErr, 3, 240);
-                Log(LogLevel.Warn, "Interface dump produced nothing (generate_interfaces exit code " + exit + ")"
-                    + (detail.Length > 0 ? ": " + detail : " – the dll may not export interfaces."));
-                return null;
-            }
-            catch (OperationCanceledException) { throw; }
+            ct.ThrowIfCancellationRequested();
+            List<string> lines;
+            try { lines = InterfaceScanner.Scan(target); }
             catch (Exception ex)
             {
                 Log(LogLevel.Dim, "Interface dump failed: " + ex.Message);
                 return null;
             }
-            finally { try { Directory.Delete(tmp, true); } catch { } }
+            if (lines.Count == 0)
+            {
+                Log(LogLevel.Warn, "No Steam interface versions found in " + Path.GetFileName(target) + " – it may not be a Steamworks library.");
+                return null;
+            }
+            Log(LogLevel.Ok, "Generated steam_interfaces.txt from the original dll (" + lines.Count + " interfaces).");
+            return string.Join("\r\n", lines.ToArray()) + "\r\n";
         }
 
         /// <summary>Generic online-fix mode: the game's ORIGINAL steam_api dll must stay in place so that,
@@ -2185,7 +2104,7 @@ namespace Gp
             return total;
         }
 
-        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, Func<string, string> backup, PatchResult res)
+        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, BackupTaker backup, PatchResult res)
         {
             // The *name* comes from the import table; the *architecture* comes from the PE header. Deriving
             // the name from the architecture is the worst failure mode in the app: a correctly-architected
@@ -2214,7 +2133,7 @@ namespace Gp
                     string probe = otherPath;
                     if (LooksLikeBundledGoldberg(probe))
                     {
-                        string original = OriginalBackups.Location(Path.Combine(installDir, "goldberg_backup"), probe);
+                        string original = OriginalBackups.Find(Path.Combine(installDir, "goldberg_backup"), probe);
                         probe = File.Exists(original) ? original : null;
                         if (probe == null && FilesEqual(otherPath, Tools.ApiDll86)) otherArch = ExeArch.X86;
                         else if (probe == null && FilesEqual(otherPath, Tools.ApiDll64)) otherArch = ExeArch.X64;
@@ -2241,7 +2160,8 @@ namespace Gp
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
                 {
-                    if (backup(dst) != null) Log(LogLevel.Dim, "Preserved original backup for " + dllName);
+                    string ignored;
+                    if (backup(dst, null, out ignored) != null) Log(LogLevel.Dim, "Preserved original backup for " + dllName);
                 }
                 SafePersistence.Copy(src, dst, res.Writes, staged =>
                 {
@@ -2291,6 +2211,59 @@ namespace Gp
 
         /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
         /// A dll sitting right next to the exe always wins over deep copies.</summary>
+        /// <summary>Where to look for the game's Steamworks libraries. Normally the exe's own folder, but an
+        /// Unreal game's real exe sits in &lt;Project&gt;\Binaries\Win64 while the library lives under the game
+        /// root's Engine\Binaries\ThirdParty - searching down from the exe never finds it, and the emulator
+        /// would be dropped beside an exe that never loads it. Climbs out of Binaries\Win64|Win32 to the
+        /// folder holding Engine\, and only that far.</summary>
+        public static string SearchRoot(string exePath)
+        {
+            string dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+            try
+            {
+                var platform = new DirectoryInfo(dir);
+                if (!IsBinariesPlatform(platform)) return dir;
+                var project = platform.Parent.Parent;          // <Project>
+                var gameRoot = project == null ? null : project.Parent;
+                if (gameRoot != null && Directory.Exists(Path.Combine(gameRoot.FullName, "Engine"))) return gameRoot.FullName;
+                return project != null ? project.FullName : dir;
+            }
+            catch { return dir; }
+        }
+
+        static bool IsBinariesPlatform(DirectoryInfo d)
+        {
+            return d != null && d.Parent != null
+                && (string.Equals(d.Name, "Win64", StringComparison.OrdinalIgnoreCase) || string.Equals(d.Name, "Win32", StringComparison.OrdinalIgnoreCase))
+                && string.Equals(d.Parent.Name, "Binaries", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>For an Unreal launcher exe in the game root, the -Shipping exe it starts: that is the binary
+        /// SteamStub is usually applied to, so unpacking only the launcher can leave the DRM in place. Looks
+        /// exactly one project folder deep (&lt;root&gt;\&lt;Project&gt;\Binaries\Win64|Win32). Null when there is
+        /// none, or more than one and none matches the launcher's name.</summary>
+        public static string UnrealCompanion(string exePath)
+        {
+            try
+            {
+                string full = Path.GetFullPath(exePath);
+                string dir = Path.GetDirectoryName(full);
+                if (IsBinariesPlatform(new DirectoryInfo(dir))) return null;           // already the real exe
+                var hits = new List<string>();
+                foreach (var project in Directory.GetDirectories(dir))
+                    foreach (var platform in new[] { "Win64", "Win32" })
+                    {
+                        string bin = Path.Combine(project, "Binaries", platform);
+                        if (Directory.Exists(bin)) hits.AddRange(Directory.GetFiles(bin, "*-Shipping.exe"));
+                    }
+                if (hits.Count == 1) return hits[0];
+                string stem = Path.GetFileNameWithoutExtension(full);
+                var named = hits.Where(h => Path.GetFileName(h).StartsWith(stem + "-", StringComparison.OrdinalIgnoreCase)).ToList();
+                return named.Count == 1 ? named[0] : null;
+            }
+            catch { return null; }
+        }
+
         public static string PickApiTarget(List<string> files, string gameDir, string preferredName)
         {
             return files
@@ -2380,11 +2353,6 @@ namespace Gp
             return "";
         }
 
-        static IEnumerable<string> SafeFiles(string dir)
-        {
-            try { return Directory.GetFiles(dir); } catch { return new string[0]; }
-        }
-
         static void WriteIfChanged(string path, string content, PatchResult res)
         {
             if (File.Exists(path) && File.ReadAllText(path) == content) return;
@@ -2407,6 +2375,251 @@ namespace Gp
     // --------------------------------------------------------------------- batch patching
 
     /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
+    /// <summary>Managed replacement for GSE's generate_interfaces tool: lists the Steam interface version
+    /// strings an ORIGINAL steam_api dll was built against, which is what steam_interfaces.txt tells the
+    /// emulator. Same patterns, same order and the same SteamClient017 rule as the upstream tool
+    /// (tools/generate_interfaces/generate_interfaces.cpp in gbe_fork), so no external process, no
+    /// architecture-matched helper exe and no temp copy of the dll are needed.</summary>
+    public static class InterfaceScanner
+    {
+        static readonly string[] Patterns =
+        {
+            @"STEAMAPPS_INTERFACE_VERSION\d+", @"SteamApps\d+", @"STEAMAPPLIST_INTERFACE_VERSION\d+",
+            @"STEAMAPPTICKET_INTERFACE_VERSION\d+", @"SteamClient\d+", @"STEAMCONTROLLER_INTERFACE_VERSION",
+            @"SteamController\d+", @"SteamFriends\d+", @"SteamGameServerStats\d+", @"SteamGameCoordinator\d+",
+            @"SteamGameServer\d+", @"STEAMHTMLSURFACE_INTERFACE_VERSION_\d+", @"STEAMHTTP_INTERFACE_VERSION\d+",
+            @"SteamInput\d+", @"STEAMINVENTORY_INTERFACE_V\d+", @"SteamMatchMakingServers\d+",
+            @"SteamMatchMaking\d+", @"SteamMatchGameSearch\d+", @"SteamParties\d+",
+            @"STEAMMUSIC_INTERFACE_VERSION\d+", @"STEAMMUSICREMOTE_INTERFACE_VERSION\d+",
+            @"SteamNetworkingMessages\d+", @"SteamNetworkingSockets\d+", @"SteamNetworkingUtils\d+",
+            @"SteamNetworking\d+", @"STEAMPARENTALSETTINGS_INTERFACE_VERSION\d+",
+            @"STEAMREMOTEPLAY_INTERFACE_VERSION\d+", @"STEAMREMOTESTORAGE_INTERFACE_VERSION\d+",
+            @"STEAMSCREENSHOTS_INTERFACE_VERSION\d+", @"STEAMTIMELINE_INTERFACE_V\d+",
+            @"STEAMUGC_INTERFACE_VERSION\d+", @"SteamUser\d+", @"STEAMUSERSTATS_INTERFACE_VERSION\d+",
+            @"SteamUtils\d+", @"STEAMVIDEO_INTERFACE_V\d+", @"STEAMUNIFIEDMESSAGES_INTERFACE_VERSION\d+",
+            @"SteamMasterServerUpdater\d+",
+        };
+
+        static readonly System.Text.RegularExpressions.Regex[] Compiled =
+            Patterns.Select(x => new System.Text.RegularExpressions.Regex(x, System.Text.RegularExpressions.RegexOptions.CultureInvariant)).ToArray();
+
+        /// <summary>The lines of steam_interfaces.txt for <paramref name="dllPath"/>, in upstream order.</summary>
+        public static List<string> Scan(string dllPath)
+        {
+            // Latin-1 maps every byte to one char, so offsets and ASCII matches are exact.
+            string text = Encoding.GetEncoding(28591).GetString(File.ReadAllBytes(dllPath));
+            var lines = new List<string>();
+            for (int i = 0; i < Compiled.Length; i++)
+            {
+                var matches = Compiled[i].Matches(text).Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value).ToList();
+                if (Patterns[i] == @"SteamClient\d+" && matches.Count > 1 && matches.Contains("SteamClient017"))
+                    matches = new List<string> { "SteamClient017" };
+                lines.AddRange(matches);
+            }
+            return lines;
+        }
+
+        public static string Generate(string dllPath)
+        {
+            var lines = Scan(dllPath);
+            return lines.Count == 0 ? null : string.Join("\r\n", lines.ToArray()) + "\r\n";
+        }
+    }
+
+    /// <summary>Pre-flight: protections the emulator cannot get past, recognised from the section table
+    /// alone (a header read, no full-file scan). Only protectors with fixed, documented section names are
+    /// listed; Denuvo and Arxan have no reliable structural marker and are deliberately not guessed at - a
+    /// false "Denuvo detected" would stop people patching games that would have worked.</summary>
+    public static class ProtectionScan
+    {
+        static readonly KeyValuePair<string, string>[] Markers =
+        {
+            new KeyValuePair<string, string>(".vmp", "VMProtect"),
+            new KeyValuePair<string, string>(".themida", "Themida"),
+            new KeyValuePair<string, string>(".winlice", "WinLicense"),
+            new KeyValuePair<string, string>(".enigma", "Enigma Protector"),
+        };
+
+        public static List<string> Detect(string exePath)
+        {
+            var found = new List<string>();
+            var names = Shibaless.ShibalessUnpacker.ReadSectionNames(exePath);
+            if (names == null) return found;
+            foreach (var marker in Markers)
+                if (names.Any(n => n.StartsWith(marker.Key, StringComparison.OrdinalIgnoreCase)) && !found.Contains(marker.Value))
+                    found.Add(marker.Value);
+            return found;
+        }
+    }
+
+    public enum CheckStatus { Pass, Warn, Fail }
+
+    public sealed class InstallCheckItem
+    {
+        public CheckStatus Status;
+        public string Title = "";
+        public string Detail = "";
+        public override string ToString() { return Status.ToString().ToUpperInvariant() + "  " + Title + (Detail.Length > 0 ? " – " + Detail : ""); }
+    }
+
+    /// <summary>Checks a finished install as a whole: every individual write is verified when it happens,
+    /// but nothing else asks the question that matters - will the game actually load the emulator? This
+    /// catches the "patched successfully, still talks to real Steam" class of failure.</summary>
+    public static class InstallCheck
+    {
+        /// <summary>True for a Goldberg/GSE steam_api build of any version. GSE reads its config from a
+        /// "steam_settings" folder and never loads steamclient; Valve's library does the opposite. Comparing
+        /// against the bundled dll byte-for-byte would miss an install made by any other patcher release.</summary>
+        public static bool IsEmulatorDll(string path)
+        {
+            byte[] data;
+            try { data = File.ReadAllBytes(path); }
+            catch { return false; }
+            return IndexOf(data, Encoding.ASCII.GetBytes("steam_settings")) >= 0
+                && IndexOf(data, Encoding.ASCII.GetBytes("steamclient")) < 0;
+        }
+
+        static int IndexOf(byte[] haystack, byte[] needle)
+        {
+            byte first = needle[0];
+            int last = haystack.Length - needle.Length;
+            for (int i = Array.IndexOf(haystack, first); i >= 0 && i <= last; i = Array.IndexOf(haystack, first, i + 1))
+            {
+                int j = 1;
+                while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+                if (j == needle.Length) return i;
+            }
+            return -1;
+        }
+
+        /// <summary>Whether an existing install looks like an online-fix one: every steam_appid.txt says 480
+        /// AND no Steamworks library in the game is the emulator. AppID 480 alone is not enough - a normal patch
+        /// can use 480 too. Used by --check when the mode is not given, so an online-fix game is not reported as
+        /// broken for still loading Valve's library.</summary>
+        public static bool LooksLikeOnlineFix(string exePath)
+        {
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+                var libs = PatchRunner.FindSteamApiFiles(PatchRunner.SearchRoot(exePath));
+                if (libs.Count == 0 || libs.Any(IsEmulatorDll)) return false;
+                var values = new[] { exeDir }.Concat(libs.Select(Path.GetDirectoryName))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Select(d => Path.Combine(d, "steam_appid.txt")).Where(File.Exists)
+                    .Select(f => AppIdDetector.Normalize(File.ReadAllText(f))).ToList();
+                return values.Count > 0 && values.All(v => v == "480");
+            }
+            catch { return false; }
+        }
+
+        /// <param name="expectedAppId">The AppID the install should carry, or null to only check that all
+        /// copies agree. Online-fix installs are expected to carry 480.</param>
+        public static List<InstallCheckItem> Run(string exePath, string expectedAppId, bool onlineFix, CancellationToken ct = default(CancellationToken))
+        {
+            var items = new List<InstallCheckItem>();
+            Action<CheckStatus, string, string> add = (st, t, d) => items.Add(new InstallCheckItem { Status = st, Title = t, Detail = d ?? "" });
+
+            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+            {
+                add(CheckStatus.Fail, "Game executable exists", exePath);
+                return items;
+            }
+            exePath = Path.GetFullPath(exePath);
+            string exeDir = Path.GetDirectoryName(exePath);
+            PeInfo pe;
+            try { pe = PeReader.Analyze(exePath); }
+            catch (Exception ex) { add(CheckStatus.Fail, "Executable is readable", ex.Message); return items; }
+
+            // 1. SteamStub left in place makes the game hand itself to real Steam before any dll loads. For an
+            //    Unreal launcher the exe that matters is the -Shipping one it starts.
+            var stubTargets = new List<string> { exePath };
+            string companion = PatchRunner.UnrealCompanion(exePath);
+            if (companion != null) stubTargets.Add(companion);
+            foreach (var target in stubTargets)
+            {
+                string label = target == exePath ? "SteamStub DRM removed" : "SteamStub DRM removed from " + Path.GetFileName(target);
+                bool? stub = Shibaless.ShibalessUnpacker.HasStubSection(target);
+                if (stub == true)
+                    add(onlineFix ? CheckStatus.Pass : CheckStatus.Fail, label,
+                        onlineFix ? "still present, which online-fix mode tolerates" : "still has its .bind stub – it will try to start through Steam");
+                else
+                    add(CheckStatus.Pass, label, stub == null ? "could not read the section table" : "");
+            }
+
+            // 2. Which library will the loader actually pick up?
+            string searchRoot = PatchRunner.SearchRoot(exePath);
+            var found = PatchRunner.FindSteamApiFiles(searchRoot, ct);
+            string imported = PatchRunner.ImportedSteamApiName(exePath);
+            string wantedKind = onlineFix ? "Valve's original" : "the emulator";
+            if (imported != null)
+            {
+                // A static import is resolved from the exe's own folder first; for a Steam game nothing
+                // later on the search path supplies it.
+                string resolved = Path.Combine(exeDir, imported);
+                if (!File.Exists(resolved))
+                    add(CheckStatus.Fail, "Imported " + imported + " is beside the exe", "the loader will not find it and the game will not start");
+                else
+                {
+                    bool emu = IsEmulatorDll(resolved);
+                    add(emu != onlineFix ? CheckStatus.Pass : CheckStatus.Fail, "The game loads " + wantedKind,
+                        imported + " beside the exe is " + (emu ? "the emulator" : "Valve's original"));
+                    ExeArch dllArch = ExeArch.Unknown;
+                    try { dllArch = PeReader.Analyze(resolved).Arch; } catch { }
+                    add(dllArch == pe.Arch ? CheckStatus.Pass : CheckStatus.Fail, "Library architecture matches the exe",
+                        imported + " is " + dllArch + ", the exe is " + pe.Arch);
+                }
+            }
+            else if (found.Count == 0)
+            {
+                add(CheckStatus.Warn, "A Steamworks library is present", "none found and the exe imports none – is this the game's main exe?");
+            }
+            else
+            {
+                // Loaded at runtime by path (typical for Unreal). Judge the copy the patcher targets - the same
+                // pick it installs into - and only warn about other copies: games and their tools can carry
+                // extra libraries the game itself never loads.
+                string preferred = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
+                string target = PatchRunner.PickApiTarget(found, searchRoot, preferred);
+                bool targetEmu = IsEmulatorDll(target);
+                add(targetEmu != onlineFix ? CheckStatus.Pass : CheckStatus.Fail, "The game loads " + wantedKind,
+                    PatchRunner.ShortRel(exeDir, target) + " is " + (targetEmu ? "the emulator" : "Valve's original"));
+                var others = found.Where(f => !string.Equals(f, target, StringComparison.OrdinalIgnoreCase) && IsEmulatorDll(f) == onlineFix).ToList();
+                if (others.Count > 0)
+                    add(CheckStatus.Warn, "Other Steamworks libraries in the game folder",
+                        string.Join(", ", others.Select(f => PatchRunner.ShortRel(exeDir, f)).ToArray())
+                        + (onlineFix ? " – the emulator" : " – still Valve's original; fine unless the game loads one of these"));
+                foreach (var f in found.Where(f => string.Equals(Path.GetFileName(f), preferred, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ExeArch a = ExeArch.Unknown;
+                    try { a = PeReader.Analyze(f).Arch; } catch { }
+                    if (a != pe.Arch)
+                        add(CheckStatus.Fail, "Library architecture matches the exe", PatchRunner.ShortRel(exeDir, f) + " is " + a + ", the exe is " + pe.Arch);
+                }
+            }
+
+            // 3. steam_appid.txt: beside the exe and beside each library, all saying the same thing.
+            var appIdFiles = new[] { exeDir }.Concat(found.Select(Path.GetDirectoryName))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(d => Path.Combine(d, "steam_appid.txt")).Where(File.Exists).ToList();
+            string expected = onlineFix ? "480" : (expectedAppId ?? "").Trim();
+            if (appIdFiles.Count == 0)
+                add(CheckStatus.Warn, "steam_appid.txt present", "none beside the exe or the libraries");
+            else
+            {
+                var values = appIdFiles.Select(f => { try { return AppIdDetector.Normalize(File.ReadAllText(f)); } catch { return ""; } }).ToList();
+                var distinct = values.Distinct().ToList();
+                if (distinct.Count > 1)
+                    add(CheckStatus.Warn, "steam_appid.txt copies agree", string.Join(", ", appIdFiles.Select((f, i) => PatchRunner.ShortRel(exeDir, f) + "=" + values[i]).ToArray()));
+                else if (expected.Length > 0 && distinct[0] != expected)
+                    add(CheckStatus.Fail, "steam_appid.txt carries AppID " + expected, "found " + (distinct[0].Length == 0 ? "an invalid value" : distinct[0]));
+                else
+                    add(distinct[0].Length > 0 ? CheckStatus.Pass : CheckStatus.Fail, "steam_appid.txt is valid",
+                        distinct[0].Length > 0 ? "AppID " + distinct[0] + " in " + appIdFiles.Count + " place(s)" : "not a numeric AppID");
+            }
+            return items;
+        }
+    }
+
     public class AppIdDetection
     {
         public string AppId = "";   // "" when nothing was found
@@ -2760,42 +2973,37 @@ namespace Gp
 
         public const int MaxResponseLength = 1024 * 1024;
 
-        public sealed class StoreResponse
-        {
-            public StoreItem[] items { get; set; }
-        }
-
-        public sealed class StoreItem
-        {
-            public object id { get; set; }
-            public object appid { get; set; }
-            public object name { get; set; }
-        }
-
+        /// <summary>Pulls (appid, name) pairs out of a store search response. Uses the JSON reader that ships
+        /// with .NET Framework (JSON surfaced as typed XML), which is what removed the System.Web.Extensions
+        /// dependency. Every element carries its JSON type, so ids sent as numbers or as strings both work.</summary>
         public static List<SteamMatch> ParseItems(string json)
         {
             var list = new List<SteamMatch>();
             if (string.IsNullOrWhiteSpace(json) || json.Length > MaxResponseLength) return list;
             try
             {
-                var serializer = new JavaScriptSerializer { MaxJsonLength = MaxResponseLength, RecursionLimit = 32 };
-                var response = serializer.Deserialize<StoreResponse>(json);
-                if (response == null || response.items == null) return list;
-                foreach (var item in response.items)
+                var quotas = new XmlDictionaryReaderQuotas { MaxDepth = 32, MaxStringContentLength = MaxResponseLength };
+                XElement root;
+                using (var reader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(json), quotas))
+                    root = XElement.Load(reader);
+                var items = root.Element("items");
+                if (items == null || (string)items.Attribute("type") != "array") return list;
+                foreach (var item in items.Elements("item"))
                 {
-                    if (item == null || !(item.name is string) || string.IsNullOrWhiteSpace((string)item.name)) continue;
-                    object id = item.id ?? item.appid;
-                    if (!(id is string) && !(id is int) && !(id is long)) continue;
-                    string normalized = AppIdDetector.Normalize(Convert.ToString(id, CultureInfo.InvariantCulture));
+                    if ((string)item.Attribute("type") != "object") continue;
+                    var name = item.Element("name");
+                    if (name == null || (string)name.Attribute("type") != "string" || string.IsNullOrWhiteSpace(name.Value)) continue;
+                    var id = item.Element("id") ?? item.Element("appid");
+                    string idType = id == null ? null : (string)id.Attribute("type");
+                    if (idType != "string" && idType != "number") continue;
+                    string normalized = AppIdDetector.Normalize(id.Value);
                     if (normalized.Length != 0)
-                        list.Add(new SteamMatch { AppId = normalized, GameName = (string)item.name });
+                        list.Add(new SteamMatch { AppId = normalized, GameName = name.Value });
                 }
             }
+            catch (XmlException) { list.Clear(); }
             catch (ArgumentException) { list.Clear(); }
             catch (InvalidOperationException) { list.Clear(); }
-            catch (NotSupportedException) { list.Clear(); }
-            catch (IndexOutOfRangeException) { list.Clear(); }
-            catch (FormatException) { list.Clear(); }
             return list;
         }
 
@@ -2869,16 +3077,6 @@ namespace Gp
             }
             catch (OperationCanceledException) { throw; }
             catch { ct.ThrowIfCancellationRequested(); return null; }
-        }
-    }
-
-    internal static class Ext
-    {
-        /// <summary>Returns the last n items of a list (all of it when n >= count).</summary>
-        public static IEnumerable<T> TakeLastVisible<T>(this IList<T> list, int n)
-        {
-            if (list == null || n <= 0) yield break;
-            for (int i = Math.Max(0, list.Count - n); i < list.Count; i++) yield return list[i];
         }
     }
 
