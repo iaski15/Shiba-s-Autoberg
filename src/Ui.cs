@@ -16,32 +16,37 @@ namespace Gp
             return Color.FromArgb(Convert.ToInt32(h.Substring(0, 2), 16), Convert.ToInt32(h.Substring(2, 2), 16), Convert.ToInt32(h.Substring(4, 2), 16));
         }
 
-        public static readonly Color Bg = FromHex("#0D0F14");
-        public static readonly Color Surface = FromHex("#151A23");
-        public static readonly Color Surface2 = FromHex("#1B2130");
-        public static readonly Color Inset = FromHex("#0B0E13");
-        public static readonly Color BorderC = FromHex("#262D3D");
-        public static readonly Color TextC = FromHex("#E7EAF2");
-        public static readonly Color MutedC = FromHex("#8B93A7");
-        public static readonly Color Accent = FromHex("#7C5CFF");
-        public static readonly Color Accent2 = FromHex("#4D9FFF");
+        // Neutrals carry a faint violet cast so the surfaces sit with the accent instead of against it.
+        public static readonly Color Bg = FromHex("#0E0C13");
+        public static readonly Color Surface = FromHex("#16131E");
+        public static readonly Color Surface2 = FromHex("#1F1B2A");
+        public static readonly Color Inset = FromHex("#110F18");
+        public static readonly Color BorderC = FromHex("#2A2537");
+        public static readonly Color TextC = FromHex("#EDEAF5");
+        public static readonly Color MutedC = FromHex("#958FA8");
+        public static readonly Color Accent = FromHex("#8B5CF6");      // brand violet
+        public static readonly Color Accent2 = FromHex("#B79CFF");     // lavender: links, highlights, info chips
+        public static readonly Color AccentHi = FromHex("#A07BFF");    // gradient top / hover
+        public static readonly Color AccentLo = FromHex("#6D3BEB");    // gradient bottom / pressed
         public static readonly Color OkC = FromHex("#34D399");
         public static readonly Color WarnC = FromHex("#FBBF24");
         public static readonly Color ErrC = FromHex("#F87171");
 
         // These were ad-hoc Ui.FromHex("#...") literals inside paint and log paths, where each call cost
         // two Substring allocations and three Convert.ToInt32 parses - on every repaint, per control.
-        public static readonly Color DisabledC = FromHex("#5A6373");   // disabled label / toggle text
-        public static readonly Color KnobOffC = FromHex("#6E7688");    // disabled toggle knob
-        public static readonly Color CancelA = FromHex("#B23A47");
-        public static readonly Color CancelB = FromHex("#8E2F3A");
-        public static readonly Color SuccessA = FromHex("#1F9D66");
-        public static readonly Color SuccessB = FromHex("#157A4F");
+        public static readonly Color DisabledC = FromHex("#5C566C");   // disabled label / toggle text
+        public static readonly Color KnobOffC = FromHex("#6F6982");    // disabled toggle knob
+        public static readonly Color CancelA = FromHex("#C24452");
+        public static readonly Color CancelB = FromHex("#9B3440");
+        public static readonly Color SuccessA = FromHex("#22A36B");
+        public static readonly Color SuccessB = FromHex("#178052");
         public static readonly Color OkBorderC = FromHex("#1E5C44");
         public static readonly Color ErrBorderC = FromHex("#6B2B31");
         public static readonly Color WarnBorderC = FromHex("#6B5623");
-        public static readonly Color DimC = FromHex("#67707F");        // dim log lines
-        public static readonly Color LogTextC = FromHex("#B9C1CE");    // normal log lines
+        public static readonly Color DimC = FromHex("#6A6479");        // dim log lines
+        public static readonly Color LogTextC = FromHex("#BDB7CC");    // normal log lines
+
+        public static Color Alpha(Color c, int a) { return Color.FromArgb(Math.Max(0, Math.Min(255, a)), c.R, c.G, c.B); }
 
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
         static Ui()
@@ -147,32 +152,56 @@ namespace Gp
             float x = pt.X;
             foreach (var ch in text)
             {
-                g.DrawString(ch.ToString(), f, b, x, pt.Y, StringFormat.GenericTypographic);
-                x += g.MeasureString(ch.ToString(), f, Point.Empty, StringFormat.GenericTypographic).Width + spacing;
+                if (ch != ' ') g.DrawString(ch.ToString(), f, b, x, pt.Y, StringFormat.GenericTypographic);
+                x += GlyphAdvance(g, ch, f) + spacing;
             }
         }
 
         public static SizeF MeasureSpaced(Graphics g, string text, Font f, float spacing)
         {
-            float w = 0; foreach (var ch in text) w += g.MeasureString(ch.ToString(), f, Point.Empty, StringFormat.GenericTypographic).Width + spacing;
+            float w = 0; foreach (var ch in text) w += GlyphAdvance(g, ch, f) + spacing;
             return new SizeF(w, g.MeasureString(text, f).Height);
+        }
+
+        // GenericTypographic trims trailing whitespace, so a lone space measures as zero width and spaced
+        // labels used to collapse ("STEAM APPID" painted as "STEAMAPPID"). Measure a space between two
+        // glyphs instead.
+        static float GlyphAdvance(Graphics g, char ch, Font f)
+        {
+            var fmt = StringFormat.GenericTypographic;
+            if (ch != ' ') return g.MeasureString(ch.ToString(), f, Point.Empty, fmt).Width;
+            return g.MeasureString("i i", f, Point.Empty, fmt).Width - g.MeasureString("ii", f, Point.Empty, fmt).Width;
+        }
+
+        public static void SectionLabel(Graphics g, string text, Point at)
+        {
+            using (var b = new SolidBrush(MutedC)) SpacedText(g, text, F(7.25f, true), b, new PointF(at.X, at.Y), 1.4f);
+        }
+
+        public static Color Lerp(Color a, Color b, float t)
+        {
+            t = Math.Max(0f, Math.Min(1f, t));
+            return Color.FromArgb(
+                (int)(a.A + (b.A - a.A) * t), (int)(a.R + (b.R - a.R) * t),
+                (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
         }
 
         public static void DrawChip(Graphics g, ref int x, int y, int h, string text, Color fore, Color back, Color? border)
         {
             if (string.IsNullOrEmpty(text)) return;
-            var sz = g.MeasureString(text, F(7.75f, true));
-            int w = (int)Math.Ceiling(sz.Width) + S(18);
+            // Measured with TextRenderer because that is what draws it - GDI+ metrics run narrower.
+            var sz = TextRenderer.MeasureText(g, text, F(7.75f, true), Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            int w = sz.Width + S(18);
             var r = new Rectangle(x, y, w, h);
-            FillRound(g, r, h / 2, back);
-            if (border.HasValue) StrokeRound(g, Rectangle.Inflate(r, 0, 0), h / 2, border.Value, 1f);
+            FillRound(g, r, S(6), back);
+            if (border.HasValue) StrokeRound(g, r, S(6), border.Value, 1f);
             TextRendererHelper(g, text, fore, r);
             x += w + S(8);
         }
 
         static void TextRendererHelper(Graphics g, string text, Color fore, Rectangle r)
         {
-            TextRenderer.DrawText(g, text, F(7.75f, true), r, fore, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, text, F(7.75f, true), r, fore, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
 
         public static Color Tint(Color basec, Color tint, double amt)
@@ -184,29 +213,132 @@ namespace Gp
         }
     }
 
+    // ─────────────────────────────────────────────── animation
+
+    /// <summary>A 0..1 value that eases toward a target and repaints its owner while it moves. Every
+    /// instance shares one UI-thread timer that only runs while something is actually animating, so idle
+    /// controls cost nothing. Transitions are short (~120 ms) - long enough to read as motion, short
+    /// enough that the UI never feels like it is waiting on itself.</summary>
+    public sealed class Anim
+    {
+        static readonly List<Anim> active = new List<Anim>();
+        static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        static Timer timer;
+        static long lastTick;
+
+        readonly Control owner;
+        readonly float durationMs;
+        float pos, target;
+
+        public Anim(Control owner, float durationMs = 120f) { this.owner = owner; this.durationMs = Math.Max(1f, durationMs); }
+
+        /// <summary>Linear position; use <see cref="Eased"/> for anything drawn.</summary>
+        public float Value { get { return pos; } }
+        public float Eased { get { float t = pos; return t * t * (3f - 2f * t); } }
+
+        public float Target
+        {
+            get { return target; }
+            set
+            {
+                target = Math.Max(0f, Math.Min(1f, value));
+                if (pos == target) { active.Remove(this); return; }
+                if (!active.Contains(this)) active.Add(this);
+                if (timer == null) { timer = new Timer { Interval = 15 }; timer.Tick += delegate { Step(); }; }
+                if (!timer.Enabled) { lastTick = clock.ElapsedMilliseconds; timer.Start(); }
+            }
+        }
+
+        public void Snap(float v) { pos = target = Math.Max(0f, Math.Min(1f, v)); active.Remove(this); }
+
+        static void Step()
+        {
+            long now = clock.ElapsedMilliseconds;
+            float dt = Math.Max(1, now - lastTick);
+            lastTick = now;
+            for (int i = active.Count - 1; i >= 0; i--)
+            {
+                var a = active[i];
+                if (a.owner.IsDisposed) { active.RemoveAt(i); continue; }
+                float step = dt / a.durationMs;
+                if (Math.Abs(a.target - a.pos) <= step) { a.pos = a.target; active.RemoveAt(i); }
+                else a.pos += a.target > a.pos ? step : -step;
+                a.owner.Invalidate();
+            }
+            if (active.Count == 0) timer.Stop();
+        }
+    }
+
     // ─────────────────────────────────────────────── card panel
 
     public class AppCard : Panel
     {
-        public int Radius = 14;
+        public int Radius = 12;
         public bool ShowBorder = true;
         public AppCard() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true); BackColor = Ui.Bg; }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            Ui.FillRound(g, ClientRectangle, Radius, Ui.Surface);
-            if (ShowBorder) Ui.StrokeRound(g, ClientRectangle, Radius, Ui.BorderC, 1f);
+            int rad = Ui.S(Radius);
+            var r = new Rectangle(0, 0, Width - 1, Height - 1);
+            Ui.FillRound(g, r, rad, Ui.Surface);
+            if (ShowBorder)
+            {
+                Ui.StrokeRound(g, r, rad, Ui.BorderC, 1f);
+                // A hairline of light along the top edge gives the card a little lift off the background.
+                using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
+            }
             base.OnPaint(e);
         }
     }
 
     // ─────────────────────────────────────────────── title bar
 
+    /// <summary>Caption button drawn with vector glyphs (crisp at any DPI, unlike the "−"/"×" text it
+    /// replaces) and a quick fade on hover.</summary>
+    public class WindowButton : Button
+    {
+        public bool IsClose;
+        readonly Anim hover;
+        bool press;
+        public WindowButton(bool isClose)
+        {
+            IsClose = isClose;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            hover = new Anim(this, 90f);
+            TabStop = false;
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover.Target = 1; base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover.Target = 0; press = false; base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { press = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { press = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float h = hover.Eased;
+            if (h > 0)
+            {
+                Color hc = IsClose ? Color.FromArgb(232, 17, 35) : Ui.Surface2;
+                if (press) hc = IsClose ? Color.FromArgb(241, 112, 122) : Ui.BorderC;
+                Ui.FillRound(g, Rectangle.Inflate(ClientRectangle, -Ui.S(2), -Ui.S(2)), Ui.S(6), Ui.Alpha(hc, (int)(255 * h)));
+            }
+            Color fg = Ui.Lerp(Ui.MutedC, IsClose ? Color.White : Ui.TextC, h);
+            float cx = Width / 2f, cy = Height / 2f, s = Ui.S(5f);
+            using (var p = new Pen(fg, Math.Max(1f, Ui.S(1.1f))))
+            {
+                if (IsClose) { g.DrawLine(p, cx - s, cy - s, cx + s, cy + s); g.DrawLine(p, cx - s, cy + s, cx + s, cy - s); }
+                else { g.SmoothingMode = SmoothingMode.None; g.DrawLine(p, cx - s, cy, cx + s, cy); }
+            }
+        }
+    }
+
     public class TitleBar : Control
     {
-        readonly Button minimizeButton = new Button();
-        readonly Button closeButton = new Button();
+        readonly WindowButton minimizeButton = new WindowButton(false);
+        readonly WindowButton closeButton = new WindowButton(true);
         public TitleBar()
         {
             Dock = DockStyle.Top; Height = 46;
@@ -216,17 +348,11 @@ namespace Gp
             int tab = 0;
             foreach (var button in new[] { minimizeButton, closeButton })
             {
-                button.FlatStyle = FlatStyle.Flat;
-                button.FlatAppearance.BorderSize = 0;
-                button.BackColor = Ui.Bg; button.ForeColor = Ui.MutedC;
-                button.Font = Ui.F(11, false);
                 button.TabIndex = tab++;
-                button.UseVisualStyleBackColor = false;
                 Controls.Add(button);
             }
-            minimizeButton.Text = "−"; minimizeButton.AccessibleName = "Minimize";
-            closeButton.Text = "×"; closeButton.AccessibleName = "Close";
-            closeButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(210, 40, 55);
+            minimizeButton.AccessibleName = "Minimize";
+            closeButton.AccessibleName = "Close";
             minimizeButton.Click += delegate { OnMinimizeClicked(); };
             closeButton.Click += delegate { OnCloseClicked(); };
             LayoutBtns();
@@ -234,8 +360,8 @@ namespace Gp
         protected override void OnResize(EventArgs e) { LayoutBtns(); base.OnResize(e); }
         void LayoutBtns()
         {
-            closeButton.Bounds = new Rectangle(Width - 50, 8, 42, 30);
-            minimizeButton.Bounds = new Rectangle(Width - 96, 8, 42, 30);
+            closeButton.Bounds = new Rectangle(Width - Ui.S(50), Ui.S(8), Ui.S(40), Ui.S(30));
+            minimizeButton.Bounds = new Rectangle(Width - Ui.S(92), Ui.S(8), Ui.S(40), Ui.S(30));
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -269,16 +395,23 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
 
-            // logo: gradient circle + play triangle
-            var logoRect = new Rectangle(Ui.S(22), Ui.S(13), Ui.S(20), Ui.S(20));
-            using (var lg = new LinearGradientBrush(logoRect, Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(logoRect, Ui.S(10))) g.FillPath(lg, p);
-            var tri = new PointF[] { Ui.S(new PointF(29.5f, 18.5f)), Ui.S(new PointF(29.5f, 27.5f)), Ui.S(new PointF(37.5f, 23f)) };
-            using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, tri);
+            // logo: rounded violet tile with a "G" monogram
+            var logoRect = new Rectangle(Ui.S(20), Ui.S(12), Ui.S(22), Ui.S(22));
+            using (var lg = new LinearGradientBrush(logoRect, Ui.AccentHi, Ui.AccentLo, 60f)) using (var p = Ui.RoundPath(logoRect, Ui.S(6))) g.FillPath(lg, p);
+            TextRenderer.DrawText(g, "G", Ui.F(9.5f, true), logoRect, Color.White,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
-            // title
-            var tsz = Ui.MeasureSpaced(g, "GOLDBERG PATCHER", Ui.F(9, true), 1.6f);
-            Ui.SpacedText(g, "GOLDBERG PATCHER", Ui.F(9, true), Brushes.White, Ui.S(new PointF(52, 15)), 1.6f);
-            TextRenderer.DrawText(g, "v" + BuildInfo.Version, Ui.F(7.75f, false), new Rectangle((int)(Ui.S(52) + tsz.Width + Ui.S(10)), Ui.S(17), Ui.S(60), Ui.S(16)), Ui.MutedC, TextFormatFlags.NoPadding);
+            // title + version pill
+            var tf = Ui.F(9.25f, true);
+            var tsz = TextRenderer.MeasureText(g, "Goldberg Patcher", tf, Size.Empty, TextFormatFlags.NoPadding);
+            int tx = Ui.S(52), ty = Height / 2 - tsz.Height / 2;
+            TextRenderer.DrawText(g, "Goldberg Patcher", tf, new Point(tx, ty), Ui.TextC, TextFormatFlags.NoPadding);
+            string ver = "v" + BuildInfo.Version;
+            var vf = Ui.F(7.25f, true);
+            var vsz = TextRenderer.MeasureText(g, ver, vf, Size.Empty, TextFormatFlags.NoPadding);
+            var vr = new Rectangle(tx + tsz.Width + Ui.S(10), Height / 2 - Ui.S(9), vsz.Width + Ui.S(14), Ui.S(18));
+            Ui.FillRound(g, vr, vr.Height / 2, Ui.Tint(Ui.Bg, Ui.Accent, 0.16));
+            TextRenderer.DrawText(g, ver, vf, vr, Ui.Accent2, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, Height - 1, Width, Height - 1);
         }
@@ -292,6 +425,16 @@ namespace Gp
         internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+        [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        internal static extern int SetWindowTheme(IntPtr hwnd, string appName, string idList);
+
+        /// <summary>Dark native scrollbars (Windows 10 1809+); a bright white scrollbar in the dark log
+        /// looked like a rendering glitch. Silently a no-op on systems without the theme.</summary>
+        internal static void UseDarkScrollbars(Control c)
+        {
+            if (c.IsHandleCreated) try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { }
+            else c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } };
+        }
     }
 
     // ─────────────────────────────────────────────── drop zone
@@ -308,12 +451,18 @@ namespace Gp
 
         public string GamePath { get { return gamePath; } }
 
+        readonly Anim hoverAnim, dragAnim;
+
         public DropZone()
         {
             AllowDrop = true;
             Cursor = Cursors.Hand;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            hoverAnim = new Anim(this, 140f);
+            dragAnim = new Anim(this, 110f);
         }
+
+        protected override void OnMouseEnter(EventArgs e) { if (Enabled) hoverAnim.Target = 1; base.OnMouseEnter(e); }
 
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
 
@@ -373,18 +522,19 @@ namespace Gp
 
         protected override void OnDragEnter(DragEventArgs e)
         {
-            if (IsExeDrop(e)) { e.Effect = DragDropEffects.Copy; dragOver = true; Invalidate(); }
+            if (IsExeDrop(e)) { e.Effect = DragDropEffects.Copy; SetDragOver(true); }
             else e.Effect = DragDropEffects.None;
         }
         protected override void OnDragOver(DragEventArgs e)
         {
             bool ok = IsExeDrop(e);
-            if (ok != dragOver) { dragOver = ok; Invalidate(); }
+            if (ok != dragOver) SetDragOver(ok);
         }
-        protected override void OnDragLeave(EventArgs e) { dragOver = false; Invalidate(); }
+        protected override void OnDragLeave(EventArgs e) { SetDragOver(false); }
+        void SetDragOver(bool on) { dragOver = on; dragAnim.Target = on ? 1 : 0; Invalidate(); }
         protected override void OnDragDrop(DragEventArgs e)
         {
-            dragOver = false; Invalidate();
+            SetDragOver(false);
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             if (files == null || files.Length < 1) return;
             string f0 = files[0] ?? "";
@@ -399,7 +549,7 @@ namespace Gp
             if (oc != overChange) { overChange = oc; Invalidate(); }
             base.OnMouseMove(e);
         }
-        protected override void OnMouseLeave(EventArgs e) { overChange = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { overChange = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
 
         /// <summary>Where the CHANGE link sits. Derived from the width, the font and the DPI scale, so it
         /// is answerable before the control has ever painted. It used to be assigned inside OnPaint and
@@ -407,9 +557,8 @@ namespace Gp
         /// and never hover-highlighted - until something happened to repaint.</summary>
         Rectangle ChangeLinkBounds()
         {
-            var cf = Ui.F(8f, true);
-            int w = TextRenderer.MeasureText("CHANGE", cf, Size.Empty, TextFormatFlags.NoPadding).Width;
-            return new Rectangle(Width - Ui.S(18) - w - Ui.S(4), Ui.S(20), w + Ui.S(8), Ui.S(18));
+            int w = TextRenderer.MeasureText("Change", Ui.F(8.25f, true), Size.Empty, TextFormatFlags.NoPadding).Width + Ui.S(24);
+            return new Rectangle(Width - Ui.S(16) - w, Ui.S(16), w, Ui.S(26));
         }
 
         bool MouseIsOverChange(Point pt)
@@ -420,81 +569,98 @@ namespace Gp
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
+            using (var b = new SolidBrush(Parent != null ? Parent.BackColor : Ui.Bg)) g.FillRectangle(b, ClientRectangle);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            var rect = ClientRectangle;
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            int rad = Ui.S(12);
+            float hot = Math.Max(hoverAnim.Eased * 0.6f, dragAnim.Eased);
+            const TextFormatFlags plain = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
 
-            Ui.FillRound(g, rect, Ui.S(14), Ui.Surface);
+            Ui.FillRound(g, rect, rad, Ui.Lerp(Ui.Surface, Ui.Tint(Ui.Surface, Ui.Accent, 0.10), hot));
             if (gamePath.Length == 0)
             {
-                var bc = dragOver ? Ui.Accent : Ui.BorderC;
-                using (var pen = new Pen(bc, 1.6f)) { pen.DashStyle = DashStyle.Dash; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), Ui.S(13))) g.DrawPath(pen, p); }
+                var bc = Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.06), Ui.Accent, hot);
+                using (var pen = new Pen(bc, Ui.S(1.5f))) { pen.DashStyle = DashStyle.Dash; pen.DashPattern = new[] { 4f, 3f }; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), rad - 1)) g.DrawPath(pen, p); }
 
-                var iconR = new Rectangle(Width / 2 - Ui.S(19), Ui.S(15), Ui.S(38), Ui.S(38));
-                var glowR = new Rectangle(iconR.X - Ui.S(7), iconR.Y - Ui.S(7), iconR.Width + Ui.S(14), iconR.Height + Ui.S(14));
-                using (var b = new SolidBrush(Color.FromArgb(dragOver ? 46 : 24, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B))) using (var p = Ui.RoundPath(glowR, Ui.S(25))) g.FillPath(b, p);
-                using (var lg = new LinearGradientBrush(new RectangleF(iconR.X, iconR.Y, iconR.Width, iconR.Height), Ui.Accent, Ui.Accent2, 45f)) using (var p = Ui.RoundPath(iconR, Ui.S(19))) g.FillPath(lg, p);
-                var tri = new PointF[] { new PointF(iconR.X + Ui.S(16), iconR.Y + Ui.S(12)), new PointF(iconR.X + Ui.S(16), iconR.Bottom - Ui.S(12)), new PointF(iconR.Right - Ui.S(12), iconR.Y + Ui.S(19)) };
-                using (var b = new SolidBrush(Color.White)) g.FillPolygon(b, tri);
+                // icon tile: soft halo + gradient tile + "drop into tray" arrow
+                int isz = Ui.S(40);
+                var iconR = new Rectangle(Width / 2 - isz / 2, Ui.S(16), isz, isz);
+                var glowR = Rectangle.Inflate(iconR, Ui.S(6), Ui.S(6));
+                Ui.FillRound(g, glowR, Ui.S(15), Ui.Alpha(Ui.Accent, (int)(22 + 40 * hot)));
+                using (var lg = new LinearGradientBrush(iconR, Ui.AccentHi, Ui.AccentLo, 70f)) using (var p = Ui.RoundPath(iconR, Ui.S(11))) g.FillPath(lg, p);
+                using (var pen = new Pen(Color.White, Ui.S(2f)))
+                {
+                    pen.StartCap = pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
+                    float cx = iconR.X + iconR.Width / 2f, top = iconR.Y + Ui.S(10f), tip = iconR.Y + Ui.S(23f) + Ui.S(3f) * dragAnim.Eased;
+                    g.DrawLine(pen, cx, top, cx, tip);
+                    g.DrawLines(pen, new[] { new PointF(cx - Ui.S(5f), tip - Ui.S(5f)), new PointF(cx, tip), new PointF(cx + Ui.S(5f), tip - Ui.S(5f)) });
+                    float ty = iconR.Bottom - Ui.S(10f), tx0 = iconR.X + Ui.S(11f), tx1 = iconR.Right - Ui.S(11f);
+                    g.DrawLines(pen, new[] { new PointF(tx0, ty - Ui.S(4f)), new PointF(tx0, ty), new PointF(tx1, ty), new PointF(tx1, ty - Ui.S(4f)) });
+                }
 
-                var l1 = "Drop the game's .exe here";
-                var f1 = Ui.F(11.25f, true);
-                var sz1 = g.MeasureString(l1, f1);
-                TextRenderer.DrawText(g, l1, f1, new Point(Width / 2 - (int)sz1.Width / 2, Ui.S(58)), Ui.TextC, TextFormatFlags.NoPadding);
+                var l1 = dragOver ? "Release to select this game" : "Drop the game's .exe here";
+                var f1 = Ui.F(11f, true);
+                var sz1 = TextRenderer.MeasureText(g, l1, f1, Size.Empty, plain);
+                TextRenderer.DrawText(g, l1, f1, new Point(Width / 2 - sz1.Width / 2, Ui.S(64)), Ui.TextC, plain);
                 var l2 = "or click to browse  ·  architecture & DRM are detected automatically";
                 var f2 = Ui.F(8.5f, false);
-                var sz2 = g.MeasureString(l2, f2);
-                TextRenderer.DrawText(g, l2, f2, new Point(Width / 2 - (int)sz2.Width / 2, Ui.S(84)), Ui.MutedC, TextFormatFlags.NoPadding);
+                var sz2 = TextRenderer.MeasureText(g, l2, f2, Size.Empty, plain);
+                TextRenderer.DrawText(g, l2, f2, new Point(Width / 2 - sz2.Width / 2, Ui.S(88)), Ui.MutedC, plain);
             }
             else
             {
-                Ui.StrokeRound(g, rect, Ui.S(14), dragOver ? Ui.Accent : Ui.BorderC, 1.4f);
+                Ui.StrokeRound(g, rect, rad, Ui.Lerp(Ui.BorderC, Ui.Accent, dragAnim.Eased), 1f);
+                using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
                 int pad = Ui.S(18);
-                var iconR = new Rectangle(pad, Ui.S(15), Ui.S(36), Ui.S(36));
+                var iconR = new Rectangle(pad, Ui.S(16), Ui.S(40), Ui.S(40));
                 if (fileIcon != null)
                 {
                     Ui.FillRound(g, iconR, Ui.S(10), Ui.Surface2);
+                    Ui.StrokeRound(g, iconR, Ui.S(10), Ui.BorderC, 1f);
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(fileIcon, new Rectangle(iconR.X + Ui.S(3), iconR.Y + Ui.S(3), Ui.S(30), Ui.S(30)));
+                    g.DrawImage(fileIcon, new Rectangle(iconR.X + Ui.S(4), iconR.Y + Ui.S(4), Ui.S(32), Ui.S(32)));
                 }
                 else
                 {
-                    Ui.FillRound(g, iconR, Ui.S(18), Ui.Tint(Ui.Surface2, Ui.OkC, 0.22));
-                    using (var b = new SolidBrush(Ui.OkC))
-                        g.DrawString("\u2713", Ui.F(14, true), b, iconR.X + Ui.S(9), iconR.Y + Ui.S(8));
+                    Ui.FillRound(g, iconR, Ui.S(10), Ui.Tint(Ui.Surface2, Ui.Accent, 0.22));
+                    TextRenderer.DrawText(g, "EXE", Ui.F(7.5f, true), iconR, Ui.Accent2, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                 }
 
+                int textX = iconR.Right + Ui.S(14);
+                var changeRect = ChangeLinkBounds();
+                int textMaxW = Math.Max(0, changeRect.Left - Ui.S(12) - textX);
                 string name = Path.GetFileName(gamePath);
-                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Point(pad + Ui.S(50), Ui.S(20)), Ui.TextC, TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, name, Ui.F(10.5f, true), new Rectangle(textX, Ui.S(17), textMaxW, Ui.S(22)), Ui.TextC,
+                    plain | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
 
                 var dirF = Ui.F(8.25f, false);
                 string dir = Path.GetDirectoryName(gamePath);
-                int dirMaxW = Width - (pad + Ui.S(50)) - Ui.S(110);
                 // Measure with the paint Graphics – creating a separate one during OnPaint is wasteful.
-                string shownDir = Ui.TruncMiddle(g, dir ?? "", dirF, dirMaxW);
-                TextRenderer.DrawText(g, shownDir, dirF, new Point(pad + Ui.S(50), Ui.S(43)), Ui.MutedC, TextFormatFlags.NoPadding);
+                string shownDir = Ui.TruncMiddle(g, dir ?? "", dirF, textMaxW);
+                TextRenderer.DrawText(g, shownDir, dirF, new Point(textX, Ui.S(40)), Ui.MutedC, plain);
 
-                // CHANGE link top-right
-                var cf = Ui.F(8f, true);
-                var changeRect = ChangeLinkBounds();
-                TextRenderer.DrawText(g, "CHANGE", cf, changeRect, overChange ? Ui.Accent2 : Ui.MutedC,
+                // "Change" pill, top-right
+                Ui.FillRound(g, changeRect, Ui.S(8), overChange ? Ui.Tint(Ui.Surface2, Ui.Accent, 0.18) : Ui.Surface2);
+                Ui.StrokeRound(g, changeRect, Ui.S(8), overChange ? Ui.Alpha(Ui.Accent, 170) : Ui.BorderC, 1f);
+                TextRenderer.DrawText(g, "Change", Ui.F(8.25f, true), changeRect, overChange ? Ui.TextC : Ui.MutedC,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
                 // chips row
-                int cx = pad + Ui.S(48); int cy = Height - Ui.S(38);
+                int cx = textX; int cy = Height - Ui.S(36);
                 if (!string.IsNullOrEmpty(archChip))
-                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), archChip, Ui.Accent2, Ui.Tint(Ui.Surface2, Ui.Accent2, 0.16), null);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(22), archChip, Ui.Accent2, Ui.Tint(Ui.Surface2, Ui.Accent, 0.20), null);
                 if (!string.IsNullOrEmpty(sizeChip))
-                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), sizeChip, Ui.MutedC, Ui.Surface2, Ui.BorderC);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(22), sizeChip, Ui.MutedC, Ui.Surface2, Ui.BorderC);
                 if (!string.IsNullOrEmpty(apiChip))
                 {
                     var col = apiState == 1 ? Ui.OkC : Ui.WarnC;
-                    Ui.DrawChip(g, ref cx, cy, Ui.S(24), apiChip, col, Ui.Tint(Ui.Surface2, col, 0.14), null);
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(22), apiChip, col, Ui.Tint(Ui.Surface2, col, 0.12), Ui.Tint(Ui.Surface2, col, 0.28));
                 }
             }
 
             if (!Enabled)
-                using (var b = new SolidBrush(Color.FromArgb(170, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
+                using (var b = new SolidBrush(Color.FromArgb(150, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
         }
 
         protected override void Dispose(bool disposing)
@@ -509,55 +675,82 @@ namespace Gp
     public class Toggle : CheckBox
     {
         bool hover = false, press = false;
+        readonly Anim knob, hoverAnim;
         public Toggle(string label, bool initial)
         {
+            knob = new Anim(this, 130f); knob.Snap(initial ? 1 : 0);
+            hoverAnim = new Anim(this, 100f);
             Text = label; Checked = initial;
             AccessibleName = label; AutoSize = false; TabStop = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
             BackColor = Ui.Surface; // match the card so no black/unpainted area shows behind the pill
             Cursor = Cursors.Hand; Height = 24;
         }
-        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
-        protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) { hover = true; Invalidate(); } base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; if (!Enabled) hoverAnim.Target = 0; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) { hover = true; hoverAnim.Target = 1; } base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) { press = true; Invalidate(); } base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left) { press = false; hover = Enabled && ClientRectangle.Contains(e.Location); Invalidate(); }
+            if (e.Button == MouseButtons.Left) { press = false; hover = Enabled && ClientRectangle.Contains(e.Location); hoverAnim.Target = hover ? 1 : 0; Invalidate(); }
             base.OnMouseUp(e);
         }
         protected override void OnMouseCaptureChanged(EventArgs e) { press = false; Invalidate(); base.OnMouseCaptureChanged(e); }
         protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
         protected override void OnLostFocus(EventArgs e) { press = false; Invalidate(); base.OnLostFocus(e); }
-        protected override void OnCheckedChanged(EventArgs e) { Invalidate(); base.OnCheckedChanged(e); }
+        // The native BUTTON window draws straight onto the screen when it gains/loses focus, is enabled or
+        // disabled, or its check, highlight or focus-cue state changes - outside WM_PAINT - and left a stray
+        // line across the top of the toggles after a patch run. Repaint over it whenever one goes through.
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            switch (m.Msg)
+            {
+                case 0x0007: case 0x0008:   // WM_SETFOCUS / WM_KILLFOCUS (native XOR focus rectangle)
+                case 0x000A:                // WM_ENABLE
+                case 0x00F1: case 0x00F3:   // BM_SETCHECK / BM_SETSTATE
+                case 0x0128:                // WM_UPDATEUISTATE
+                    Invalidate(); break;
+            }
+        }
+        protected override void OnCheckedChanged(EventArgs e)
+        {
+            // Slide only when the user can see it; a toggle set while hidden or before first paint just jumps.
+            if (knob != null) { if (Visible && IsHandleCreated) knob.Target = Checked ? 1 : 0; else knob.Snap(Checked ? 1 : 0); }
+            Invalidate(); base.OnCheckedChanged(e);
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var b = new SolidBrush(Ui.Surface)) g.FillRectangle(b, ClientRectangle); // no black/unpainted area behind the pill
-            int pillH = Ui.S(18), pillW = Ui.S(36);
+            int pillH = Ui.S(20), pillW = Ui.S(36);
             var pill = new Rectangle(0, Height / 2 - pillH / 2, pillW, pillH);
+            float on = knob.Eased, hv = hoverAnim.Eased;
 
-            Color trackFill, trackBorder;
+            Color offFill = Ui.Lerp(Ui.Surface2, Ui.Tint(Ui.Surface2, Color.White, 0.06), hv);
+            Color offBorder = Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.05), Ui.Tint(Ui.BorderC, Ui.Accent, 0.45), hv);
+            Color onFill = Ui.Lerp(Ui.Accent, Ui.AccentHi, hv);
+            Color trackFill = Ui.Lerp(offFill, onFill, on);
+            Color trackBorder = Ui.Lerp(offBorder, onFill, on);
             if (!Enabled)
             {
-                trackFill = Checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.55) : Ui.Tint(Ui.Surface2, Ui.Bg, 0.3);
-                trackBorder = Checked ? Ui.Tint(Ui.Accent, Ui.Bg, 0.6) : Ui.Tint(Ui.BorderC, Ui.Bg, 0.3);
+                trackFill = Ui.Tint(trackFill, Ui.Bg, Checked ? 0.55 : 0.3);
+                trackBorder = Ui.Tint(trackBorder, Ui.Bg, Checked ? 0.6 : 0.3);
             }
-            else if (Checked) { trackFill = Ui.Accent; trackBorder = Ui.Accent; }
-            else if (hover) { trackFill = Ui.Tint(Ui.Surface2, Color.White, 0.05); trackBorder = Ui.Tint(Ui.BorderC, Ui.Accent, 0.4); }
-            else { trackFill = Ui.Surface2; trackBorder = Ui.BorderC; }
 
             Ui.FillRound(g, pill, pillH / 2, trackFill);
             Ui.StrokeRound(g, pill, pillH / 2, trackBorder, 1f);
             if (press && Enabled) Ui.FillRound(g, pill, pillH / 2, Color.FromArgb(40, 0, 0, 0));
             int knobD = pillH - Ui.S(6);
-            var knob = new Rectangle(Checked ? pill.Right - knobD - Ui.S(3) : pill.X + Ui.S(3), pill.Y + Ui.S(3), knobD, knobD);
-            using (var b = new SolidBrush(Enabled ? Color.White : Ui.KnobOffC)) g.FillEllipse(b, knob);
+            float kx = pill.X + Ui.S(3) + (pill.Width - knobD - Ui.S(6)) * on;
+            var knobR = new RectangleF(kx, pill.Y + Ui.S(3), knobD, knobD);
+            if (Enabled) using (var b = new SolidBrush(Color.FromArgb(50, 0, 0, 0))) g.FillEllipse(b, knobR.X, knobR.Y + 1, knobR.Width, knobR.Height);
+            using (var b = new SolidBrush(Enabled ? Ui.Lerp(Ui.Tint(Color.White, Ui.MutedC, 0.25), Color.White, on) : Ui.KnobOffC)) g.FillEllipse(b, knobR);
 
-            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + Ui.S(10), 0, Math.Max(0, Width - pill.Right - Ui.S(10)), Height),
-                Enabled ? Ui.TextC : Ui.DisabledC, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -1, -1), Ui.TextC, Ui.Surface);
+            TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + Ui.S(12), 0, Math.Max(0, Width - pill.Right - Ui.S(12)), Height),
+                Enabled ? Ui.TextC : Ui.DisabledC, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            if (Focused && ShowFocusCues) Ui.StrokeRound(g, Rectangle.Inflate(pill, Ui.S(2), Ui.S(2)), pillH / 2 + Ui.S(2), Ui.Alpha(Ui.Accent2, 200), 1.5f);
         }
     }
 
@@ -566,18 +759,23 @@ namespace Gp
     public class GradientButton : Button
     {
         public enum BtnKind { Primary, Cancel, Success, Secondary }
-        public BtnKind Kind = BtnKind.Primary;
-        bool hover, press;
+        BtnKind kind = BtnKind.Primary;
+        public float TextSize = 10f;
+        public int CornerRadius = 10;
+        public BtnKind Kind { get { return kind; } set { if (kind != value) { kind = value; Invalidate(); } } }
+        bool press;
+        readonly Anim hoverAnim;
         public GradientButton(string text)
         {
+            hoverAnim = new Anim(this, 110f);
             Text = text;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             Cursor = Cursors.Hand;
         }
         protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
         protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = press = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { press = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseEnter(EventArgs e) { hoverAnim.Target = 1; base.OnMouseEnter(e); }
         protected override void OnMouseDown(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) { press = true; Invalidate(); } base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { press = false; Invalidate(); } base.OnMouseUp(e); }
         protected override void OnMouseCaptureChanged(EventArgs e) { press = false; Invalidate(); base.OnMouseCaptureChanged(e); }
@@ -585,29 +783,44 @@ namespace Gp
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
+            using (var b = new SolidBrush(Parent != null ? Parent.BackColor : Ui.Bg)) g.FillRectangle(b, ClientRectangle);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            var rect = ClientRectangle;
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            int rad = Ui.S(CornerRadius);
+            float hv = Enabled ? hoverAnim.Eased : 0f;
             Color fill1, fill2, txt;
             if (!Enabled) { fill1 = fill2 = Ui.Surface2; txt = Ui.DisabledC; }
             else if (Kind == BtnKind.Cancel) { fill1 = Ui.CancelA; fill2 = Ui.CancelB; txt = Color.White; }
             else if (Kind == BtnKind.Success) { fill1 = Ui.SuccessA; fill2 = Ui.SuccessB; txt = Color.White; }
-            else if (Kind == BtnKind.Secondary) { fill1 = Ui.Surface2; fill2 = Ui.Tint(Ui.Surface2, Color.Black, 0.25); txt = Ui.TextC; }
-            else { fill1 = Ui.Accent; fill2 = Ui.Accent2; txt = Color.White; }
+            else if (Kind == BtnKind.Secondary) { fill1 = fill2 = Ui.Lerp(Ui.Surface, Ui.Surface2, 0.6f + 0.4f * hv); txt = Ui.TextC; }
+            else { fill1 = Ui.AccentHi; fill2 = Ui.AccentLo; txt = Color.White; }
 
-            using (var lg = new LinearGradientBrush(rect, fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, Ui.S(12))) g.FillPath(lg, p);
-            if (Enabled && (Kind == BtnKind.Primary || Kind == BtnKind.Secondary))
+            if (Enabled && Kind != BtnKind.Secondary)
             {
-                if (press) Ui.FillRound(g, rect, Ui.S(12), Color.FromArgb(45, 0, 0, 0));
-                else if (hover) Ui.FillRound(g, rect, Ui.S(12), Kind == BtnKind.Primary ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(22, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B));
+                // brighten on hover, deepen on press
+                fill1 = Ui.Tint(fill1, Color.White, 0.10 * hv);
+                fill2 = Ui.Tint(fill2, Color.White, 0.10 * hv);
+                if (press) { fill1 = Ui.Tint(fill1, Color.Black, 0.14); fill2 = Ui.Tint(fill2, Color.Black, 0.14); }
             }
-            if (Enabled && Kind == BtnKind.Secondary)
-                using (var p = new Pen(hover ? Color.FromArgb(160, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B) : Ui.BorderC, 1.2f)) using (var r = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), Ui.S(11))) g.DrawPath(p, r);
-            if (Focused && Enabled) Ui.FillRound(g, rect, Ui.S(12), Color.FromArgb(34, 255, 255, 255));
-            if (Enabled) using (var p = new Pen(Color.FromArgb(52, 255, 255, 255))) g.DrawLine(p, rect.X + Ui.S(16), rect.Y + 1, rect.Right - Ui.S(16), rect.Y + 1);
-            var tf = Ui.F(11f, true);
-            TextRenderer.DrawText(g, Text.ToUpperInvariant(), tf, rect, txt,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            else if (Enabled && press) { fill1 = fill2 = Ui.Tint(fill1, Color.Black, 0.2); }
+
+            using (var lg = new LinearGradientBrush(new Rectangle(0, 0, Math.Max(1, Width), Math.Max(1, Height)), fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, rad)) g.FillPath(lg, p);
+
+            if (Kind == BtnKind.Secondary || !Enabled)
+                Ui.StrokeRound(g, rect, rad, Enabled ? Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.06), Ui.Alpha(Ui.Accent, 200), hv) : Ui.BorderC, 1f);
+            else
+            {
+                // glossy top edge + faint outline so the coloured fill reads as a raised surface
+                Ui.StrokeRound(g, rect, rad, Color.FromArgb(40, 255, 255, 255), 1f);
+                using (var p = new Pen(Color.FromArgb(70, 255, 255, 255))) g.DrawLine(p, rect.X + rad, rect.Y + 1, rect.Right - rad, rect.Y + 1);
+            }
+            if (Focused && Enabled && ShowFocusCues)
+                Ui.StrokeRound(g, Rectangle.Inflate(rect, -Ui.S(3), -Ui.S(3)), rad - Ui.S(3), Color.FromArgb(150, 255, 255, 255), 1.2f);
+
+            var textRect = rect; if (press && Enabled) textRect.Offset(0, 1);
+            TextRenderer.DrawText(g, Text, Ui.F(TextSize, true), textRect, txt,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
         }
     }
 
@@ -624,7 +837,7 @@ namespace Gp
             timer = new Timer(); timer.Interval = 16; timer.Tick += delegate
             {
                 if (Math.Abs(shown - target) < 0.5) { shown = target; timer.Stop(); }
-                else shown += (target - shown) * 0.18;
+                else shown += (target - shown) * 0.25;
                 Invalidate();
             };
         }
@@ -638,13 +851,16 @@ namespace Gp
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(Parent != null ? Parent.BackColor : Ui.Bg)) g.FillRectangle(b, ClientRectangle);
+            // Idle (0%) shows nothing at all - a permanently empty track just read as a stray divider line.
+            if (shown < 0.5 && target == 0) return;
             var r = ClientRectangle;
             Ui.FillRound(g, r, r.Height / 2, Ui.Surface2);
             int w = (int)(r.Width * shown / 100.0);
             if (w > r.Height / 2 + 1)
             {
                 var fr = new Rectangle(r.X, r.Y, w, r.Height);
-                using (var lg = new LinearGradientBrush(fr, Ui.Accent, Ui.Accent2, 0f)) using (var p = Ui.RoundPath(fr, r.Height / 2)) g.FillPath(lg, p);
+                using (var lg = new LinearGradientBrush(new Rectangle(r.X, r.Y, Math.Max(1, r.Width), r.Height), Ui.AccentLo, Ui.Accent2, 0f)) using (var p = Ui.RoundPath(fr, r.Height / 2)) g.FillPath(lg, p);
             }
         }
     }
@@ -658,28 +874,32 @@ namespace Gp
         string message = "";
         public string MessageText { get { return message; } }
         public event Action<int> ActionClicked;
-        readonly List<Button> actionButtons = new List<Button>();
+        readonly List<GradientButton> actionButtons = new List<GradientButton>();
+        readonly ToolTip tip = new ToolTip { AutoPopDelay = 15000 };
+
+        /// <summary>Action label to draw as the filled (primary) button, e.g. "Play game". Every other
+        /// action is drawn as a quiet secondary button.</summary>
+        public string PrimaryAction;
 
         public Banner()
         {
             Visible = false; TabStop = false;
+            BackColor = Ui.Surface;   // ambient colour for the action buttons' corners
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
         public void Show(BannerKind kind, string msg, params string[] buttons)
         {
             ClearActions();
             Kind = kind; message = msg ?? ""; AccessibleName = message;
-            Color fg = kind == BannerKind.Success ? Ui.OkC : kind == BannerKind.Error ? Ui.ErrC : Ui.WarnC;
+            tip.SetToolTip(this, message);   // the text may be cut short; the full message is on hover
             foreach (var text in buttons ?? new string[0])
             {
                 int index = actionButtons.Count;
-                var button = new Button();
-                button.Text = (text ?? "").ToUpperInvariant(); button.AccessibleName = text ?? "";
-                button.Font = Ui.F(8f, true); button.TabIndex = index;
-                button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderColor = fg;
-                button.BackColor = Ui.Tint(Ui.Bg, fg, 0.16); button.ForeColor = fg;
-                button.FlatAppearance.MouseOverBackColor = Ui.Tint(Ui.Bg, fg, 0.3);
-                button.UseVisualStyleBackColor = false; button.Cursor = Cursors.Hand;
+                var button = new GradientButton(text ?? "");
+                button.AccessibleName = text ?? "";
+                button.Kind = text == PrimaryAction ? GradientButton.BtnKind.Primary : GradientButton.BtnKind.Secondary;
+                button.TextSize = 8.5f; button.CornerRadius = 8;
+                button.TabIndex = index;
                 button.Click += delegate { var h = ActionClicked; if (h != null) h(index); };
                 actionButtons.Add(button); Controls.Add(button);
             }
@@ -692,15 +912,17 @@ namespace Gp
         }
         public void HideBanner() { Visible = false; ClearActions(); Invalidate(); }
         protected override void OnResize(EventArgs e) { LayoutActions(); base.OnResize(e); }
+        protected override void Dispose(bool disposing) { if (disposing) tip.Dispose(); base.Dispose(disposing); }
         void LayoutActions()
         {
             int ax = Width - Ui.S(14);
+            int bh = Ui.S(30);
             for (int i = actionButtons.Count - 1; i >= 0; i--)
             {
                 var button = actionButtons[i];
-                int bw = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding).Width + Ui.S(24);
+                int bw = TextRenderer.MeasureText(button.Text, Ui.F(button.TextSize, true), Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + Ui.S(28);
                 ax -= bw;
-                button.Bounds = new Rectangle(ax, Height / 2 - Ui.S(14), bw, Ui.S(28));
+                button.Bounds = new Rectangle(ax, Height / 2 - bh / 2, bw, bh);
                 ax -= Ui.S(8);
             }
         }
@@ -709,27 +931,55 @@ namespace Gp
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            var rect = ClientRectangle;
-            Color bg, bd, fg;
-            if (Kind == BannerKind.Success) { bg = Ui.Tint(Ui.Bg, Ui.OkC, 0.09); bd = Ui.OkBorderC; fg = Ui.OkC; }
-            else if (Kind == BannerKind.Error) { bg = Ui.Tint(Ui.Bg, Ui.ErrC, 0.09); bd = Ui.ErrBorderC; fg = Ui.ErrC; }
-            else { bg = Ui.Tint(Ui.Bg, Ui.WarnC, 0.08); bd = Ui.WarnBorderC; fg = Ui.WarnC; }
-            Ui.FillRound(g, rect, Ui.S(12), bg);
-            Ui.StrokeRound(g, rect, Ui.S(12), bd, 1f);
+            Color fg = Kind == BannerKind.Success ? Ui.OkC : Kind == BannerKind.Error ? Ui.ErrC : Ui.WarnC;
+            using (var b = new SolidBrush(Parent != null ? Parent.BackColor : Ui.Bg)) g.FillRectangle(b, ClientRectangle);
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            int rad = Ui.S(12);
 
-            string glyph = Kind == BannerKind.Success ? "\u2714" : Kind == BannerKind.Error ? "\u2718" : "!";
-            using (var b = new SolidBrush(fg)) g.DrawString(glyph, Ui.F(11, true), b, Ui.S(16), rect.Height / 2 - Ui.S(11));
+            // Same surface as the other cards; the status colour lives only in a slim accent and the badge,
+            // so a result reads as part of the window instead of a pasted-on coloured slab.
+            Ui.FillRound(g, rect, rad, Ui.Surface);
+            Ui.StrokeRound(g, rect, rad, Ui.BorderC, 1f);
+            using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
+            var stripe = new Rectangle(Ui.S(1), Ui.S(12), Ui.S(3), Math.Max(1, rect.Height - Ui.S(24)));
+            Ui.FillRound(g, stripe, Ui.S(1), fg);
 
-            var lines = message.Split('\n');
-            int lineH = Ui.S(17);
-            int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - Ui.S(12) : Width - Ui.S(14);
-            int textMaxW = Math.Max(0, textRight - Ui.S(44));
-            int ty = rect.Height / 2 - (lines.Length * lineH) / 2;
-            for (int i = 0; i < lines.Length && textMaxW > 0; i++)
+            // status badge: tinted circle with a vector mark
+            int bdg = Ui.S(28);
+            var badge = new Rectangle(Ui.S(18), rect.Height / 2 - bdg / 2, bdg, bdg);
+            using (var b = new SolidBrush(Ui.Alpha(fg, 34))) g.FillEllipse(b, badge);
+            using (var pen = new Pen(fg, Ui.S(1.8f)))
             {
-                var f = i == 0 ? Ui.F(8.75f, true) : Ui.F(8.25f, false);
-                TextRenderer.DrawText(g, lines[i], f, new Rectangle(Ui.S(44), ty + i * lineH, textMaxW, Ui.S(18)),
-                    i == 0 ? Ui.TextC : Ui.MutedC, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                pen.StartCap = pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
+                float cx = badge.X + bdg / 2f, cy = badge.Y + bdg / 2f, u = Ui.S(4.5f);
+                if (Kind == BannerKind.Success) g.DrawLines(pen, new[] { new PointF(cx - u, cy), new PointF(cx - u * 0.25f, cy + u * 0.8f), new PointF(cx + u, cy - u * 0.8f) });
+                else if (Kind == BannerKind.Error) { g.DrawLine(pen, cx - u * 0.8f, cy - u * 0.8f, cx + u * 0.8f, cy + u * 0.8f); g.DrawLine(pen, cx - u * 0.8f, cy + u * 0.8f, cx + u * 0.8f, cy - u * 0.8f); }
+                else { g.DrawLine(pen, cx, cy - u, cx, cy + u * 0.25f); using (var b = new SolidBrush(fg)) g.FillEllipse(b, cx - Ui.S(1.2f), cy + u * 0.75f, Ui.S(2.4f), Ui.S(2.4f)); }
+            }
+
+            int textX = badge.Right + Ui.S(14);
+            int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - Ui.S(16) : Width - Ui.S(16);
+            int textMaxW = Math.Max(0, textRight - textX);
+            if (textMaxW == 0) return;
+
+            const TextFormatFlags one = TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+            var head = Ui.F(8.75f, true); var body = Ui.F(8.25f, false);
+            int nl = message.IndexOf('\n');
+            if (nl >= 0)
+            {
+                // "headline\ndetail": headline on top, the rest muted underneath
+                string l1 = message.Substring(0, nl), l2 = message.Substring(nl + 1).Replace("\n", "  ");
+                int top = rect.Height / 2 - Ui.S(18);
+                TextRenderer.DrawText(g, l1, head, new Rectangle(textX, top, textMaxW, Ui.S(18)), Ui.TextC, one);
+                TextRenderer.DrawText(g, l2, body, new Rectangle(textX, top + Ui.S(19), textMaxW, Ui.S(18)), Ui.MutedC, one);
+            }
+            else
+            {
+                // one long sentence: wrap onto two lines rather than cutting it off after a few words
+                var flags = TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
+                var sz = TextRenderer.MeasureText(g, message, head, new Size(textMaxW, int.MaxValue), flags);
+                int h = Math.Min(sz.Height, Ui.S(38));
+                TextRenderer.DrawText(g, message, head, new Rectangle(textX, rect.Height / 2 - h / 2, textMaxW, h), Ui.TextC, flags);
             }
         }
     }
@@ -750,9 +1000,10 @@ namespace Gp
         public LogView()
         {
             ReadOnly = true; BorderStyle = System.Windows.Forms.BorderStyle.None;
-            BackColor = Ui.Inset; ForeColor = Ui.TextC;
+            BackColor = Ui.Surface; ForeColor = Ui.TextC;
             Font = Ui.F("Consolas", 8.75f, false);
             HideSelection = false;
+            NativeMethods.UseDarkScrollbars(this);
         }
         public void AppendLine(string msg) { AppendLine(msg, LogLevel.Info); }
 
@@ -805,11 +1056,19 @@ namespace Gp
             if (TextLength == 0) { lineCount = 0; return; }
             if (lineCount <= MaxLines) return;
 
-            // Drop the oldest lines down to half the cap, in one pass. GetFirstCharIndexFromLine is O(1),
-            // so there is no need to walk the whole buffer looking for line breaks - which this used to do
-            // twice per appended line (AppendLine called it, and so did OnTextChanged).
+            // Drop the oldest lines down to half the cap, in one pass. This runs only once every ~750
+            // appended lines, so one scan of the text here is cheap. GetFirstCharIndexFromLine is not usable:
+            // with word wrap on it counts *display* lines, so long wrapped lines made it cut far less than
+            // the counter assumed, the counter drifted low, and the buffer grew well past the cap.
             int drop = lineCount - MaxLines / 2;
-            int cut = GetFirstCharIndexFromLine(drop);
+            string all = Text;
+            int cut = 0;
+            for (int seen = 0; seen < drop; seen++)
+            {
+                int nl = all.IndexOf('\n', cut);
+                if (nl < 0) break;
+                cut = nl + 1;
+            }
             if (cut <= 0) return;
             int start = SelectionStart, end = start + SelectionLength;
             trimming = true;
@@ -821,7 +1080,7 @@ namespace Gp
                 SelectedText = "";
                 int newStart = Math.Max(0, start - cut);
                 Select(newStart, Math.Max(0, end - cut - newStart));
-                lineCount -= drop;
+                lineCount = CountLines(Text);   // resynchronise with what is actually left
             }
             finally { trimming = false; ReadOnly = wasReadOnly; }
         }

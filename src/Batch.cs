@@ -402,17 +402,18 @@ namespace Gp
 
             listCard = new AppCard();
             listCard.Bounds = new Rectangle(Pad, 116, 800 - Pad * 2, 318);
-            listCard.AllowDrop = true;
-            listCard.DragEnter += (s, e) => { e.Effect = DropHasExe(e.Data) ? DragDropEffects.Copy : DragDropEffects.None; };
-            listCard.DragOver += (s, e) => { if (DropHasExe(e.Data)) e.Effect = DragDropEffects.Copy; else if (e.Effect != DragDropEffects.None) e.Effect = DragDropEffects.None; };
-            listCard.DragDrop += (s, e) => AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
+            AcceptExeDrops(listCard);
             Controls.Add(listCard);
 
             rowsPanel = new Panel();
             rowsPanel.AutoScroll = true;
             rowsPanel.BackColor = Ui.Surface;
+            NativeMethods.UseDarkScrollbars(rowsPanel);
             rowsPanel.Bounds = new Rectangle(10, 8, listCard.Width - 20, listCard.Height - 16);
             rowsPanel.SizeChanged += delegate { LayoutRows(); };
+            // The list fills nearly the whole card, so it has to take drops itself - with only the card
+            // accepting them, files could be dropped on its thin border and nowhere else.
+            AcceptExeDrops(rowsPanel);
             listCard.Controls.Add(rowsPanel);
 
             emptyHint = new Label();
@@ -422,7 +423,8 @@ namespace Gp
             emptyHint.ForeColor = Ui.MutedC;
             emptyHint.Font = Ui.F(9f, false);
             emptyHint.Text = "Drop game .exe files here, or click “Add games…”";
-            listCard.Controls.Add(emptyHint);
+            AcceptExeDrops(emptyHint);
+            rowsPanel.Controls.Add(emptyHint);   // inside the list: as a sibling it sat hidden behind it
 
             progress = new ProgressBarLite();
             progress.Bounds = new Rectangle(Pad, 448, 560, 6);
@@ -519,7 +521,7 @@ namespace Gp
             try
             {
                 float tw = (float)g.MeasureString(title, tf).Width;
-                using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.Accent, Ui.Accent2))
+                using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.TextC, Ui.Accent2))
                     g.DrawString(title, tf, lg, new PointF(Pad, 46f), StringFormat.GenericTypographic);
             }
             catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 50), Ui.TextC, TextFormatFlags.NoPadding); }
@@ -534,6 +536,14 @@ namespace Gp
         }
 
         // ---------------------------------------------------------- list management
+
+        void AcceptExeDrops(Control c)
+        {
+            c.AllowDrop = true;
+            c.DragEnter += (s, e) => { e.Effect = DropHasExe(e.Data) ? DragDropEffects.Copy : DragDropEffects.None; };
+            c.DragOver += (s, e) => { if (DropHasExe(e.Data)) e.Effect = DragDropEffects.Copy; else if (e.Effect != DragDropEffects.None) e.Effect = DragDropEffects.None; };
+            c.DragDrop += (s, e) => AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
+        }
 
         static bool DropHasExe(IDataObject data)
         {
@@ -579,6 +589,7 @@ namespace Gp
                     row.Note("online-fix mode – AppID not needed");
                 }
                 row.Removed += OnRowRemoved;
+                AcceptExeDrops(row);
                 row.MouseEnter += (s, e) => rowTip.SetToolTip(row, full + "\n" + row.StatusHint());
                 rowsPanel.Controls.Add(row);
                 rows.Add(row);
