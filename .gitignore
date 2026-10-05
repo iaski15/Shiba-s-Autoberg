@@ -4,6 +4,7 @@
 AGENTS.md
 optimizations.md
 plan.md
+plan-shibaberg.md
 .workbuddy-ai/
 
 # Payload verification cache, written next to the exe at runtime.
