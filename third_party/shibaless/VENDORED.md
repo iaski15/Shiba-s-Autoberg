@@ -1,4 +1,9 @@
-# Vendored Steamless
+# Shibaless — our fork of Steamless
+
+Shibaless is our vendored, lightly patched copy of Steamless's unpackers, compiled into Goldberg Patcher.
+Upstream's project, namespace and file names (`Steamless.API`, `Steamless.Unpacker.*`) are deliberately
+left unchanged so the fork can be rebased; "Shibaless" is the name on our side (this folder,
+`src/Unpacker/ShibalessUnpacker.cs`, the `Shibaless` namespace, and what the app's log and UI say).
 
 - Upstream: https://github.com/atom0s/Steamless
 - Pinned commit: `cd770bf9749d3e4f438d23ac643917ad1a804257` (2024-03-29, "Bumped the copyright year of the project.")

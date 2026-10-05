@@ -13,7 +13,7 @@ using System.Security.Cryptography;
 using System.Runtime.Serialization.Json;
 using System.Xml;
 using System.Xml.Linq;
-using SteamlessNative;
+using Shibaless;
 
 namespace Gp
 {
@@ -1716,7 +1716,7 @@ namespace Gp
                 };
                 res.BackupDir = o.Backup ? backupDir : "";
 
-                // ---- unpack DRM (Steamless) ------------------------------------
+                // ---- unpack DRM (Shibaless) ------------------------------------
                 string finalExe = exePath;
                 if (o.UnpackDrm)
                 {
@@ -1731,12 +1731,12 @@ namespace Gp
                     }
                     Pct(48);
                 }
-                else Log(LogLevel.Dim, "Steamless auto-unpack disabled – skipping.");
+                else Log(LogLevel.Dim, "Shibaless auto-unpack disabled – skipping.");
                 res.FinalExe = finalExe;
                 ct.ThrowIfCancellationRequested();
 
                 // ---- re-analyze after unpack ------------------------------------
-                // Steamless rewrote the exe in place. The packed file's machine type was used above to pick the
+                // Shibaless rewrote the exe in place. The packed file's machine type was used above to pick the
                 // install target, but the dll that actually gets loaded must match what will run. Unpackers preserve
                 // architecture in practice; if the new file disagrees we trust it and warn.
                 if (res.Unpacked)
@@ -1750,7 +1750,7 @@ namespace Gp
                         if (pe2.Arch != ExeArch.Unknown)
                         {
                             pe = pe2;
-                            // The import table does not change when Steamless rewrites the exe, so the
+                            // The import table does not change when Shibaless rewrites the exe, so the
                             // imported name stands. Only the architecture-derived fallback is recomputed.
                             if (importedApi == null)
                                 preferredName = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
@@ -1921,7 +1921,7 @@ namespace Gp
 
             // Every SteamStub variant lives in a .bind section. Reading just the headers settles the common
             // DRM-free case without loading the whole exe or hashing it.
-            bool? hasStub = SteamlessUnpacker.HasStubSection(exePath);
+            bool? hasStub = ShibalessUnpacker.HasStubSection(exePath);
             if (hasStub == false)
             {
                 Log(LogLevel.Info, "No SteamStub section (.bind) – no Steam DRM to remove.");
@@ -1931,9 +1931,9 @@ namespace Gp
             var before = new FileInfo(exePath);
             long stampLength = before.Length; DateTime stampTime = before.LastWriteTimeUtc;
             UnpackResult native;
-            Log(LogLevel.Info, "SteamStub section found – unpacking with Steamless (in-process)…");
-            try { native = SteamlessUnpacker.UnpackToMemory(exePath, line => Log(LogLevel.Dim, "   " + line)); }
-            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Steamless unpack crashed: " + ex.Message); }
+            Log(LogLevel.Info, "SteamStub section found – unpacking with Shibaless…");
+            try { native = ShibalessUnpacker.UnpackToMemory(exePath, line => Log(LogLevel.Dim, "   " + line)); }
+            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Shibaless unpack crashed: " + ex.Message); }
 
             if (native != null && native.Success)
             {
@@ -1967,9 +1967,9 @@ namespace Gp
 
             // Nothing replaced the exe; the post-patch check reports the .bind that is still there.
             if (native != null && native.ErrorCode == UnpackErrorCode.UnsupportedVariant)
-                Log(LogLevel.Warn, "The exe has a .bind section, but no Steamless unpacker recognised the SteamStub variant – continuing with the original exe.");
+                Log(LogLevel.Warn, "The exe has a .bind section, but no Shibaless unpacker recognised the SteamStub variant – continuing with the original exe.");
             else if (native != null)
-                Log(LogLevel.Warn, "Steamless could not unpack the exe (" + native.Error + ") – keeping the original exe untouched.");
+                Log(LogLevel.Warn, "Shibaless could not unpack the exe (" + native.Error + ") – keeping the original exe untouched.");
             return exePath;
         }
 
@@ -2443,7 +2443,7 @@ namespace Gp
         public static List<string> Detect(string exePath)
         {
             var found = new List<string>();
-            var names = SteamlessNative.SteamlessUnpacker.ReadSectionNames(exePath);
+            var names = Shibaless.ShibalessUnpacker.ReadSectionNames(exePath);
             if (names == null) return found;
             foreach (var marker in Markers)
                 if (names.Any(n => n.StartsWith(marker.Key, StringComparison.OrdinalIgnoreCase)) && !found.Contains(marker.Value))
@@ -2538,7 +2538,7 @@ namespace Gp
             foreach (var target in stubTargets)
             {
                 string label = target == exePath ? "SteamStub DRM removed" : "SteamStub DRM removed from " + Path.GetFileName(target);
-                bool? stub = SteamlessNative.SteamlessUnpacker.HasStubSection(target);
+                bool? stub = Shibaless.ShibalessUnpacker.HasStubSection(target);
                 if (stub == true)
                     add(onlineFix ? CheckStatus.Pass : CheckStatus.Fail, label,
                         onlineFix ? "still present, which online-fix mode tolerates" : "still has its .bind stub – it will try to start through Steam");

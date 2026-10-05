@@ -140,25 +140,25 @@ function Compile($sources, $out, $extra) {
     Write-Host "built: $out"
 }
 
-# ---- vendored Steamless (third_party\steamless, see VENDORED.md) ----
-# Compiled straight into both exes; the unpackers run in-process (src\Unpacker\SteamlessUnpacker.cs).
+# ---- Shibaless: our fork of Steamless (third_party\shibaless, see VENDORED.md) ----
+# Compiled straight into both exes; the unpackers run in-process (src\Unpacker\ShibalessUnpacker.cs).
 # Left out: AssemblyInfo (it would clash with ours) and the two WPF-only view-model files no unpacker uses.
-$steamlessDir = Join-Path $root 'third_party\steamless'
+$steamlessDir = Join-Path $root 'third_party\shibaless'
 $steamlessSrc = @(Get-ChildItem -LiteralPath $steamlessDir -Recurse -File |
     Where-Object { $_.Extension -eq '.cs' -and $_.Directory.Name -ne 'Properties' -and $_.Name -ne 'ViewModelBase.cs' -and $_.Name -ne 'NavigatedEventArgs.cs' } |
     Sort-Object FullName | ForEach-Object { "`"$($_.FullName)`"" })
 # SharpDisasm (used by the 2.x unpackers) is a prebuilt upstream binary: referenced, and embedded so the
-# exe stays self-contained (deflated, 220 KB -> 71 KB) - SteamlessUnpacker resolves it from the resource.
+# exe stays self-contained (deflated, 220 KB -> 71 KB) - ShibalessUnpacker resolves it from the resource.
 $sharpDisasm = Join-Path $steamlessDir 'Steamless.Unpacker.Variant21.x86\SharpDisasm.dll'
 $sharpDisasmDeflated = Join-Path $env:TEMP ('gp_sharpdisasm_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.bin')
 Compress-File $sharpDisasm $sharpDisasmDeflated
 $steamlessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDisasm.dll.deflate")
 
 # ---- self test host (console) ----
-Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root '_selftest.exe') $steamlessArgs
+Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root '_selftest.exe') $steamlessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
-# Steamless is not in the payload: its unpackers are compiled into the exe (third_party\steamless).
+# Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (third_party\shibaless).
 # tools\steamless\ holds the official binaries only for the self-test's --corpus comparison.
 $pay = @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
 # generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
@@ -207,7 +207,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $steamlessArgs + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $steamlessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }

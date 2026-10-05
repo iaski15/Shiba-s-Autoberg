@@ -10,7 +10,7 @@ using Steamless.API.Events;
 using Steamless.API.Model;
 using Steamless.API.Services;
 
-namespace SteamlessNative
+namespace Shibaless
 {
     public enum UnpackErrorCode
     {
@@ -39,15 +39,15 @@ namespace SteamlessNative
         public string SourceSha256 { get; internal set; }
     }
 
-    /// <summary>Runs the vendored Steamless unpackers (third_party/steamless) in-process. Steamless does the
+    /// <summary>Runs Shibaless - our fork of the Steamless unpackers (third_party/shibaless) - in-process. The fork does the
     /// unpacking; this class only picks the unpacker, keeps the result in memory, and adds the guards that
     /// decide whether the result may replace the game's exe.</summary>
-    public static class SteamlessUnpacker
+    public static class ShibalessUnpacker
     {
         static readonly object sharpDisasmLock = new object();
         static Assembly sharpDisasm;
 
-        static SteamlessUnpacker()
+        static ShibalessUnpacker()
         {
             // The 2.x unpackers use SharpDisasm, which upstream ships only as a binary. It is embedded in this
             // exe as a deflated resource and handed to the runtime the first time a 2.x unpacker needs it.
@@ -57,7 +57,7 @@ namespace SteamlessNative
                 lock (sharpDisasmLock)
                 {
                     if (sharpDisasm != null) return sharpDisasm;
-                    using (var res = typeof(SteamlessUnpacker).Assembly.GetManifestResourceStream("SharpDisasm.dll.deflate"))
+                    using (var res = typeof(ShibalessUnpacker).Assembly.GetManifestResourceStream("SharpDisasm.dll.deflate"))
                     {
                         if (res == null) return null;
                         var ms = new MemoryStream();
@@ -219,7 +219,7 @@ namespace SteamlessNative
             if (result.Unpacker == null)
             {
                 result.ErrorCode = UnpackErrorCode.UnsupportedVariant;
-                result.Error = "No Steamless unpacker recognised the SteamStub variant.";
+                result.Error = "No Shibaless unpacker recognised the SteamStub variant.";
             }
             return result;
         }

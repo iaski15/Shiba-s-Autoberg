@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using Gp;
-using SteamlessNative;
+using Shibaless;
 
 static class TestMain
 {
@@ -23,7 +23,7 @@ static class TestMain
         return SelfTest();
     }
 
-    /// <summary>Differential check of the in-process Steamless fork (third_party/steamless) against the official
+    /// <summary>Differential check of Shibaless, our in-process Steamless fork (third_party/shibaless), against the official
     /// Steamless.CLI binary on real games: proves our patch to the fork changed nothing but where the output
     /// goes. Every exe under the folder that carries a .bind section is COPIED to a temp folder first - the
     /// CLI writes its output beside its input, and nothing may be written into a game install - then unpacked
@@ -43,11 +43,11 @@ static class TestMain
             catch (Exception ex) { Console.WriteLine("cannot list " + dir + ": " + ex.Message); return 2; }
             foreach (string exe in files)
             {
-                if (SteamlessUnpacker.HasStubSection(exe) != true) continue;
+                if (ShibalessUnpacker.HasStubSection(exe) != true) continue;
                 total++;
                 string copy = Path.Combine(work, total + "_" + Path.GetFileName(exe));
                 File.Copy(exe, copy);
-                var native = SteamlessUnpacker.UnpackToMemory(copy);   // in-process fork
+                var native = ShibalessUnpacker.UnpackToMemory(copy);   // in-process fork
                 var psi = new System.Diagnostics.ProcessStartInfo(cli, "\"" + copy + "\"")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli) };
                 string cliOut;
@@ -183,7 +183,7 @@ static class TestMain
         }
         finally { try { File.Delete(junkPath); } catch { } }
 
-        Console.WriteLine("\n[Steamless fork, in-process]");
+        Console.WriteLine("\n[Shibaless (Steamless fork), in-process]");
         string nativeDir = Path.Combine(Path.GetTempPath(), "gp_selftest_native_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(nativeDir);
         try
@@ -194,7 +194,7 @@ static class TestMain
                 string packed = Path.Combine(nativeDir, "stub31-" + architecture + ".exe");
                 WriteSteamStub31(packed, is64);
                 var lines = new List<string>();
-                UnpackResult unpackedResult = SteamlessUnpacker.UnpackToMemory(packed, lines.Add);
+                UnpackResult unpackedResult = ShibalessUnpacker.UnpackToMemory(packed, lines.Add);
                 Check(unpackedResult.Success && unpackedResult.ErrorCode == UnpackErrorCode.None
                       && unpackedResult.Unpacker != null && unpackedResult.Unpacker.Contains("3.1") && unpackedResult.Unpacker.Contains(architecture),
                       "synthetic Variant 3.1 " + architecture + " is claimed and unpacked by the 3.1 " + architecture + " unpacker",
@@ -205,7 +205,7 @@ static class TestMain
                 if (unpackedResult.Output != null) File.WriteAllBytes(unpacked, unpackedResult.Output);
                 Check(File.Exists(unpacked) && PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
                       "synthetic Variant 3.1 " + architecture + " output PE", null);
-                UnpackResult negative = SteamlessUnpacker.UnpackToMemory(unpacked);
+                UnpackResult negative = ShibalessUnpacker.UnpackToMemory(unpacked);
                 Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && negative.Output == null,
                       "already-unpacked " + architecture + " negative control", negative.Error);
             }
@@ -214,7 +214,7 @@ static class TestMain
             try { disasm = System.Reflection.Assembly.Load(new System.Reflection.AssemblyName("SharpDisasm")); } catch { }
             Check(disasm != null && disasm.Location == "" && disasm.GetType("SharpDisasm.Disassembler") != null,
                   "SharpDisasm resolves from the embedded resource", disasm == null ? "(not found)" : disasm.Location);
-            UnpackResult missingResult = SteamlessUnpacker.UnpackToMemory(Path.Combine(nativeDir, "missing.exe"));
+            UnpackResult missingResult = ShibalessUnpacker.UnpackToMemory(Path.Combine(nativeDir, "missing.exe"));
             Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput && missingResult.Output == null,
                   "missing input returns a structured result", missingResult.Error);
 
@@ -225,19 +225,19 @@ static class TestMain
             WriteNativeX64Pe(probePlain);
             string probeJunk = Path.Combine(nativeDir, "probe-junk.exe");
             File.WriteAllBytes(probeJunk, new byte[] { 0x4D, 0x5A, 0, 0 });
-            Check(SteamlessUnpacker.HasStubSection(probePacked) == true
-                  && SteamlessUnpacker.HasStubSection(probePlain) == false
-                  && SteamlessUnpacker.HasStubSection(probeJunk) == null
-                  && SteamlessUnpacker.HasStubSection(Path.Combine(nativeDir, "nope.exe")) == null,
+            Check(ShibalessUnpacker.HasStubSection(probePacked) == true
+                  && ShibalessUnpacker.HasStubSection(probePlain) == false
+                  && ShibalessUnpacker.HasStubSection(probeJunk) == null
+                  && ShibalessUnpacker.HasStubSection(Path.Combine(nativeDir, "nope.exe")) == null,
                   "header-only .bind probe: packed / plain / junk / missing", null);
 
             // in-memory unpack hands back the image and a hash of exactly what it read - and writes nothing
             int filesBefore = Directory.GetFiles(nativeDir).Length;
-            UnpackResult inMemory = SteamlessUnpacker.UnpackToMemory(probePacked);
+            UnpackResult inMemory = ShibalessUnpacker.UnpackToMemory(probePacked);
             Check(inMemory.Success && inMemory.Output != null && inMemory.SourceSha256 == SafePersistence.Hash(probePacked)
                   && Directory.GetFiles(nativeDir).Length == filesBefore,
                   "UnpackToMemory returns output and the source hash, writes nothing", inMemory.Error);
-            Check(SteamlessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
+            Check(ShibalessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
                   && SafePersistence.Hash(inMemory.Output) != inMemory.SourceSha256,
                   "in-memory output differs from the packed input", null);
 
@@ -248,7 +248,7 @@ static class TestMain
                 new Random(is64 ? 64 : 32).NextBytes(plain);
                 string enc = Path.Combine(nativeDir, "encrypted-" + (is64 ? "x64" : "x86") + ".exe");
                 WriteSteamStub31(enc, is64, true, plain);
-                var dec = SteamlessUnpacker.UnpackToMemory(enc);
+                var dec = ShibalessUnpacker.UnpackToMemory(enc);
                 bool ok = dec.Success && dec.Output.Length >= 0x400 + 0x200;
                 int expected = is64 ? 0x210 : 0x200;   // x64 writes stolen+section, x86 truncates to the section
                 for (int i = 0; ok && i < expected; i++) ok = dec.Output[0x400 + i] == plain[i];
@@ -258,7 +258,7 @@ static class TestMain
             // output guard: an entry point outside executable code is refused, not shipped
             string noExec = Path.Combine(nativeDir, "noexec.exe");
             WriteSteamStub31(noExec, true, false);
-            UnpackResult guarded = SteamlessUnpacker.UnpackToMemory(noExec);
+            UnpackResult guarded = ShibalessUnpacker.UnpackToMemory(noExec);
             Check(!guarded.Success && guarded.ErrorCode == UnpackErrorCode.OutputValidationFailed && guarded.Output == null,
                   "entry point in a non-executable section fails output validation", guarded.Error);
 
@@ -273,7 +273,7 @@ static class TestMain
                 W32(packedBytes, certEntry, (uint)packedBytes.Length);
                 W32(packedBytes, certEntry + 4, (uint)overlay.Length);
                 File.WriteAllBytes(withOverlay, packedBytes.Concat(overlay).ToArray());
-                UnpackResult moved = SteamlessUnpacker.UnpackToMemory(withOverlay);
+                UnpackResult moved = ShibalessUnpacker.UnpackToMemory(withOverlay);
                 bool ok = moved.Success;
                 if (ok)
                 {
@@ -295,7 +295,7 @@ static class TestMain
             string exe = Path.Combine(gameDir, "Packed.exe");
             WriteSteamStub31(exe, true);
             string packedHash = SafePersistence.Hash(exe);
-            string expectedUnpacked = SafePersistence.Hash(SteamlessUnpacker.UnpackToMemory(exe).Output);
+            string expectedUnpacked = SafePersistence.Hash(ShibalessUnpacker.UnpackToMemory(exe).Output);
             var prunner = new PatchRunner();
             var plog = new List<string>();
             prunner.LogLine += e => plog.Add(e.Message);
@@ -304,7 +304,7 @@ static class TestMain
             Check(SafePersistence.Hash(exe) == expectedUnpacked, "exe on disk is exactly the in-memory output", null);
             Check(!Directory.GetFiles(gameDir, "*.unpacked.exe").Any(), "no temporary .unpacked.exe is left behind", null);
             Check(plog.Any(l => l.Contains("SteamStub Variant 3.1")),
-                  "the Steamless unpacker's own log lines reach the patch log", null);
+                  "the Shibaless unpacker's own log lines reach the patch log", null);
             var exeWrite = pres.Writes.FirstOrDefault(w => string.Equals(w.Destination, Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase));
             Check(exeWrite != null && exeWrite.PreviousHash == packedHash && exeWrite.StagedHash == expectedUnpacked
                   && exeWrite.ExternalRecovery && File.Exists(exeWrite.RecoveryPath) && SafePersistence.Hash(exeWrite.RecoveryPath) == packedHash,
@@ -382,7 +382,7 @@ static class TestMain
 
             var uer = new PatchRunner();
             var ueRes = uer.Run(new PatchOptions { GameExe = launcher, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
-            Check(ueRes.Success && SteamlessUnpacker.HasStubSection(ship) == false,
+            Check(ueRes.Success && ShibalessUnpacker.HasStubSection(ship) == false,
                   "Unreal: patching the launcher also unpacks the -Shipping exe", ueRes.Summary);
             Check(InstallCheck.IsEmulatorDll(Path.Combine(sdkDir, "steam_api64.dll")) && !File.Exists(Path.Combine(ue, "steam_api64.dll"))
                   && ueRes.FirstFailedCheck == null,

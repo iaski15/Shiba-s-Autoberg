@@ -641,7 +641,7 @@ namespace Gp
                 Ui.SectionLabel(g, "OPTIONS", new Point(Ui.S(22), Ui.S(14)));
             };
 
-            tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
+            tUnpack = new Toggle("Auto-unpack Steam DRM (Shibaless)", settings.UnpackDrm);
             tBackup = new Toggle("Back up replaced files", settings.Backup);
             tAppid = new Toggle("Write steam_appid.txt", settings.WriteAppIdTxt);
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
