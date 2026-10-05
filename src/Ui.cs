@@ -443,7 +443,7 @@ namespace Gp
     {
         public event Action<string> FileChosen;
         string gamePath = "";
-        string archChip = "", sizeChip = "", apiChip = "";
+        string archChip = "", sizeChip = "", apiChip = "", warnChip = "";
         int apiState = 0; // 0 warn, 1 ok
         bool dragOver = false;
         bool overChange = false;
@@ -477,14 +477,16 @@ namespace Gp
 
         public void ClearGame()
         {
-            gamePath = ""; archChip = sizeChip = apiChip = ""; apiState = 0;
+            gamePath = ""; archChip = sizeChip = apiChip = warnChip = ""; apiState = 0;
             if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
             Invalidate();
         }
 
-        public void UpdateAnalysis(string arch, string size, string api, int state)
+        public void UpdateAnalysis(string arch, string size, string api, int state, string warning = null)
         {
-            archChip = arch ?? ""; sizeChip = size ?? ""; apiChip = api ?? ""; apiState = state; Invalidate();
+            archChip = arch ?? ""; sizeChip = size ?? ""; apiChip = api ?? ""; apiState = state;
+            if (warning != null) warnChip = warning;
+            Invalidate();
         }
 
         static Bitmap LoadFileIcon(string path)
@@ -652,6 +654,8 @@ namespace Gp
                     Ui.DrawChip(g, ref cx, cy, Ui.S(22), archChip, Ui.Accent2, Ui.Tint(Ui.Surface2, Ui.Accent, 0.20), null);
                 if (!string.IsNullOrEmpty(sizeChip))
                     Ui.DrawChip(g, ref cx, cy, Ui.S(22), sizeChip, Ui.MutedC, Ui.Surface2, Ui.BorderC);
+                if (!string.IsNullOrEmpty(warnChip))
+                    Ui.DrawChip(g, ref cx, cy, Ui.S(22), warnChip, Ui.ErrC, Ui.Tint(Ui.Surface2, Ui.ErrC, 0.12), Ui.Tint(Ui.Surface2, Ui.ErrC, 0.30));
                 if (!string.IsNullOrEmpty(apiChip))
                 {
                     var col = apiState == 1 ? Ui.OkC : Ui.WarnC;

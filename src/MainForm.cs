@@ -894,7 +894,14 @@ namespace Gp
                 archChip = "INVALID EXE"; sizeChip = "";
             }
 
-            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0);
+            var protections = ProtectionScan.Detect(path);
+            string companion = PatchRunner.UnrealCompanion(path);
+            if (companion != null) protections.AddRange(ProtectionScan.Detect(companion).Where(x => !protections.Contains(x)));
+            string warnChip = protections.Count > 0 ? string.Join(" + ", protections.ToArray()).ToUpperInvariant() : "";
+            if (protections.Count > 0)
+                Log(LogLevel.Warn, string.Join(" and ", protections.ToArray()) + " detected – the emulator cannot remove "
+                    + (protections.Count == 1 ? "this protection" : "these protections") + "; the game may refuse to start offline.");
+            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0, warnChip);
 
             // deep scan can take a moment on big installs – run it off the UI thread
             int gen = ++selectGeneration;

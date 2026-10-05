@@ -17,7 +17,110 @@ static class TestMain
         else { fail++; Console.WriteLine("  FAIL  " + name + (string.IsNullOrEmpty(detail) ? "" : "   -> " + detail)); }
     }
 
-    static int Main()
+    static int Main(string[] args)
+    {
+        if (args != null && args.Length == 2 && args[0] == "--corpus") return Corpus(args[1]);
+        return SelfTest();
+    }
+
+    /// <summary>Differential check of the built-in unpacker against the real Steamless CLI on real games.
+    /// Every exe under the folder that carries a .bind section is COPIED to a temp folder first - Steamless
+    /// writes its output beside its input, and nothing may be written into a game install - then unpacked
+    /// both ways and compared byte for byte. Exit 0 = every comparable exe identical.</summary>
+    static int Corpus(string dir)
+    {
+        string root = AppDomain.CurrentDomain.BaseDirectory;
+        string cli = Path.Combine(root, @"steamless\Steamless.CLI.exe");
+        if (!Directory.Exists(dir) || !File.Exists(cli)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>  (needs steamless\\ beside it)"); return 2; }
+        string work = Path.Combine(Path.GetTempPath(), "gp_corpus_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(work);
+        int same = 0, differ = 0, nativeOnlyFail = 0, cliFail = 0, total = 0;
+        try
+        {
+            IEnumerable<string> files;
+            try { files = Directory.EnumerateFiles(dir, "*.exe", SearchOption.AllDirectories).ToList(); }
+            catch (Exception ex) { Console.WriteLine("cannot list " + dir + ": " + ex.Message); return 2; }
+            foreach (string exe in files)
+            {
+                if (SteamlessUnpacker.HasStubSection(exe) != true) continue;
+                total++;
+                string copy = Path.Combine(work, total + "_" + Path.GetFileName(exe));
+                File.Copy(exe, copy);
+                var native = SteamlessUnpacker.UnpackToMemory(copy);
+                var psi = new System.Diagnostics.ProcessStartInfo(cli, "\"" + copy + "\"")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli) };
+                string cliOut;
+                using (var p = System.Diagnostics.Process.Start(psi)) { cliOut = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd(); p.WaitForExit(); }
+                string cliPath = copy + ".unpacked.exe";
+                byte[] cliBytes = File.Exists(cliPath) ? File.ReadAllBytes(cliPath) : null;
+                string variant = native.Variant != null ? native.Variant.Name
+                    : (cliOut.Split('\n').FirstOrDefault(l => l.IndexOf("variant", StringComparison.OrdinalIgnoreCase) >= 0) ?? "?").Trim();
+                string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
+                if (cliBytes == null)
+                {
+                    cliFail++;
+                    Console.WriteLine("  CLI-FAIL  " + label + "  [" + variant + "]  native: " + (native.Success ? "ok" : native.Error));
+                }
+                else if (!native.Success)
+                {
+                    nativeOnlyFail++;
+                    Console.WriteLine("  NATIVE-FAIL " + label + "  [" + variant + "]  " + native.ErrorCode + ": " + native.Error);
+                }
+                else if (native.Output.SequenceEqual(cliBytes))
+                {
+                    same++;
+                    Console.WriteLine("  SAME      " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0") + " bytes");
+                }
+                else if (OnlyCertificatePointerDiffers(native.Output, cliBytes))
+                {
+                    // Deliberate: the built-in unpacker moves the certificate-table pointer along with the
+                    // overlay when .bind is dropped; Steamless leaves it pointing at the old offset.
+                    same++;
+                    Console.WriteLine("  SAME*     " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0")
+                        + " bytes (*except the certificate pointer, which only the built-in unpacker relocates)");
+                }
+                else
+                {
+                    differ++;
+                    int n = Math.Min(native.Output.Length, cliBytes.Length), at = 0;
+                    while (at < n && native.Output[at] == cliBytes[at]) at++;
+                    int diffs = 0; for (int i = 0; i < n; i++) if (native.Output[i] != cliBytes[i]) diffs++;
+                    Console.WriteLine("  DIFFER    " + label + "  [" + variant + "]  native " + native.Output.Length.ToString("N0")
+                        + " vs cli " + cliBytes.Length.ToString("N0") + " bytes; first diff at 0x" + at.ToString("X") + ", " + diffs.ToString("N0") + " differing bytes");
+                    // contiguous differing ranges, with both sides' bytes
+                    int shown = 0;
+                    for (int i = 0; i < n && shown < 6; i++)
+                    {
+                        if (native.Output[i] == cliBytes[i]) continue;
+                        int j = i; while (j < n && j - i < 32 && native.Output[j] != cliBytes[j]) j++;
+                        Console.WriteLine("            @0x" + i.ToString("X") + " len " + (j - i) + "  native " + BitConverter.ToString(native.Output, i, j - i)
+                            + "  cli " + BitConverter.ToString(cliBytes, i, j - i));
+                        shown++; i = j;
+                    }
+                }
+                try { File.Delete(copy); File.Delete(cliPath); } catch { }
+            }
+        }
+        finally { try { Directory.Delete(work, true); } catch { } }
+        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} built-in-only failures (CLI handled them), {4} the CLI could not unpack.",
+            total, same, differ, nativeOnlyFail, cliFail));
+        return differ == 0 ? 0 : 1;
+    }
+
+    static bool OnlyCertificatePointerDiffers(byte[] a, byte[] b)
+    {
+        if (a.Length != b.Length || a.Length < 0x40) return false;
+        int nt = BitConverter.ToInt32(a, 0x3C);
+        if (nt < 0 || nt + 26 > a.Length) return false;
+        int opt = nt + 24;
+        bool is64 = BitConverter.ToUInt16(a, opt) == 0x20B;
+        int certOffsetField = opt + (is64 ? 112 : 96) + 4 * 8;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i] != b[i] && (i < certOffsetField || i >= certOffsetField + 4)) return false;
+        return true;
+    }
+
+    static int SelfTest()
     {
         // The pipeline tests below run the real PatchRunner, which persists an undo journal. Redirect it
         // to a throwaway file for the whole run: otherwise the self-test clobbers a real pending undo and
@@ -140,6 +243,20 @@ static class TestMain
             Check(SteamlessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
                   && SafePersistence.Hash(inMemory.Output) != inMemory.SourceSha256,
                   "in-memory output differs from the packed input", null);
+
+            // real code-section decryption, including the ECB-encrypted IV (the v0.5 bug)
+            foreach (bool is64 in new[] { true, false })
+            {
+                var plain = new byte[0x210];
+                new Random(is64 ? 64 : 32).NextBytes(plain);
+                string enc = Path.Combine(nativeDir, "encrypted-" + (is64 ? "x64" : "x86") + ".exe");
+                WriteSteamStub31(enc, is64, true, plain);
+                var dec = SteamlessUnpacker.UnpackToMemory(enc);
+                bool ok = dec.Success && dec.Output.Length >= 0x400 + 0x200;
+                int expected = is64 ? 0x210 : 0x200;   // x64 writes stolen+section, x86 truncates to the section
+                for (int i = 0; ok && i < expected; i++) ok = dec.Output[0x400 + i] == plain[i];
+                Check(ok, "encrypted code section decrypts exactly, first block included (" + (is64 ? "x64" : "x86") + ")", dec.Error);
+            }
 
             // output guard: an entry point outside executable code is refused, not shipped
             string noExec = Path.Combine(nativeDir, "noexec.exe");
@@ -275,6 +392,18 @@ static class TestMain
                   "Unreal: the emulator goes into Engine\\...\\Steamworks, not beside the launcher, and the check passes",
                   string.Join(" | ", ueRes.Checks.Select(i => i.ToString()).ToArray()));
             Recovery.RollbackWrites(ueRes.Writes, (l, m) => { });
+
+            // pre-flight protection scan from section names only
+            string vmp = Path.Combine(icWork, "vmp.exe");
+            WriteSteamStub31(vmp, true);
+            byte[] vmpBytes = File.ReadAllBytes(vmp);
+            int bindAt = Encoding.ASCII.GetString(vmpBytes).IndexOf(".bind", StringComparison.Ordinal);
+            Encoding.ASCII.GetBytes(".vmp1").CopyTo(vmpBytes, bindAt);
+            File.WriteAllBytes(vmp, vmpBytes);
+            var vmpFound = ProtectionScan.Detect(vmp);
+            Check(vmpFound.Count == 1 && vmpFound[0] == "VMProtect" && ProtectionScan.Detect(gse64).Count == 0
+                  && ProtectionScan.Detect(Path.Combine(icWork, "nope.exe")).Count == 0,
+                  "protection pre-flight: VMProtect section found, clean dll and missing file report nothing", string.Join(",", vmpFound.ToArray()));
 
             string stubDir = Directory.CreateDirectory(Path.Combine(icWork, "stub")).FullName;
             WriteSteamStub31(Path.Combine(stubDir, "Game.exe"), true);
@@ -1212,7 +1341,10 @@ static class TestMain
     static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
     static void W64(byte[] b, int off, ulong v) { W32(b, off, (uint)v); W32(b, off + 4, (uint)(v >> 32)); }
 
-    static void WriteSteamStub31(string path, bool is64, bool executableText = true)
+    /// <param name="plainCode">When set (0x210 bytes), the code section is genuinely AES-encrypted the way
+    /// SteamStub 3.1 does it: CBC over stolen-block + section, with the header holding the IV ECB-encrypted
+    /// under the same key. Unpacking must give these bytes back exactly.</param>
+    static void WriteSteamStub31(string path, bool is64, bool executableText = true, byte[] plainCode = null)
     {
         var b = new byte[0x1600];
         W16(b, 0x00, 0x5A4D);
@@ -1295,6 +1427,21 @@ static class TestMain
             W32(header, 76, 0);
             W32(header, 80, 0x200);
             W32(header, 84, 0);
+        }
+        if (plainCode != null)
+        {
+            var aesKey = new byte[32]; for (int i = 0; i < 32; i++) aesKey[i] = (byte)(i * 7 + 3);
+            var ivReal = new byte[16]; for (int i = 0; i < 16; i++) ivReal[i] = (byte)(0xA0 + i);
+            byte[] cipher, ivStored;
+            using (var aes = new System.Security.Cryptography.AesManaged { Key = aesKey, IV = ivReal, Mode = System.Security.Cryptography.CipherMode.CBC, Padding = System.Security.Cryptography.PaddingMode.None })
+            using (var enc = aes.CreateEncryptor()) cipher = enc.TransformFinalBlock(plainCode, 0, plainCode.Length);
+            using (var ecb = new System.Security.Cryptography.AesManaged { Key = aesKey, Mode = System.Security.Cryptography.CipherMode.ECB, Padding = System.Security.Cryptography.PaddingMode.None })
+            using (var enc = ecb.CreateEncryptor()) ivStored = enc.TransformFinalBlock(ivReal, 0, 16);
+            W32(header, 60, 0);                                  // flags: code section IS encrypted
+            Array.Copy(aesKey, 0, header, 88, 32);
+            Array.Copy(ivStored, 0, header, 120, 16);
+            Array.Copy(cipher, 0, header, 136, 16);              // the "stolen" first block
+            Array.Copy(cipher, 16, b, 0x400, cipher.Length - 16); // the rest lives in .text
         }
         uint key = 0x12345678;
         for (int i = 4; i < header.Length; i += 4)

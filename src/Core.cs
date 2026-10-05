@@ -1724,6 +1724,10 @@ namespace Gp
                     Path.GetFileName(exePath), pe.MachineText, Math.Max(pe.SizeBytes / 1048576.0, 0.01)));
                 if (pe.Arch == ExeArch.Unknown)
                     throw new Exception("Unknown CPU architecture – cannot pick a matching steam_api dll.");
+                foreach (var target in new[] { exePath, UnrealCompanion(exePath) }.Where(t => t != null))
+                    foreach (var protection in ProtectionScan.Detect(target))
+                        Log(LogLevel.Warn, protection + " detected on " + Path.GetFileName(target)
+                            + " – the emulator replaces Steam's API but cannot remove this protection; the game may refuse to start offline.");
 
                 // ---- locate steam api install dir ------------------------------
                 Pct(8);
@@ -2641,6 +2645,32 @@ namespace Gp
     // --------------------------------------------------------------------- batch patching
 
     /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
+    /// <summary>Pre-flight: protections the emulator cannot get past, recognised from the section table
+    /// alone (a header read, no full-file scan). Only protectors with fixed, documented section names are
+    /// listed; Denuvo and Arxan have no reliable structural marker and are deliberately not guessed at - a
+    /// false "Denuvo detected" would stop people patching games that would have worked.</summary>
+    public static class ProtectionScan
+    {
+        static readonly KeyValuePair<string, string>[] Markers =
+        {
+            new KeyValuePair<string, string>(".vmp", "VMProtect"),
+            new KeyValuePair<string, string>(".themida", "Themida"),
+            new KeyValuePair<string, string>(".winlice", "WinLicense"),
+            new KeyValuePair<string, string>(".enigma", "Enigma Protector"),
+        };
+
+        public static List<string> Detect(string exePath)
+        {
+            var found = new List<string>();
+            var names = SteamlessNative.SteamlessUnpacker.ReadSectionNames(exePath);
+            if (names == null) return found;
+            foreach (var marker in Markers)
+                if (names.Any(n => n.StartsWith(marker.Key, StringComparison.OrdinalIgnoreCase)) && !found.Contains(marker.Value))
+                    found.Add(marker.Value);
+            return found;
+        }
+    }
+
     public enum CheckStatus { Pass, Warn, Fail }
 
     public sealed class InstallCheckItem

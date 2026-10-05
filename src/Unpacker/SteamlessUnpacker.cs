@@ -89,6 +89,16 @@ namespace SteamlessNative
         /// read or is not a PE, so callers can fall back to a full check.</summary>
         public static bool? HasStubSection(string filePath)
         {
+            var names = ReadSectionNames(filePath);
+            if (names == null) return null;
+            foreach (var n in names) if (n == ".bind") return true;
+            return false;
+        }
+
+        /// <summary>Section names from the PE section table, reading only the headers. Null when the file
+        /// cannot be read or is not a PE.</summary>
+        public static List<string> ReadSectionNames(string filePath)
+        {
             try
             {
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096))
@@ -106,14 +116,14 @@ namespace SteamlessNative
                     var sections = new byte[count * 40];
                     fs.Position = table;
                     if (ReadFully(fs, sections) != sections.Length) return null;
+                    var names = new List<string>(count);
                     for (int i = 0; i < count; i++)
                     {
-                        int o = i * 40;
-                        if (sections[o] == '.' && sections[o + 1] == 'b' && sections[o + 2] == 'i' && sections[o + 3] == 'n'
-                            && sections[o + 4] == 'd' && sections[o + 5] == 0)
-                            return true;
+                        int len = 0;
+                        while (len < 8 && sections[i * 40 + len] != 0) len++;
+                        names.Add(Encoding.ASCII.GetString(sections, i * 40, len));
                     }
-                    return false;
+                    return names;
                 }
             }
             catch { return null; }
@@ -303,10 +313,23 @@ namespace SteamlessNative
                 Buffer.BlockCopy(image.Data, (int)codeSection.PointerToRawData, combined, header.CodeSectionStolenData.Length, codeLength);
                 try
                 {
+                    // The header stores the IV encrypted: it has to be AES-ECB-decrypted with the same key before
+                    // the CBC pass. Using it raw only corrupts the first 16-byte block - which is exactly the
+                    // start of the code section, so the result parsed fine and crashed in its first function.
+                    // Found by the --corpus differential run against Steamless on real games.
+                    byte[] iv;
+                    using (AesManaged ecb = new AesManaged())
+                    {
+                        ecb.Key = header.AesKey;
+                        ecb.Mode = CipherMode.ECB;
+                        ecb.Padding = PaddingMode.None;
+                        using (ICryptoTransform d = ecb.CreateDecryptor())
+                            iv = d.TransformFinalBlock(header.AesIv, 0, 16);
+                    }
                     using (AesManaged aes = new AesManaged())
                     {
                         aes.Key = header.AesKey;
-                        aes.IV = header.AesIv;
+                        aes.IV = iv;
                         aes.Mode = CipherMode.CBC;
                         aes.Padding = PaddingMode.None;
                         using (ICryptoTransform decryptor = aes.CreateDecryptor())
