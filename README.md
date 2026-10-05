@@ -7,9 +7,9 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 ## Features
 
 - **Automatic game analysis** — detects x86/x64 (including .NET AnyCPU executables) from PE headers, and reads the executable's import table to install the emulator under the exact name the loader will ask for
-- **DRM unpacking** — uses [Steamless](https://github.com/atom0s/Steamless) to automatically unpack common Steam DRM variants so the game runs without Steam
+- **DRM unpacking** — removes SteamStub DRM (every variant Steamless handles, 1.0 to 3.1) with [Steamless](https://github.com/atom0s/Steamless), compiled into the app and run in-process: no helper process, no temporary `.unpacked.exe`, and the result is validated before it replaces the game exe
 - **Backup & restore** — originals are saved to `<game>\goldberg_backup\sources\<pathhash>\`; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from that backup tree
-- **Interface generation** — runs GSE's `generate_interfaces` tool against the *original* dll so the emulator responds to exactly the interfaces the game requests
+- **Interface generation** — scans the *original* dll for its interface versions (what GSE's `generate_interfaces` does, in-process) so the emulator responds to exactly the interfaces the game requests
 - **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
 - **Undo** — every write is journalled, so a patch that fails or is cancelled part-way can be rolled back; "Undo last patch" also works after a restart
@@ -24,7 +24,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| Unpack DRM (Steamless) | on | Runs Steamless on the exe to remove Steam DRM |
+| Unpack DRM (Steamless) | on | Removes SteamStub DRM from the exe (skipped instantly when it has no `.bind` section) |
 | Backup originals | on | Copies replaced files to `goldberg_backup\sources\` before overwriting |
 | Write steam_appid.txt | on | Writes the AppID next to the dlls and beside the game exe |
 | Create steam_settings folder | off | Creates a settings folder from GSE's examples, ready for custom configs |
@@ -61,7 +61,7 @@ Goldberg Patcher.exe --verify-payload
 - `--check` verifies an already-patched install without changing anything: SteamStub removed, the Steamworks library the game actually loads is the emulator (or Valve's original for online-fix, inferred when every `steam_appid.txt` says 480 and no library is the emulator), architecture match, and the AppID. The same check runs automatically after every patch.
 - Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
 
-For development, `_selftest.exe --corpus <folder>` compares the built-in SteamStub unpacker against the Steamless CLI on every protected exe under a folder (it works on temp copies and never writes into the folder).
+For development, `_selftest.exe --corpus <folder>` unpacks every SteamStub exe under a folder with the in-process Steamless fork **and** with the official Steamless CLI (`tools\steamless\`), and compares the results byte for byte (it works on temp copies and never writes into the folder). `SAME*` means only the certificate-table pointer differs: we move it with the overlay, upstream leaves it stale.
 
 ## Building from source
 
@@ -86,7 +86,7 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 .\_live_test.ps1       # patches a throwaway game under %TEMP% and asserts the artifacts
 ```
 
-`_live_test.ps1` exercises the real pipeline end to end: it patches a copy of the Steamless CLI standing in for a game exe, then asserts the exit code, `steam_appid.txt`, the dll replacement, the hash-verified backup, the absence of `.gp-recovery` litter, a rollback-ready journal, the retained recovery copy, and payload self-repair. It exits non-zero on failure, so it can gate a build.
+`_live_test.ps1` exercises the real pipeline end to end: it patches a copy of a small .NET exe (the official Steamless CLI from `tools\steamless\`) standing in for a game exe, then asserts the exit code, `steam_appid.txt`, the dll replacement, the hash-verified backup, the absence of `.gp-recovery` litter, a rollback-ready journal, the retained recovery copy, and payload self-repair. It exits non-zero on failure, so it can gate a build.
 
 ## Repository layout
 
@@ -94,7 +94,8 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 src/                      C# sources (Core.cs = patch pipeline + PE reader, Ui.cs, MainForm.cs, Batch.cs)
 Goldberg Patcher.exe      built GUI app (self-contained) – build output, not tracked
 _selftest.exe             built console self-test – build output, not tracked
-steamless/                Steamless CLI + unpacker plugins (DRM removal)
+third_party/steamless/    vendored Steamless source (API + 7 unpackers), compiled into the app; see VENDORED.md
+tools/steamless/          official Steamless binaries – only for --corpus and as a test fixture, not shipped
 release/regular/          Goldberg emulator steam_api.dll / steam_api64.dll
 release/experimental/     experimental GSE builds (CPY dll crack support, overlay)
 release/tools/            GSE command-line helpers (generate_interfaces, lobby_connect)
@@ -107,7 +108,7 @@ The review notes (`optimizations.md`, `plan.md`), `AGENTS.md` and the local agen
 ## Credits
 
 - [Mr. Goldberg — Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — the emulator itself; see [release/CREDITS.md](release/CREDITS.md) for its third-party licenses
-- [atom0s — Steamless](https://github.com/atom0s/Steamless) — Steam DRM unpacker used in this tool
+- [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers, vendored under `third_party/steamless/` with one small patch (see its `VENDORED.md`)
 
 ## License
 
