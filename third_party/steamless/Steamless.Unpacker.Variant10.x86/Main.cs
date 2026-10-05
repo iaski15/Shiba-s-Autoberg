@@ -252,7 +252,7 @@ namespace Steamless.Unpacker.Variant10.x86
         /// <returns></returns>
         private bool Step3()
         {
-            FileStream fStream = null;
+            Stream fStream = null; // GOLDBERG PATCH (in-memory-output): was FileStream
 
             try
             {
@@ -265,7 +265,7 @@ namespace Steamless.Unpacker.Variant10.x86
 
                 // Open the unpacked file for writing..
                 var unpackedPath = this.File.FilePath + ".unpacked.exe";
-                fStream = new FileStream(unpackedPath, FileMode.Create, FileAccess.ReadWrite);
+                fStream = this.Options.OpenOutputFile(unpackedPath); // GOLDBERG PATCH (in-memory-output): was new FileStream(unpackedPath, FileMode.Create, FileAccess.ReadWrite)
 
                 // Write the DOS header to the file..
                 fStream.WriteBytes(Pe32Helpers.GetStructureBytes(this.File.DosHeader));

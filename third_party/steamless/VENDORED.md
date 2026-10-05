@@ -22,7 +22,18 @@ Not vendored: `Steamless/` (WPF GUI), `Steamless.CLI/`, `ExamplePlugin/`, `repo/
 
 ## Our patches
 
-None yet.
+Every changed line carries a `GOLDBERG PATCH (<name>)` comment.
+
+1. **in-memory-output** — unpackers can hand the rebuilt image back instead of writing `<file>.unpacked.exe`.
+   - `Steamless.API/Model/SteamlessOptions.cs`: new `OutputStreamFactory` (`Func<string, Stream>`, default
+     null = upstream behaviour) and `OpenOutputFile(path)`, which every unpacker now calls to open its output.
+   - `Steamless.API/Extensions/FileStreamExtensions.cs`: `WriteBytes` extends `Stream` instead of `FileStream`.
+   - `Steamless.Unpacker.*/Main.cs` (all 7): the output stream is declared `Stream` and opened via
+     `this.Options.OpenOutputFile(unpackedPath)` — two lines each, nothing else touched.
+   - Limitation: `RecalculateFileChecksum` re-opens the output by path, so it cannot be combined with a
+     factory. We never set it (Steamless.CLI's default is off too).
+   - Proof it changed nothing else: `_selftest.exe --corpus` is byte-identical to the official CLI on all
+     9 real SteamStub exes available (8× Variant 3.1 x64, 1× Variant 2.1 x86).
 
 ## How it is built
 

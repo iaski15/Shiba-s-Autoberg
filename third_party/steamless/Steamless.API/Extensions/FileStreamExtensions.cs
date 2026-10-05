@@ -34,7 +34,8 @@ namespace Steamless.API.Extensions
         /// </summary>
         /// <param name="fStream"></param>
         /// <param name="data"></param>
-        public static void WriteBytes(this FileStream fStream, byte[] data)
+        // GOLDBERG PATCH (in-memory-output): Stream instead of FileStream, so the output can be a MemoryStream.
+        public static void WriteBytes(this Stream fStream, byte[] data)
         {
             fStream.Write(data, 0, data.Length);
         }

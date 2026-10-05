@@ -25,6 +25,10 @@
 
 namespace Steamless.API.Model
 {
+    // GOLDBERG PATCH (in-memory-output): System/System.IO for the output hook below.
+    using System;
+    using System.IO;
+
     public class SteamlessOptions : NotifiableModel
     {
         /// <summary>
@@ -40,6 +44,17 @@ namespace Steamless.API.Model
             this.DontRealignSections = true;
             this.ZeroDosStubData = true;
             this.RecalculateFileChecksum = false;
+        }
+
+        // GOLDBERG PATCH (in-memory-output): lets a host keep the rebuilt image in memory instead of
+        // having it written to "<file>.unpacked.exe". Null (the default) keeps upstream behaviour.
+        // Not combinable with RecalculateFileChecksum, which re-opens the output by path.
+        public Func<string, Stream> OutputStreamFactory { get; set; }
+
+        // GOLDBERG PATCH (in-memory-output): what every unpacker now calls to open its output file.
+        public Stream OpenOutputFile(string unpackedPath)
+        {
+            return this.OutputStreamFactory?.Invoke(unpackedPath) ?? new FileStream(unpackedPath, FileMode.Create, FileAccess.ReadWrite);
         }
 
         /// <summary>

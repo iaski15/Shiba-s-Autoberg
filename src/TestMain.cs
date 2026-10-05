@@ -23,9 +23,10 @@ static class TestMain
         return SelfTest();
     }
 
-    /// <summary>Differential check of the built-in unpacker against the real Steamless CLI on real games.
-    /// Every exe under the folder that carries a .bind section is COPIED to a temp folder first - Steamless
-    /// writes its output beside its input, and nothing may be written into a game install - then unpacked
+    /// <summary>Differential check of the in-process Steamless fork (third_party/steamless) against the official
+    /// Steamless.CLI binary on real games: proves our patch to the fork changed nothing but where the output
+    /// goes. Every exe under the folder that carries a .bind section is COPIED to a temp folder first - the
+    /// CLI writes its output beside its input, and nothing may be written into a game install - then unpacked
     /// both ways and compared byte for byte. Exit 0 = every comparable exe identical.</summary>
     static int Corpus(string dir)
     {
@@ -46,14 +47,14 @@ static class TestMain
                 total++;
                 string copy = Path.Combine(work, total + "_" + Path.GetFileName(exe));
                 File.Copy(exe, copy);
-                var native = SteamlessUnpacker.UnpackToMemory(copy);
+                var native = SteamlessUnpacker.UnpackToMemory(copy);   // in-process fork
                 var psi = new System.Diagnostics.ProcessStartInfo(cli, "\"" + copy + "\"")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli) };
                 string cliOut;
                 using (var p = System.Diagnostics.Process.Start(psi)) { cliOut = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd(); p.WaitForExit(); }
                 string cliPath = copy + ".unpacked.exe";
                 byte[] cliBytes = File.Exists(cliPath) ? File.ReadAllBytes(cliPath) : null;
-                string variant = native.Variant != null ? native.Variant.Name
+                string variant = native.Unpacker != null ? native.Unpacker
                     : (cliOut.Split('\n').Select(l => { int k = l.IndexOf("packed with ", StringComparison.OrdinalIgnoreCase); return k < 0 ? null : l.Substring(k + 12).Trim().TrimEnd('!'); })
                         .FirstOrDefault(l => l != null) ?? "?") + " (via CLI)";
                 string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
@@ -74,11 +75,11 @@ static class TestMain
                 }
                 else if (OnlyCertificatePointerDiffers(native.Output, cliBytes))
                 {
-                    // Deliberate: the built-in unpacker moves the certificate-table pointer along with the
-                    // overlay when .bind is dropped; Steamless leaves it pointing at the old offset.
+                    // Deliberate: we move the certificate-table pointer along with the overlay when .bind is
+                    // dropped; upstream Steamless leaves it pointing at the old offset.
                     same++;
                     Console.WriteLine("  SAME*     " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0")
-                        + " bytes (*except the certificate pointer, which only the built-in unpacker relocates)");
+                        + " bytes (*except the certificate pointer, which only we relocate)");
                 }
                 else
                 {
@@ -103,7 +104,7 @@ static class TestMain
             }
         }
         finally { try { Directory.Delete(work, true); } catch { } }
-        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} built-in-only failures (CLI handled them), {4} the CLI could not unpack.",
+        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} in-process-only failures (CLI handled them), {4} the CLI could not unpack.",
             total, same, differ, nativeOnlyFail, cliFail));
         return differ == 0 ? 0 : 1;
     }
@@ -182,7 +183,7 @@ static class TestMain
         }
         finally { try { File.Delete(junkPath); } catch { } }
 
-        Console.WriteLine("\n[native Steamless unpacker]");
+        Console.WriteLine("\n[Steamless fork, in-process]");
         string nativeDir = Path.Combine(Path.GetTempPath(), "gp_selftest_native_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(nativeDir);
         try
@@ -191,37 +192,26 @@ static class TestMain
             {
                 string architecture = is64 ? "x64" : "x86";
                 string packed = Path.Combine(nativeDir, "stub31-" + architecture + ".exe");
-                string unpacked = Path.Combine(nativeDir, "unpacked-" + architecture + ".exe");
                 WriteSteamStub31(packed, is64);
-                VariantInfo detected = SteamlessUnpacker.Detect(packed);
-                Check(detected != null && detected.IsX64 == is64 && detected.HeaderSize == 0xF0,
-                      "synthetic Variant 3.1 " + architecture + " detection", detected == null ? "(null)" : detected.Name);
-                File.WriteAllBytes(unpacked, new byte[] { 1, 2, 3, 4 });
-                UnpackResult unpackedResult = SteamlessUnpacker.Unpack(packed, unpacked);
+                var lines = new List<string>();
+                UnpackResult unpackedResult = SteamlessUnpacker.UnpackToMemory(packed, lines.Add);
                 Check(unpackedResult.Success && unpackedResult.ErrorCode == UnpackErrorCode.None
-                      && unpackedResult.Payload != null && unpackedResult.SteamDrmp != null
-                      && File.Exists(unpackedResult.DestinationPath),
-                      "synthetic Variant 3.1 " + architecture + " unpack", unpackedResult.Error);
-                Check(PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
+                      && unpackedResult.Unpacker != null && unpackedResult.Unpacker.Contains("3.1") && unpackedResult.Unpacker.Contains(architecture),
+                      "synthetic Variant 3.1 " + architecture + " is claimed and unpacked by the 3.1 " + architecture + " unpacker",
+                      unpackedResult.Error + " / " + unpackedResult.Unpacker);
+                Check(lines.Any(l => l.Contains("Variant 3.1")) && !lines.Any(l => l.Contains("File Saved As")),
+                      "unpacker log reaches the caller, minus the never-written output path (" + architecture + ")", string.Join(" | ", lines.ToArray()));
+                string unpacked = Path.Combine(nativeDir, "unpacked-" + architecture + ".exe");
+                if (unpackedResult.Output != null) File.WriteAllBytes(unpacked, unpackedResult.Output);
+                Check(File.Exists(unpacked) && PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
                       "synthetic Variant 3.1 " + architecture + " output PE", null);
-                byte[] packedHash = File.ReadAllBytes(packed);
-                UnpackResult aliasResult = SteamlessUnpacker.Unpack(packed, packed);
-                Check(!aliasResult.Success && aliasResult.ErrorCode == UnpackErrorCode.InvalidDestination
-                      && File.ReadAllBytes(packed).SequenceEqual(packedHash),
-                      "native unpacker rejects source/output aliasing", aliasResult.Error);
-                string already = Path.Combine(nativeDir, "already-" + architecture + ".exe");
-                File.Copy(unpacked, already);
-                string rejected = Path.Combine(nativeDir, "rejected-" + architecture + ".exe");
-                UnpackResult negative = SteamlessUnpacker.Unpack(already, rejected);
-                Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && !File.Exists(rejected),
+                UnpackResult negative = SteamlessUnpacker.UnpackToMemory(unpacked);
+                Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && negative.Output == null,
                       "already-unpacked " + architecture + " negative control", negative.Error);
             }
-            string missing = Path.Combine(nativeDir, "missing.exe");
-            string missingOutput = Path.Combine(nativeDir, "missing-output.exe");
-            UnpackResult missingResult = SteamlessUnpacker.Unpack(missing, missingOutput);
-            Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput
-                  && missingResult.Payload.Length == 0 && missingResult.SteamDrmp.Length == 0 && !File.Exists(missingOutput),
-                  "missing native input returns a structured result", missingResult.Error);
+            UnpackResult missingResult = SteamlessUnpacker.UnpackToMemory(Path.Combine(nativeDir, "missing.exe"));
+            Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput && missingResult.Output == null,
+                  "missing input returns a structured result", missingResult.Error);
 
             // header-only stub probe: decides whether anything is loaded or hashed at all
             string probePacked = Path.Combine(nativeDir, "probe-packed.exe");
@@ -236,10 +226,11 @@ static class TestMain
                   && SteamlessUnpacker.HasStubSection(Path.Combine(nativeDir, "nope.exe")) == null,
                   "header-only .bind probe: packed / plain / junk / missing", null);
 
-            // in-memory unpack hands back the image and a hash of exactly what it read
+            // in-memory unpack hands back the image and a hash of exactly what it read - and writes nothing
+            int filesBefore = Directory.GetFiles(nativeDir).Length;
             UnpackResult inMemory = SteamlessUnpacker.UnpackToMemory(probePacked);
-            Check(inMemory.Success && inMemory.Output != null && inMemory.DestinationPath == null
-                  && inMemory.SourceSha256 == SafePersistence.Hash(probePacked),
+            Check(inMemory.Success && inMemory.Output != null && inMemory.SourceSha256 == SafePersistence.Hash(probePacked)
+                  && Directory.GetFiles(nativeDir).Length == filesBefore,
                   "UnpackToMemory returns output and the source hash, writes nothing", inMemory.Error);
             Check(SteamlessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
                   && SafePersistence.Hash(inMemory.Output) != inMemory.SourceSha256,
@@ -304,11 +295,11 @@ static class TestMain
             var plog = new List<string>();
             prunner.LogLine += e => plog.Add(e.Message);
             var pres = prunner.Run(new PatchOptions { GameExe = exe, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
-            Check(pres.Success && pres.Unpacked, "packed game is unpacked by the built-in path", pres.Summary);
+            Check(pres.Success && pres.Unpacked, "packed game is unpacked in-process", pres.Summary);
             Check(SafePersistence.Hash(exe) == expectedUnpacked, "exe on disk is exactly the in-memory output", null);
             Check(!Directory.GetFiles(gameDir, "*.unpacked.exe").Any(), "no temporary .unpacked.exe is left behind", null);
             Check(!plog.Any(l => l.IndexOf("Running Steamless", StringComparison.OrdinalIgnoreCase) >= 0),
-                  "the Steamless CLI is not started when the built-in unpacker succeeds", null);
+                  "the Steamless CLI is not started when the in-process unpack succeeds", null);
             var exeWrite = pres.Writes.FirstOrDefault(w => string.Equals(w.Destination, Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase));
             Check(exeWrite != null && exeWrite.PreviousHash == packedHash && exeWrite.StagedHash == expectedUnpacked
                   && exeWrite.ExternalRecovery && File.Exists(exeWrite.RecoveryPath) && SafePersistence.Hash(exeWrite.RecoveryPath) == packedHash,

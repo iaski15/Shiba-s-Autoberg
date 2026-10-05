@@ -1988,11 +1988,10 @@ namespace Gp
             var before = new FileInfo(exePath);
             long stampLength = before.Length; DateTime stampTime = before.LastWriteTimeUtc;
             UnpackResult native;
-            try { native = SteamlessUnpacker.UnpackToMemory(exePath); }
-            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Built-in Steamless unpack crashed: " + ex.Message); }
+            Log(LogLevel.Info, "SteamStub section found – unpacking with Steamless (in-process)…");
+            try { native = SteamlessUnpacker.UnpackToMemory(exePath, line => Log(LogLevel.Dim, "   " + line)); }
+            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Steamless unpack crashed: " + ex.Message); }
 
-            if (native != null && native.Variant != null)
-                Log(LogLevel.Info, "Detected " + native.Variant.Name + " – using the built-in unpacker.");
             if (native != null && native.Success)
             {
                 string backupHash;
@@ -2018,7 +2017,7 @@ namespace Gp
                     throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
                 }
                 res.Unpacked = true;
-                Log(LogLevel.Ok, "DRM removed with the built-in unpacker!");
+                Log(LogLevel.Ok, "DRM removed! (" + native.Unpacker + ")");
                 if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
                 return exePath;
             }
@@ -2026,7 +2025,7 @@ namespace Gp
             // Not a variant the built-in unpacker handles, or its output failed validation: the bundled
             // Steamless CLI covers every variant, so let it try.
             if (native != null && native.ErrorCode != UnpackErrorCode.UnsupportedVariant)
-                Log(LogLevel.Warn, "Steamless: built-in unpack failed (" + native.Error + ") – falling back to the Steamless CLI.");
+                Log(LogLevel.Warn, "Steamless: in-process unpack failed (" + native.Error + ") – falling back to the Steamless CLI.");
             ct.ThrowIfCancellationRequested();
 
             if (!File.Exists(Tools.SteamlessCli))

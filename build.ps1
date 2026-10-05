@@ -113,7 +113,7 @@ if (-not $refDir) {
         Write-Warning "4.8 targeting pack unavailable; using installed Framework assemblies. Pin -ReferencePath for reproducible references."
     }
 }
-$refs = @('mscorlib.dll','System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Runtime.Serialization.dll','System.Xml.dll','System.Xml.Linq.dll') |
+$refs = @('mscorlib.dll','System.dll','System.Core.dll','Microsoft.CSharp.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Runtime.Serialization.dll','System.Xml.dll','System.Xml.Linq.dll') |
     ForEach-Object {
         if (-not (Test-Path -LiteralPath (Join-Path $refDir $_))) { throw "Required reference missing: $refDir\$_" }
         "/r:`"$refDir\$_`""
@@ -140,8 +140,20 @@ function Compile($sources, $out, $extra) {
     Write-Host "built: $out"
 }
 
+# ---- vendored Steamless (third_party\steamless, see VENDORED.md) ----
+# Compiled straight into both exes; the unpackers run in-process (src\Unpacker\SteamlessUnpacker.cs).
+# Left out: AssemblyInfo (it would clash with ours) and the two WPF-only view-model files no unpacker uses.
+$steamlessDir = Join-Path $root 'third_party\steamless'
+$steamlessSrc = @(Get-ChildItem -LiteralPath $steamlessDir -Recurse -File |
+    Where-Object { $_.Extension -eq '.cs' -and $_.Directory.Name -ne 'Properties' -and $_.Name -ne 'ViewModelBase.cs' -and $_.Name -ne 'NavigatedEventArgs.cs' } |
+    Sort-Object FullName | ForEach-Object { "`"$($_.FullName)`"" })
+# SharpDisasm (used by the 2.x unpackers) is a prebuilt upstream binary: referenced, and embedded so the
+# exe stays self-contained - SteamlessUnpacker resolves it from the resource.
+$sharpDisasm = Join-Path $steamlessDir 'Steamless.Unpacker.Variant21.x86\SharpDisasm.dll'
+$steamlessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasm`",SharpDisasm.dll")
+
 # ---- self test host (console) ----
-Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") (Join-Path $root '_selftest.exe') $null
+Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root '_selftest.exe') $steamlessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
 $pay = @(
@@ -203,7 +215,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $steamlessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
