@@ -335,11 +335,11 @@ namespace Gp
         public AppIdBox()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            BackColor = Ui.Surface2;
+            BackColor = Ui.Surface;
             box = new TextBox
             {
                 BorderStyle = BorderStyle.None,
-                BackColor = Ui.Surface2,
+                BackColor = Ui.Inset,
                 ForeColor = Ui.TextC,
                 Font = Ui.F("Consolas", 10.5f, false),
             };
@@ -377,10 +377,14 @@ namespace Gp
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            var r = ClientRectangle;
-            Ui.FillRound(g, r, 9, Enabled ? Ui.Surface2 : Ui.Tint(Ui.Surface2, Ui.Bg, 0.35));
-            Ui.StrokeRound(g, r, 9, focused && Enabled ? Ui.Accent : Ui.BorderC, 1.4f);
-            if (focused && Enabled) Ui.StrokeRound(g, Rectangle.Inflate(r, -2, -2), 7, Color.FromArgb(80, Ui.Accent.R, Ui.Accent.G, Ui.Accent.B), 1f);
+            using (var b = new SolidBrush(Parent != null ? Parent.BackColor : Ui.Surface)) g.FillRectangle(b, ClientRectangle);
+            var r = new Rectangle(0, 0, Width - 1, Height - 1);
+            int rad = Ui.S(8);
+            Color fill = Enabled ? Ui.Inset : Ui.Tint(Ui.Surface, Ui.Bg, 0.3);
+            Ui.FillRound(g, r, rad, fill);
+            if (box.BackColor != fill) box.BackColor = fill;
+            Ui.StrokeRound(g, r, rad, focused && Enabled ? Ui.Accent : Ui.Tint(Ui.BorderC, Color.White, 0.04), 1f);
+            if (focused && Enabled) Ui.StrokeRound(g, Rectangle.Inflate(r, -1, -1), rad - 1, Ui.Alpha(Ui.Accent, 90), 1f);
         }
     }
 
@@ -424,14 +428,19 @@ namespace Gp
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
+            using (var b = new SolidBrush(Ui.Tint(Ui.Bg, Color.Black, 0.25))) g.FillRectangle(b, ClientRectangle);
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, 0, Width, 0);
+            float cy = Height / 2f, dx = Ui.S(30f);
             if (_pulse && pulseOn)
-                using (var b = new SolidBrush(Color.FromArgb(70, DotColor))) g.FillEllipse(b, 23, Height / 2 - 7, 14, 14);
-            using (var b = new SolidBrush(DotColor)) g.FillEllipse(b, 26, Height / 2 - 4, 8, 8);
-            TextRenderer.DrawText(g, StatusText, Ui.F(8.25f, false), new Point(44, Height / 2 - 8), Ui.MutedC, TextFormatFlags.NoPadding);
-            var sz = TextRenderer.MeasureText(RightText, Ui.F(7.75f, false), Size.Empty, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, RightText, Ui.F(7.75f, false), new Point(Width - sz.Width - 26, Height / 2 - 8), Ui.DisabledC, TextFormatFlags.NoPadding);
+                using (var b = new SolidBrush(Color.FromArgb(70, DotColor))) g.FillEllipse(b, dx - Ui.S(7f), cy - Ui.S(7f), Ui.S(14f), Ui.S(14f));
+            using (var b = new SolidBrush(DotColor)) g.FillEllipse(b, dx - Ui.S(4f), cy - Ui.S(4f), Ui.S(8f), Ui.S(8f));
+            var lf = Ui.F(8.25f, false);
+            TextRenderer.DrawText(g, StatusText, lf, new Rectangle(Ui.S(44), 0, Math.Max(0, Width - Ui.S(260)), Height), Ui.TextC,
+                TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+            var rf = Ui.F(7.75f, false);
+            var sz = TextRenderer.MeasureText(RightText, rf, Size.Empty, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, RightText, rf, new Rectangle(Width - sz.Width - Ui.S(24), 0, sz.Width, Height), Ui.DisabledC,
+                TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
         }
     }
 
@@ -523,8 +532,7 @@ namespace Gp
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-                using (var b = new SolidBrush(Ui.MutedC))
-                    Ui.SpacedText(g, "STEAM APPID", Ui.F(7.5f, true), b, new PointF(22, 14), 1.5f);
+                Ui.SectionLabel(g, "STEAM APPID", new Point(Ui.S(22), Ui.S(14)));
 
                 var f8 = Ui.F(8.25f, false);
                 int ty = appIdCard.Height / 2 - 8;
@@ -542,7 +550,7 @@ namespace Gp
                     using (var b = new SolidBrush(appidNoteCol)) g.DrawString(glyph, Ui.F(8.5f, true), b, 300, ty - 1);
                     int noteMaxW = hintX - 316 - 12;
                     string shownNote = noteMaxW > 70 ? Ui.TruncMiddle(g, appidNote, f8, noteMaxW) : "";
-                    TextRenderer.DrawText(g, shownNote, f8, new Point(316, ty), appidNoteCol, TextFormatFlags.NoPadding);
+                    TextRenderer.DrawText(g, shownNote, f8, new Point(316, ty), appidNoteCol, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                 }
 
                 if (appidBusy)
@@ -596,8 +604,7 @@ namespace Gp
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-                using (var b = new SolidBrush(Ui.MutedC))
-                    Ui.SpacedText(g, "OPTIONS", Ui.F(7.5f, true), b, new PointF(22, 13), 1.5f);
+                Ui.SectionLabel(g, "OPTIONS", new Point(Ui.S(22), Ui.S(14)));
             };
 
             tUnpack = new Toggle("Auto-unpack Steam DRM (Steamless)", settings.UnpackDrm);
@@ -611,13 +618,14 @@ namespace Gp
                 appIdBox.Enabled = !closing && !running && !tOnlineFix.Checked;
                 RecalcLog();
             };
-            tUnpack.Bounds = new Rectangle(24, 40, 370, 24);
-            tBackup.Bounds = new Rectangle(408, 40, 330, 24);
-            tAppid.Bounds = new Rectangle(24, 80, 370, 24);
-            tSettings.Bounds = new Rectangle(408, 80, 340, 24);
-            tOnlineFix.Bounds = new Rectangle(24, 120, 370, 24);
-            tLookup.Bounds = new Rectangle(408, 120, 340, 24);
+            tUnpack.Bounds = new Rectangle(22, 42, 370, 26);
+            tBackup.Bounds = new Rectangle(408, 42, 330, 26);
+            tAppid.Bounds = new Rectangle(22, 80, 370, 26);
+            tSettings.Bounds = new Rectangle(408, 80, 340, 26);
+            tOnlineFix.Bounds = new Rectangle(22, 118, 370, 26);
+            tLookup.Bounds = new Rectangle(408, 118, 340, 26);
             foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup }) optionsCard.Controls.Add(c);
+            appIdBox.Enabled = !tOnlineFix.Checked; // the handler above only runs on change, not for the saved state
 
             int rowW = 820 - Pad * 2;
             int batchW = 210, gap = 14;
@@ -633,16 +641,23 @@ namespace Gp
             Controls.Add(batchBtn);
 
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(Pad, 574, 820 - Pad * 2, 5);
+            progress.Bounds = new Rectangle(Pad, 576, 820 - Pad * 2, 4);
             Controls.Add(progress);
 
             banner = new Banner();
             banner.Bounds = new Rectangle(Pad, 588, 820 - Pad * 2, 58);
             banner.ActionClicked += OnBannerAction;
+            banner.PrimaryAction = "Play game";
             Controls.Add(banner);
 
             logCard = new AppCard();
             logCard.Bounds = LogBounds();
+            logCard.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                Ui.SectionLabel(e.Graphics, "ACTIVITY", new Point(Ui.S(22), Ui.S(12)));
+            };
             Controls.Add(logCard);
 
             log = new LogView();
@@ -711,7 +726,7 @@ namespace Gp
         void RecalcLog()
         {
             logCard.Bounds = LogBounds();
-            log.SetBounds(Ui.S(12), Ui.S(12), logCard.Width - Ui.S(24), logCard.Height - Ui.S(24));
+            log.SetBounds(Ui.S(20), Ui.S(34), logCard.Width - Ui.S(30), Math.Max(0, logCard.Height - Ui.S(42)));
         }
 
         protected override CreateParams CreateParams
@@ -1326,6 +1341,10 @@ namespace Gp
         {
             banner.Visible = show && banner.MessageText.Length > 0;
             RecalcLog();
+            // Re-enabling the option toggles at the end of a run can leave a one-pixel sliver of stale
+            // native drawing along their top edge. One deferred repaint, after the run's own repaints have
+            // gone through, clears it.
+            if (IsHandleCreated) BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) optionsCard.Invalidate(true); });
         }
 
         void Log(LogLevel lvl, string msg)
@@ -1364,8 +1383,8 @@ namespace Gp
                     using (var bg = Graphics.FromImage(bmp))
                     {
                         var full = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
-                        AmbientGlow(bg, full, Width / 2f + 40f, 150f, 430f, Ui.Accent, 18);
-                        AmbientGlow(bg, full, (float)Width - 60f, Height - 210f, 400f, Ui.Accent2, 12);
+                        AmbientGlow(bg, full, Width * 0.62f, Ui.S(60f), Ui.S(460f), Ui.Accent, 22);
+                        AmbientGlow(bg, full, Ui.S(40f), Height - Ui.S(160f), Ui.S(380f), Ui.AccentLo, 12);
                     }
                     glowCache = bmp;
                     glowCacheSize = ClientSize;
@@ -1401,19 +1420,19 @@ namespace Gp
 
             // hero title in the brand gradient
             string title = "Patch a Steam game";
-            var tf = Ui.F(15.5f, true);
+            var tf = Ui.F(16f, true);
             try
             {
                 float tw = (float)g.MeasureString(title, tf).Width;
                 g.TextRenderingHint = TextRenderingHint.AntiAlias;
-                    using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.Accent, Ui.Accent2))
-                        g.DrawString(title, tf, lg, new PointF(Pad, 54f), StringFormat.GenericTypographic);
+                    using (var lg = new LinearGradientBrush(new PointF(Ui.S(Pad), 0), new PointF(Ui.S(Pad) + Math.Max(tw, 1f), 0), Ui.TextC, Ui.Accent2))
+                        g.DrawString(title, tf, lg, new PointF(Ui.S(Pad), Ui.S(56f)), StringFormat.GenericTypographic);
             }
-            catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 58), Ui.TextC, TextFormatFlags.NoPadding); }
+            catch { TextRenderer.DrawText(g, title, tf, new Point(Ui.S(Pad), Ui.S(58)), Ui.TextC, TextFormatFlags.NoPadding); }
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            TextRenderer.DrawText(g, "Unpack SteamStub DRM  ·  install Goldberg emulator  ·  configure AppID — automatically",
-                Ui.F(8.75f, false), new Point(Pad, 88), Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Unpack SteamStub DRM  ·  install the Goldberg emulator  ·  configure the AppID, automatically",
+                Ui.F(8.75f, false), new Point(Ui.S(Pad), Ui.S(90)), Ui.MutedC, TextFormatFlags.NoPadding);
         }
     }
 }
