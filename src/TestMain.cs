@@ -54,7 +54,8 @@ static class TestMain
                 string cliPath = copy + ".unpacked.exe";
                 byte[] cliBytes = File.Exists(cliPath) ? File.ReadAllBytes(cliPath) : null;
                 string variant = native.Variant != null ? native.Variant.Name
-                    : (cliOut.Split('\n').FirstOrDefault(l => l.IndexOf("variant", StringComparison.OrdinalIgnoreCase) >= 0) ?? "?").Trim();
+                    : (cliOut.Split('\n').Select(l => { int k = l.IndexOf("packed with ", StringComparison.OrdinalIgnoreCase); return k < 0 ? null : l.Substring(k + 12).Trim().TrimEnd('!'); })
+                        .FirstOrDefault(l => l != null) ?? "?") + " (via CLI)";
                 string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
                 if (cliBytes == null)
                 {
