@@ -183,7 +183,7 @@ static class TestMain
         }
         finally { try { File.Delete(junkPath); } catch { } }
 
-        Console.WriteLine("\n[Shibaless (Steamless fork), in-process]");
+        Console.WriteLine("\n[Shibaless, in-process]");
         string nativeDir = Path.Combine(Path.GetTempPath(), "gp_selftest_native_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(nativeDir);
         try

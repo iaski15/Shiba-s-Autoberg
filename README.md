@@ -108,7 +108,7 @@ The review notes (`optimizations.md`, `plan.md`), `AGENTS.md` and the local agen
 ## Credits
 
 - [Mr. Goldberg — Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — the emulator itself; see [release/CREDITS.md](release/CREDITS.md) for its third-party licenses
-- [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers; our fork of them, Shibaless, lives in `third_party/shibaless/` with one small patch (see its `VENDORED.md`)
+- [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers; our fork of them, Shibaless, lives in `third_party/shibaless/` (renamed throughout, plus one small patch) (see its `VENDORED.md`)
 
 ## License
 

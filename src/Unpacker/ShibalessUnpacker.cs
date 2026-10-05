@@ -6,9 +6,9 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
-using Steamless.API.Events;
-using Steamless.API.Model;
-using Steamless.API.Services;
+using Shibaless.API.Events;
+using Shibaless.API.Model;
+using Shibaless.API.Services;
 
 namespace Shibaless
 {
@@ -27,7 +27,7 @@ namespace Shibaless
         public UnpackErrorCode ErrorCode { get; internal set; }
         public string Error { get; internal set; }
 
-        /// <summary>Name of the Steamless unpacker that claimed the file, e.g. "SteamStub Variant 2.1 Unpacker (x86)".
+        /// <summary>Name of the Shibaless unpacker that claimed the file, e.g. "SteamStub Variant 2.1 Unpacker (x86)".
         /// Null when none did.</summary>
         public string Unpacker { get; internal set; }
 
@@ -74,15 +74,15 @@ namespace Shibaless
         /// CanProcessFile rejects the other bitness with the same Machine test, so skipping them up front
         /// changes nothing but the number of times the file is read.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]   // must not be JIT-compiled before the resolver above is registered
-        static List<SteamlessPlugin> Unpackers(bool is64)
+        static List<ShibalessPlugin> Unpackers(bool is64)
         {
             var all = is64
-                ? new SteamlessPlugin[] { new Steamless.Unpacker.Variant30.x64.Main(), new Steamless.Unpacker.Variant31.x64.Main() }
-                : new SteamlessPlugin[]
+                ? new ShibalessPlugin[] { new Shibaless.Unpacker.Variant30.x64.Main(), new Shibaless.Unpacker.Variant31.x64.Main() }
+                : new ShibalessPlugin[]
                 {
-                    new Steamless.Unpacker.Variant10.x86.Main(), new Steamless.Unpacker.Variant20.x86.Main(),
-                    new Steamless.Unpacker.Variant21.x86.Main(), new Steamless.Unpacker.Variant30.x86.Main(),
-                    new Steamless.Unpacker.Variant31.x86.Main()
+                    new Shibaless.Unpacker.Variant10.x86.Main(), new Shibaless.Unpacker.Variant20.x86.Main(),
+                    new Shibaless.Unpacker.Variant21.x86.Main(), new Shibaless.Unpacker.Variant30.x86.Main(),
+                    new Shibaless.Unpacker.Variant31.x86.Main()
                 };
             return all.OrderBy(p => p.Name).ToList();
         }
@@ -183,7 +183,7 @@ namespace Shibaless
                 result.Unpacker = unpacker.Name;
                 var sink = new MemoryStream(input.Length);   // the output is about the input's size: no regrowth
                 // Same defaults Steamless.CLI runs with; only the output destination differs.
-                var options = new SteamlessOptions { OutputStreamFactory = path => sink };
+                var options = new ShibalessOptions { OutputStreamFactory = path => sink };
                 bool ok;
                 try { ok = unpacker.ProcessFile(sourcePath, options); }
                 catch (Exception ex) { ok = false; if (log != null) log(unpacker.Name + " crashed: " + ex.Message); }
@@ -225,7 +225,7 @@ namespace Shibaless
         }
 
         /// <summary>The certificate table (data directory 4) is addressed by FILE offset, normally into the
-        /// overlay. Dropping .bind moves the overlay, and Steamless leaves the pointer aimed at the old offset.
+        /// overlay. Dropping .bind moves the overlay, and upstream Steamless leaves the pointer aimed at the old offset.
         /// Shift it to where the certificate bytes actually landed - and only if they are verifiably there.
         /// (The signature no longer verifies either way; this keeps the file self-consistent.)</summary>
         static void RelocateCertificate(PeImage packed, byte[] output)
