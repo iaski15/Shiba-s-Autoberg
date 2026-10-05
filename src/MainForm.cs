@@ -1152,7 +1152,9 @@ namespace Gp
 
             if (startup.ExitWhenDone)
             {
-                Environment.ExitCode = res.Success ? 0 : 3;
+                // 3 is reserved for "--auto could not resolve an AppID" (see StartupArgs.Usage); a patch
+                // that ran and failed is an ordinary failure, exit code 1.
+                Environment.ExitCode = res.Success ? 0 : 1;
                 if (!closing) BeginAutoExit();
             }
         }
@@ -1241,8 +1243,9 @@ namespace Gp
                 try
                 {
                     report = Recovery.RollbackLastPatch(sink);
-                    // Keep the journal when part of the undo failed, so it can be retried.
-                    if (report.Failed == 0) Recovery.ClearLastPatch();
+                    // Keep the journal when part of the undo failed, so it can be retried. Otherwise drop
+                    // it together with the recovery areas it referenced, so no .gp-recovery litter remains.
+                    if (report.Failed == 0) Recovery.DiscardLastPatch();
                 }
                 catch (Exception ex)
                 {

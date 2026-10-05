@@ -1056,11 +1056,19 @@ namespace Gp
             if (TextLength == 0) { lineCount = 0; return; }
             if (lineCount <= MaxLines) return;
 
-            // Drop the oldest lines down to half the cap, in one pass. GetFirstCharIndexFromLine is O(1),
-            // so there is no need to walk the whole buffer looking for line breaks - which this used to do
-            // twice per appended line (AppendLine called it, and so did OnTextChanged).
+            // Drop the oldest lines down to half the cap, in one pass. This runs only once every ~750
+            // appended lines, so one scan of the text here is cheap. GetFirstCharIndexFromLine is not usable:
+            // with word wrap on it counts *display* lines, so long wrapped lines made it cut far less than
+            // the counter assumed, the counter drifted low, and the buffer grew well past the cap.
             int drop = lineCount - MaxLines / 2;
-            int cut = GetFirstCharIndexFromLine(drop);
+            string all = Text;
+            int cut = 0;
+            for (int seen = 0; seen < drop; seen++)
+            {
+                int nl = all.IndexOf('\n', cut);
+                if (nl < 0) break;
+                cut = nl + 1;
+            }
             if (cut <= 0) return;
             int start = SelectionStart, end = start + SelectionLength;
             trimming = true;
@@ -1072,7 +1080,7 @@ namespace Gp
                 SelectedText = "";
                 int newStart = Math.Max(0, start - cut);
                 Select(newStart, Math.Max(0, end - cut - newStart));
-                lineCount -= drop;
+                lineCount = CountLines(Text);   // resynchronise with what is actually left
             }
             finally { trimming = false; ReadOnly = wasReadOnly; }
         }

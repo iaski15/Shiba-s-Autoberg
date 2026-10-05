@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using Gp;
+using SteamlessNative;
 
 static class TestMain
 {
@@ -75,6 +77,49 @@ static class TestMain
                   "a malformed file reports null instead of throwing", null);
         }
         finally { try { File.Delete(junkPath); } catch { } }
+
+        Console.WriteLine("\n[native Steamless unpacker]");
+        string nativeDir = Path.Combine(Path.GetTempPath(), "gp_selftest_native_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(nativeDir);
+        try
+        {
+            foreach (bool is64 in new[] { true, false })
+            {
+                string architecture = is64 ? "x64" : "x86";
+                string packed = Path.Combine(nativeDir, "stub31-" + architecture + ".exe");
+                string unpacked = Path.Combine(nativeDir, "unpacked-" + architecture + ".exe");
+                WriteSteamStub31(packed, is64);
+                VariantInfo detected = SteamlessUnpacker.Detect(packed);
+                Check(detected != null && detected.IsX64 == is64 && detected.HeaderSize == 0xF0,
+                      "synthetic Variant 3.1 " + architecture + " detection", detected == null ? "(null)" : detected.Name);
+                File.WriteAllBytes(unpacked, new byte[] { 1, 2, 3, 4 });
+                UnpackResult unpackedResult = SteamlessUnpacker.Unpack(packed, unpacked);
+                Check(unpackedResult.Success && unpackedResult.ErrorCode == UnpackErrorCode.None
+                      && unpackedResult.Payload != null && unpackedResult.SteamDrmp != null
+                      && File.Exists(unpackedResult.DestinationPath),
+                      "synthetic Variant 3.1 " + architecture + " unpack", unpackedResult.Error);
+                Check(PeReader.Analyze(unpacked).Machine == (is64 ? 0x8664 : 0x014C),
+                      "synthetic Variant 3.1 " + architecture + " output PE", null);
+                byte[] packedHash = File.ReadAllBytes(packed);
+                UnpackResult aliasResult = SteamlessUnpacker.Unpack(packed, packed);
+                Check(!aliasResult.Success && aliasResult.ErrorCode == UnpackErrorCode.InvalidDestination
+                      && File.ReadAllBytes(packed).SequenceEqual(packedHash),
+                      "native unpacker rejects source/output aliasing", aliasResult.Error);
+                string already = Path.Combine(nativeDir, "already-" + architecture + ".exe");
+                File.Copy(unpacked, already);
+                string rejected = Path.Combine(nativeDir, "rejected-" + architecture + ".exe");
+                UnpackResult negative = SteamlessUnpacker.Unpack(already, rejected);
+                Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && !File.Exists(rejected),
+                      "already-unpacked " + architecture + " negative control", negative.Error);
+            }
+            string missing = Path.Combine(nativeDir, "missing.exe");
+            string missingOutput = Path.Combine(nativeDir, "missing-output.exe");
+            UnpackResult missingResult = SteamlessUnpacker.Unpack(missing, missingOutput);
+            Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput
+                  && missingResult.Payload.Length == 0 && missingResult.SteamDrmp.Length == 0 && !File.Exists(missingOutput),
+                  "missing native input returns a structured result", missingResult.Error);
+        }
+        finally { try { Directory.Delete(nativeDir, true); } catch { } }
 
         // ---- synthetic PEs: regression tests for the PeReader offset bugs (bug 1) ----
         Console.WriteLine("\n[PE analysis: synthetic]");
@@ -967,6 +1012,101 @@ static class TestMain
 
     static void W16(byte[] b, int off, ushort v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); }
     static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
+    static void W64(byte[] b, int off, ulong v) { W32(b, off, (uint)v); W32(b, off + 4, (uint)(v >> 32)); }
+
+    static void WriteSteamStub31(string path, bool is64)
+    {
+        var b = new byte[0x1600];
+        W16(b, 0x00, 0x5A4D);
+        W32(b, 0x3C, 0x80);
+        int pe = 0x80;
+        W32(b, pe, 0x00004550);
+        W16(b, pe + 4, is64 ? (ushort)0x8664 : (ushort)0x014C);
+        W16(b, pe + 6, 2);
+        W16(b, pe + 20, is64 ? (ushort)0xF0 : (ushort)0xE0);
+        W16(b, pe + 22, is64 ? (ushort)0x22 : (ushort)0x0102);
+        int opt = pe + 24;
+        W16(b, opt, is64 ? (ushort)0x20B : (ushort)0x10B);
+        W32(b, opt + 16, 0x3200);
+        if (is64) W64(b, opt + 24, 0x140000000UL);
+        else W32(b, opt + 28, 0x00400000);
+        W32(b, opt + 32, 0x1000);
+        W32(b, opt + 36, 0x200);
+        W32(b, opt + 56, 0x4000);
+        W32(b, opt + 60, 0x400);
+        W32(b, opt + (is64 ? 108 : 92), 16);
+        int sec = opt + (is64 ? 0xF0 : 0xE0);
+        Array.Copy(Encoding.ASCII.GetBytes(".text"), 0, b, sec, 5);
+        W32(b, sec + 8, 0x200);
+        W32(b, sec + 12, 0x1000);
+        W32(b, sec + 16, 0x200);
+        W32(b, sec + 20, 0x400);
+        sec += 40;
+        Array.Copy(Encoding.ASCII.GetBytes(".bind"), 0, b, sec, 5);
+        W32(b, sec + 8, 0x1000);
+        W32(b, sec + 12, 0x3000);
+        W32(b, sec + 16, 0x1000);
+        W32(b, sec + 20, 0x600);
+
+        int bind = 0x600;
+        byte[] signature = is64
+            ? new byte[] { 0xE8, 0, 0, 0, 0, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x41, 0x50 }
+            : new byte[] { 0xE8, 0, 0, 0, 0, 0x50, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x8B, 0x44, 0x24, 0x1C, 0x2D, 0x05, 0, 0, 0, 0x8B, 0xCC, 0x83, 0xE4, 0xF0, 0x51, 0x51, 0x51, 0x50 };
+        Array.Copy(signature, 0, b, bind + 0x20, signature.Length);
+        if (is64)
+        {
+            Array.Copy(new byte[] { 0x48, 0x8D, 0x91, 0, 0, 0, 0, 0x48 }, 0, b, bind + 0x80, 8);
+            W32(b, bind + 0x83, 0xF0);
+        }
+        else
+        {
+            Array.Copy(new byte[] { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0, 0, 0, 0, 0x53, 0, 0, 0, 0, 0, 0x68 }, 0, b, bind + 0x80, 16);
+            W32(b, bind + 0x90, 0xF0);
+        }
+
+        var header = new byte[0xF0];
+        W32(header, 0, 0x12345678);
+        W32(header, 4, 0xC0DEC0DF);
+        if (is64)
+        {
+            W64(header, 8, 0x140000000UL);
+            W64(header, 16, 0x3200);
+        }
+        else
+        {
+            W32(header, 8, 0x00400000);
+            W32(header, 12, 0);
+            W32(header, 16, 0x3200);
+            W32(header, 20, 0);
+        }
+        W32(header, 24, 0x200);
+        W32(header, 32, 0x1010);
+        W32(header, 56, 1250);
+        W32(header, 60, 4);
+        W32(header, 64, 0x1000);
+        if (is64)
+        {
+            W64(header, 72, 0x1000);
+            W64(header, 80, 0x200);
+        }
+        else
+        {
+            W32(header, 72, 0x1000);
+            W32(header, 76, 0);
+            W32(header, 80, 0x200);
+            W32(header, 84, 0);
+        }
+        uint key = 0x12345678;
+        for (int i = 4; i < header.Length; i += 4)
+        {
+            uint plain = BitConverter.ToUInt32(header, i);
+            uint encoded = plain ^ key;
+            W32(header, i, encoded);
+            key = encoded;
+        }
+        Array.Copy(header, 0, b, bind + 0x110, header.Length);
+        File.WriteAllBytes(path, b);
+    }
 
     /// <summary>Minimal native x64 PE whose import directory names a single dll. Exists to prove the
     /// emulator's install name comes from the import table rather than from the architecture - a 64-bit

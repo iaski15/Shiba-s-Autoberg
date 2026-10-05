@@ -141,7 +141,7 @@ function Compile($sources, $out, $extra) {
 }
 
 # ---- self test host (console) ----
-Compile @("`"$src\Core.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") (Join-Path $root '_selftest.exe') $null
+Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") (Join-Path $root '_selftest.exe') $null
 
 # ---- embedded payload (tools the app needs at runtime) ----
 $pay = @(
@@ -203,7 +203,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile @("`"$src\Core.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
+    Compile @("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }

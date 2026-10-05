@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Web.Script.Serialization;
+using SteamlessNative;
 
 namespace Gp
 {
@@ -805,6 +806,23 @@ namespace Gp
         public static void ClearLastPatch()
         {
             try { if (File.Exists(JournalPath)) File.Delete(JournalPath); } catch { }
+        }
+
+        /// <summary>Forgets the last patch once it has been fully undone: drops the journal AND the
+        /// .gp-recovery areas it pointed at. <see cref="ClearLastPatch"/> alone left those areas (and
+        /// their empty .gp-recovery roots) in every touched game folder, where nothing would ever collect
+        /// them, because the next run only prunes what the journal still lists.</summary>
+        public static void DiscardLastPatch()
+        {
+            var entries = LoadJournal(JournalPath);
+            ClearLastPatch();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in entries)
+            {
+                if (e.Area.Length == 0 || !seen.Add(e.Area)) continue;
+                try { if (Directory.Exists(e.Area)) Directory.Delete(e.Area, true); } catch { }
+                RemoveEmptyRecoveryRoot(e.Area);
+            }
         }
 
         // ------------------------------------------------------------------ rollback
@@ -1787,6 +1805,54 @@ namespace Gp
 
         private string TryUnpack(string exePath, Func<string, string> backup, PatchResult res, CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
+            VariantInfo nativeVariant = SteamlessUnpacker.Detect(exePath);
+            if (nativeVariant != null)
+            {
+                Log(LogLevel.Info, "Detected " + nativeVariant.Name + " – using the built-in unpacker.");
+                var nativeOutputs = new InvocationOutputs(exePath);
+                string nativeInputHash = SafePersistence.Hash(exePath);
+                string nativeOutputPath = exePath + ".unpacked.exe";
+                UnpackResult nativeResult;
+                try { nativeResult = SteamlessUnpacker.Unpack(exePath, nativeOutputPath); }
+                catch (Exception ex) { nativeResult = null; Log(LogLevel.Warn, "Built-in Steamless unpack crashed: " + ex.Message); }
+
+                string nativeProblem = null;
+                if (nativeResult == null) nativeProblem = "the built-in unpacker crashed";
+                else if (!nativeResult.Success) nativeProblem = "built-in unpack failed: " + nativeResult.Error;
+                else if (!nativeOutputs.IsCurrent(nativeOutputPath)) nativeProblem = "built-in output could not be verified";
+                else
+                {
+                    try { PeReader.Analyze(nativeOutputPath); }
+                    catch (Exception ex) { nativeProblem = "built-in output is not a valid PE (" + ex.Message + ")"; }
+                }
+
+                if (nativeProblem == null)
+                {
+                    string nativeBackup = backup(exePath);
+                    try
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        nativeOutputs.CopyAndDelete(nativeOutputPath, res.Writes, nativeInputHash, nativeBackup);
+                    }
+                    catch (IOException ex)
+                    {
+                        throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
+                    }
+                    res.Unpacked = true;
+                    Log(LogLevel.Ok, "DRM removed with the built-in unpacker!");
+                    if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
+                    return exePath;
+                }
+
+                // A failed in-process attempt used to end the unpack step outright, leaving the DRM in place
+                // even though the bundled Steamless CLI handles the same variant. Remove what this attempt
+                // wrote (only if it is ours - a pre-existing file is left alone) and let the CLI try.
+                Log(LogLevel.Warn, "Steamless: " + nativeProblem + " – falling back to the Steamless CLI.");
+                try { if (nativeOutputs.IsCurrent(nativeOutputPath)) File.Delete(nativeOutputPath); } catch { }
+                ct.ThrowIfCancellationRequested();
+            }
+
             if (!File.Exists(Tools.SteamlessCli))
             {
                 Log(LogLevel.Warn, "Steamless CLI not found – skipping DRM unpack. (" + Tools.SteamlessCli + ")");
@@ -1935,6 +2001,28 @@ namespace Gp
             if (foundApi.Count == 0) return null;
             string target = PickApiTarget(foundApi, gameDir, preferredName);
 
+            // On a re-patch the live dll is the emulator installed last time. Dumping that would replace a
+            // correct steam_interfaces.txt with every interface the emulator knows about, so read the
+            // preserved original instead - or skip, leaving any earlier dump in place.
+            if (LooksLikeBundledGoldberg(target))
+            {
+                string original = null;
+                try
+                {
+                    string candidate = OriginalBackups.Location(
+                        Path.Combine(Path.GetDirectoryName(target), "goldberg_backup"), target);
+                    if (File.Exists(candidate) && !LooksLikeBundledGoldberg(candidate)) original = candidate;
+                }
+                catch { }
+                if (original == null)
+                {
+                    Log(LogLevel.Dim, Path.GetFileName(target) + " is already the Goldberg emulator and no original backup was found – keeping the existing interface list.");
+                    return null;
+                }
+                Log(LogLevel.Dim, Path.GetFileName(target) + " is already patched – reading interfaces from the backed-up original.");
+                target = original;
+            }
+
             // Architecture from the PE header, never from the file name. A 64-bit library can legitimately be
             // named steam_api.dll, and running the 32-bit tool against it silently produces nothing.
             ExeArch arch = ExeArch.Unknown;
@@ -2074,17 +2162,27 @@ namespace Gp
                 {
                     var b1 = new byte[81920];
                     var b2 = new byte[81920];
-                    int r1;
-                    while ((r1 = s1.Read(b1, 0, b1.Length)) > 0)
+                    while (true)
                     {
-                        int r2 = s2.Read(b2, 0, b2.Length);
+                        // Stream.Read may legally return fewer bytes than asked for, so fill each buffer
+                        // completely before comparing; comparing raw read counts could report two identical
+                        // files as different.
+                        int r1 = ReadFull(s1, b1);
+                        int r2 = ReadFull(s2, b2);
                         if (r1 != r2) return false;
+                        if (r1 == 0) return true;
                         for (int i = 0; i < r1; i++) if (b1[i] != b2[i]) return false;
                     }
-                    return true;
                 }
             }
             catch { return false; }
+        }
+
+        static int ReadFull(Stream s, byte[] buffer)
+        {
+            int total = 0, n;
+            while (total < buffer.Length && (n = s.Read(buffer, total, buffer.Length - total)) > 0) total += n;
+            return total;
         }
 
         private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, Func<string, string> backup, PatchResult res)
@@ -2099,16 +2197,46 @@ namespace Gp
                 Log(LogLevel.Warn, "This executable does not import a Steamworks dll directly, so " + prefName
                     + " is a guess from its architecture. If the game still fails to start, check which name it loads at runtime.");
 
-            var wanted = new List<string> { prefName };
-            if (foundApi.Any(f => string.Equals(Path.GetFileName(f), otherName, StringComparison.OrdinalIgnoreCase)))
-                wanted.Add(otherName);
+            // The second name is only replaced when it already sits in the install folder itself. Matching it
+            // anywhere in the tree used to create a brand-new, wrongly named emulator dll beside the first
+            // one whenever some unrelated subfolder (a 32-bit tool, a redistributable) shipped the other name.
+            var wanted = new List<KeyValuePair<string, ExeArch>> { new KeyValuePair<string, ExeArch>(prefName, arch) };
+            string otherPath = Path.Combine(installDir, otherName);
+            if (File.Exists(otherPath))
+            {
+                // Games that ship both libraries side by side (a 32- and a 64-bit binary sharing one folder)
+                // need each replaced by the build of its OWN architecture; overwriting the 32-bit library
+                // with the 64-bit emulator breaks the other binary. Unreadable or already-patched files fall
+                // back to the target's architecture.
+                ExeArch otherArch = arch;
+                try
+                {
+                    string probe = otherPath;
+                    if (LooksLikeBundledGoldberg(probe))
+                    {
+                        string original = OriginalBackups.Location(Path.Combine(installDir, "goldberg_backup"), probe);
+                        probe = File.Exists(original) ? original : null;
+                        if (probe == null && FilesEqual(otherPath, Tools.ApiDll86)) otherArch = ExeArch.X86;
+                        else if (probe == null && FilesEqual(otherPath, Tools.ApiDll64)) otherArch = ExeArch.X64;
+                    }
+                    if (probe != null)
+                    {
+                        var probed = PeReader.Analyze(probe).Arch;
+                        if (probed != ExeArch.Unknown) otherArch = probed;
+                    }
+                }
+                catch { }
+                wanted.Add(new KeyValuePair<string, ExeArch>(otherName, otherArch));
+            }
 
             int installed = 0;
-            foreach (var dllName in wanted)
+            foreach (var entry in wanted)
             {
+                string dllName = entry.Key;
+                ExeArch dllArch = entry.Value;
                 // Chosen by architecture, never by the destination name: a 64-bit game can legitimately
                 // import steam_api.dll, and installing the 32-bit library there would be silent breakage.
-                string src = arch == ExeArch.X64 ? Tools.ApiDll64 : Tools.ApiDll86;
+                string src = dllArch == ExeArch.X64 ? Tools.ApiDll64 : Tools.ApiDll86;
                 if (!File.Exists(src)) { Log(LogLevel.Error, "Missing bundled emulator dll: " + src); continue; }
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
@@ -2120,13 +2248,13 @@ namespace Gp
                     var pe = PeReader.Analyze(staged);
                     if (pe.Arch == ExeArch.Unknown)
                         throw new InvalidDataException("Unsupported emulator dll architecture.");
-                    if (pe.Arch != arch)
+                    if (pe.Arch != dllArch)
                         throw new InvalidDataException("Emulator dll is " + pe.MachineText
-                            + " but the target executable is " + (arch == ExeArch.X64 ? "x64" : "x86") + ".");
+                            + " but " + dllName + " needs " + (dllArch == ExeArch.X64 ? "x64" : "x86") + ".");
                 });
                 res.ReplacedFiles.Add(dllName);
                 installed++;
-                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (arch == ExeArch.X64 ? "x64" : "x86") + ")");
+                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (dllArch == ExeArch.X64 ? "x64" : "x86") + ")");
             }
 
             if (installed == 0)
@@ -2720,7 +2848,7 @@ namespace Gp
                 // is worth less than the delay costs.
                 req.Timeout = 4000;
                 req.ReadWriteTimeout = 4000;
-                req.UserAgent = "GoldbergPatcher/0.3";
+                req.UserAgent = "GoldbergPatcher/" + BuildInfo.Version;   // was a stale hardcoded "0.3"
                 using (ct.Register(() => req.Abort()))
                 using (var resp = req.GetResponse())
                 using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
