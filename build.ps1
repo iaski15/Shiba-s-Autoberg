@@ -157,7 +157,7 @@ if (Test-Path $pluginsDir) {
         ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
 }
 $pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
-$pay += @('release\tools\generate_interfaces\generate_interfaces_x86.exe', 'release\tools\generate_interfaces\generate_interfaces_x64.exe')
+# generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
 Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
 $payRes = @()

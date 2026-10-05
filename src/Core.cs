@@ -1342,8 +1342,6 @@ namespace Gp
         public static string SteamlessDir { get { return Path.Combine(BaseDir, "steamless"); } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
         public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api64.dll"); } }
-        public static string GenInterfaces86 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x86.exe"); } }
-        public static string GenInterfaces64 { get { return Path.Combine(BaseDir, @"release\tools\generate_interfaces\generate_interfaces_x64.exe"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"release\steam_settings.EXAMPLE"); } }
 
         public static List<string> Missing()
@@ -2165,27 +2163,6 @@ namespace Gp
             }
         }
 
-        /// <summary>Condenses a child process's stdout/stderr into one short line for the log: the last few
-        /// non-empty lines, joined, capped so it cannot flood the log view. Slicing the raw string at a
-        /// character offset instead starts mid-line and drags embedded newlines into what is meant to be a
-        /// single log entry.</summary>
-        static string Tail(string stdOut, string stdErr, int lineCount, int maxChars)
-        {
-            var all = new List<string>();
-            foreach (var chunk in new[] { stdErr, stdOut })
-            {
-                if (string.IsNullOrEmpty(chunk)) continue;
-                foreach (var raw in chunk.Split('\n'))
-                {
-                    string t = raw.Trim();
-                    if (t.Length > 0) all.Add(t);
-                }
-            }
-            if (all.Count == 0) return "";
-            string joined = string.Join(" | ", all.Skip(Math.Max(0, all.Count - lineCount)).ToArray());
-            return joined.Length > maxChars ? "…" + joined.Substring(joined.Length - maxChars) : joined;
-        }
-
         private string TryGenerateInterfaces(List<string> foundApi, string gameDir, string preferredName, CancellationToken ct)
         {
             if (foundApi.Count == 0) return null;
@@ -2194,14 +2171,14 @@ namespace Gp
             // On a re-patch the live dll is the emulator installed last time. Dumping that would replace a
             // correct steam_interfaces.txt with every interface the emulator knows about, so read the
             // preserved original instead - or skip, leaving any earlier dump in place.
-            if (LooksLikeBundledGoldberg(target))
+            if (InstallCheck.IsEmulatorDll(target))
             {
                 string original = null;
                 try
                 {
                     string candidate = OriginalBackups.Find(
                         Path.Combine(Path.GetDirectoryName(target), "goldberg_backup"), target);
-                    if (File.Exists(candidate) && !LooksLikeBundledGoldberg(candidate)) original = candidate;
+                    if (File.Exists(candidate) && !InstallCheck.IsEmulatorDll(candidate)) original = candidate;
                 }
                 catch { }
                 if (original == null)
@@ -2213,73 +2190,21 @@ namespace Gp
                 target = original;
             }
 
-            // Architecture from the PE header, never from the file name. A 64-bit library can legitimately be
-            // named steam_api.dll, and running the 32-bit tool against it silently produces nothing.
-            ExeArch arch = ExeArch.Unknown;
-            try { arch = PeReader.Analyze(target).Arch; }
-            catch { }
-            if (arch == ExeArch.Unknown)
-            {
-                Log(LogLevel.Warn, "Could not determine the architecture of " + Path.GetFileName(target)
-                    + " – skipping the interface dump rather than guessing at the tool.");
-                return null;
-            }
-            string tool = arch == ExeArch.X64 ? Tools.GenInterfaces64 : Tools.GenInterfaces86;
-            if (!File.Exists(tool))
-            {
-                Log(LogLevel.Dim, "generate_interfaces tool not found – skipping interface dump.");
-                return null;
-            }
-            string tmp = Path.Combine(Path.GetTempPath(), "gp_iface_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            try
-            {
-                Directory.CreateDirectory(tmp);
-                string dllCopy = Path.Combine(tmp, Path.GetFileName(target));
-                File.Copy(target, dllCopy, true);
-                var psi = new ProcessStartInfo
-                {
-                    FileName = tool,
-                    Arguments = "\"" + dllCopy + "\"",
-                    WorkingDirectory = tmp,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                string stdOut = "", stdErr = "";
-                int exit = -1;
-                using (var p = Process.Start(psi))
-                {
-                    // Drain both pipes while waiting, or a chatty tool fills its buffer and deadlocks.
-                    var outTask = p.StandardOutput.ReadToEndAsync();
-                    var errTask = p.StandardError.ReadToEndAsync();
-                    WaitOrKill(p, 60 * 1000, ct);
-                    try { stdOut = outTask.Result; } catch { }
-                    try { stdErr = errTask.Result; } catch { }
-                    try { exit = p.ExitCode; } catch { }
-                }
-                var outFile = Path.Combine(tmp, "steam_interfaces.txt");
-                if (File.Exists(outFile) && File.ReadAllLines(outFile).Any(l => l.Trim().Length > 0))
-                {
-                    Log(LogLevel.Ok, "Generated steam_interfaces.txt from the original dll.");
-                    return File.ReadAllText(outFile);
-                }
-                // Report the exit code and the tool's own output: without them a failure here reads as
-                // "the dll does not export interfaces", which sends people after the wrong problem.
-                // The tail is taken line-wise and joined, not sliced at a character offset - a raw
-                // substring starts mid-line and drags embedded newlines into what should be one log line.
-                string detail = Tail(stdOut, stdErr, 3, 240);
-                Log(LogLevel.Warn, "Interface dump produced nothing (generate_interfaces exit code " + exit + ")"
-                    + (detail.Length > 0 ? ": " + detail : " – the dll may not export interfaces."));
-                return null;
-            }
-            catch (OperationCanceledException) { throw; }
+            ct.ThrowIfCancellationRequested();
+            List<string> lines;
+            try { lines = InterfaceScanner.Scan(target); }
             catch (Exception ex)
             {
                 Log(LogLevel.Dim, "Interface dump failed: " + ex.Message);
                 return null;
             }
-            finally { try { Directory.Delete(tmp, true); } catch { } }
+            if (lines.Count == 0)
+            {
+                Log(LogLevel.Warn, "No Steam interface versions found in " + Path.GetFileName(target) + " – it may not be a Steamworks library.");
+                return null;
+            }
+            Log(LogLevel.Ok, "Generated steam_interfaces.txt from the original dll (" + lines.Count + " interfaces).");
+            return string.Join("\r\n", lines.ToArray()) + "\r\n";
         }
 
         /// <summary>Generic online-fix mode: the game's ORIGINAL steam_api dll must stay in place so that,
@@ -2645,6 +2570,57 @@ namespace Gp
     // --------------------------------------------------------------------- batch patching
 
     /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
+    /// <summary>Managed replacement for GSE's generate_interfaces tool: lists the Steam interface version
+    /// strings an ORIGINAL steam_api dll was built against, which is what steam_interfaces.txt tells the
+    /// emulator. Same patterns, same order and the same SteamClient017 rule as the upstream tool
+    /// (tools/generate_interfaces/generate_interfaces.cpp in gbe_fork), so no external process, no
+    /// architecture-matched helper exe and no temp copy of the dll are needed.</summary>
+    public static class InterfaceScanner
+    {
+        static readonly string[] Patterns =
+        {
+            @"STEAMAPPS_INTERFACE_VERSION\d+", @"SteamApps\d+", @"STEAMAPPLIST_INTERFACE_VERSION\d+",
+            @"STEAMAPPTICKET_INTERFACE_VERSION\d+", @"SteamClient\d+", @"STEAMCONTROLLER_INTERFACE_VERSION",
+            @"SteamController\d+", @"SteamFriends\d+", @"SteamGameServerStats\d+", @"SteamGameCoordinator\d+",
+            @"SteamGameServer\d+", @"STEAMHTMLSURFACE_INTERFACE_VERSION_\d+", @"STEAMHTTP_INTERFACE_VERSION\d+",
+            @"SteamInput\d+", @"STEAMINVENTORY_INTERFACE_V\d+", @"SteamMatchMakingServers\d+",
+            @"SteamMatchMaking\d+", @"SteamMatchGameSearch\d+", @"SteamParties\d+",
+            @"STEAMMUSIC_INTERFACE_VERSION\d+", @"STEAMMUSICREMOTE_INTERFACE_VERSION\d+",
+            @"SteamNetworkingMessages\d+", @"SteamNetworkingSockets\d+", @"SteamNetworkingUtils\d+",
+            @"SteamNetworking\d+", @"STEAMPARENTALSETTINGS_INTERFACE_VERSION\d+",
+            @"STEAMREMOTEPLAY_INTERFACE_VERSION\d+", @"STEAMREMOTESTORAGE_INTERFACE_VERSION\d+",
+            @"STEAMSCREENSHOTS_INTERFACE_VERSION\d+", @"STEAMTIMELINE_INTERFACE_V\d+",
+            @"STEAMUGC_INTERFACE_VERSION\d+", @"SteamUser\d+", @"STEAMUSERSTATS_INTERFACE_VERSION\d+",
+            @"SteamUtils\d+", @"STEAMVIDEO_INTERFACE_V\d+", @"STEAMUNIFIEDMESSAGES_INTERFACE_VERSION\d+",
+            @"SteamMasterServerUpdater\d+",
+        };
+
+        static readonly System.Text.RegularExpressions.Regex[] Compiled =
+            Patterns.Select(x => new System.Text.RegularExpressions.Regex(x, System.Text.RegularExpressions.RegexOptions.CultureInvariant)).ToArray();
+
+        /// <summary>The lines of steam_interfaces.txt for <paramref name="dllPath"/>, in upstream order.</summary>
+        public static List<string> Scan(string dllPath)
+        {
+            // Latin-1 maps every byte to one char, so offsets and ASCII matches are exact.
+            string text = Encoding.GetEncoding(28591).GetString(File.ReadAllBytes(dllPath));
+            var lines = new List<string>();
+            for (int i = 0; i < Compiled.Length; i++)
+            {
+                var matches = Compiled[i].Matches(text).Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value).ToList();
+                if (Patterns[i] == @"SteamClient\d+" && matches.Count > 1 && matches.Contains("SteamClient017"))
+                    matches = new List<string> { "SteamClient017" };
+                lines.AddRange(matches);
+            }
+            return lines;
+        }
+
+        public static string Generate(string dllPath)
+        {
+            var lines = Scan(dllPath);
+            return lines.Count == 0 ? null : string.Join("\r\n", lines.ToArray()) + "\r\n";
+        }
+    }
+
     /// <summary>Pre-flight: protections the emulator cannot get past, recognised from the section table
     /// alone (a header read, no full-file scan). Only protectors with fixed, documented section names are
     /// listed; Denuvo and Arxan have no reliable structural marker and are deliberately not guessed at - a

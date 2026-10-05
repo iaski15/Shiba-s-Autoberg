@@ -588,8 +588,12 @@ static class TestMain
                 File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(1));
             }
 
-            byte[] origDllBytes = File.ReadAllBytes(Path.Combine(root, @"release\regular\x64\steam_api64.dll"));
-            origDllBytes[origDllBytes.Length - 1] ^= 1;
+            // A Valve-like original: a valid x64 PE carrying interface version strings and no GSE marker.
+            string valveTmp = Path.Combine(work, "valve_original.tmp");
+            WriteNativeX64Pe(valveTmp);
+            byte[] origDllBytes = File.ReadAllBytes(valveTmp)
+                .Concat(Encoding.ASCII.GetBytes("\0SteamUser021\0SteamFriends017\0SteamClient017\0STEAMAPPS_INTERFACE_VERSION008\0")).ToArray();
+            File.Delete(valveTmp);
             File.WriteAllBytes(Path.Combine(gameDir, "steam_api.dll"), origDllBytes);
 
             // nested copy deep in the tree SHOULD be picked up by the full-folder scan
@@ -656,8 +660,8 @@ static class TestMain
             var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.ini");
             Check(File.Exists(settingsIni), "steam_settings copied & '.EXAMPLE' stripped", settingsIni);
             var iface = Path.Combine(gameDir, "steam_settings", "steam_interfaces.txt");
-            Check(File.Exists(iface) && File.ReadAllLines(iface).Any(l => l.Trim().Length > 0),
-                  "steam_interfaces.txt generated into steam_settings");
+            Check(File.Exists(iface) && File.ReadAllLines(iface).SequenceEqual(new[] { "STEAMAPPS_INTERFACE_VERSION008", "SteamClient017", "SteamFriends017", "SteamUser021" }),
+                  "steam_interfaces.txt generated in-process, in upstream pattern order", File.Exists(iface) ? File.ReadAllText(iface).Replace("\r\n", ",") : "(missing)");
 
             // ---- appid prefill helper ----
             Console.WriteLine("\n[helpers]");
