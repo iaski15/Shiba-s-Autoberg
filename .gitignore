@@ -9,3 +9,8 @@ plan.md
 # Payload verification cache, written next to the exe at runtime.
 .payload-ok
 .payload-ok.tmp
+
+# Build outputs - releases are built from a clean checkout of the tagged commit and attached on GitHub.
+/Goldberg Patcher.exe
+/_selftest.exe
+/dist/

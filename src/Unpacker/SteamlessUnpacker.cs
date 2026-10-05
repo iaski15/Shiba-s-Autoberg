@@ -59,6 +59,13 @@ namespace SteamlessNative
         public byte[] Payload { get; internal set; }
         public byte[] SteamDrmp { get; internal set; }
 
+        /// <summary>The unpacked executable, set by <see cref="SteamlessUnpacker.UnpackToMemory"/>.</summary>
+        public byte[] Output { get; internal set; }
+
+        /// <summary>Lower-case hex SHA-256 of the packed input exactly as it was read - lets a caller prove
+        /// the file on disk has not changed since, without hashing it twice.</summary>
+        public string SourceSha256 { get; internal set; }
+
         internal UnpackResult()
         {
             Payload = new byte[0];
@@ -77,9 +84,83 @@ namespace SteamlessNative
             return info;
         }
 
+        /// <summary>Whether the file has a ".bind" section - where every SteamStub variant keeps its stub -
+        /// reading only the PE headers and section table, never the whole file. Null when the file cannot be
+        /// read or is not a PE, so callers can fall back to a full check.</summary>
+        public static bool? HasStubSection(string filePath)
+        {
+            try
+            {
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096))
+                {
+                    var head = new byte[(int)Math.Min(fs.Length, 0x400)];
+                    if (ReadFully(fs, head) < 0x40 || PeImage.ReadUInt16(head, 0) != 0x5A4D) return null;
+                    int nt = PeImage.ReadInt32(head, 0x3C);
+                    if (nt < 0 || (long)nt + 24 > fs.Length) return null;
+                    var file = new byte[24];
+                    fs.Position = nt;
+                    if (ReadFully(fs, file) != 24 || PeImage.ReadUInt32(file, 0) != 0x00004550) return null;
+                    int count = PeImage.ReadUInt16(file, 6);
+                    long table = (long)nt + 24 + PeImage.ReadUInt16(file, 20);
+                    if (count == 0 || count > 96 || table + count * 40L > fs.Length) return null;
+                    var sections = new byte[count * 40];
+                    fs.Position = table;
+                    if (ReadFully(fs, sections) != sections.Length) return null;
+                    for (int i = 0; i < count; i++)
+                    {
+                        int o = i * 40;
+                        if (sections[o] == '.' && sections[o + 1] == 'b' && sections[o + 2] == 'i' && sections[o + 3] == 'n'
+                            && sections[o + 4] == 'd' && sections[o + 5] == 0)
+                            return true;
+                    }
+                    return false;
+                }
+            }
+            catch { return null; }
+        }
+
+        static int ReadFully(Stream s, byte[] buffer)
+        {
+            int total = 0, n;
+            while (total < buffer.Length && (n = s.Read(buffer, total, buffer.Length - total)) > 0) total += n;
+            return total;
+        }
+
         public static UnpackResult Unpack(string sourcePath, string destinationPath)
         {
             return Unpack(sourcePath, destinationPath, new UnpackOptions());
+        }
+
+        /// <summary>Unpacks without writing the result anywhere: <see cref="UnpackResult.Output"/> holds the
+        /// rebuilt executable. Lets the caller stream it straight into its own staged write instead of
+        /// round-tripping through a temporary file.</summary>
+        public static UnpackResult UnpackToMemory(string sourcePath, UnpackOptions options = null)
+        {
+            var result = new UnpackResult();
+            options = options ?? new UnpackOptions();
+            if (string.IsNullOrWhiteSpace(sourcePath))
+            {
+                result.ErrorCode = UnpackErrorCode.InvalidInput;
+                result.Error = "Input path is empty.";
+                return result;
+            }
+            try
+            {
+                if (PathsConflict(sourcePath, null, options.DumpPayloadPath, options.DumpSteamDrmpPath))
+                {
+                    result.ErrorCode = UnpackErrorCode.InvalidDestination;
+                    result.Error = "Input and dump paths must be distinct.";
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.ErrorCode = UnpackErrorCode.InvalidDestination;
+                result.Error = "Dump path is invalid: " + ex.Message;
+                return result;
+            }
+            UnpackCore(sourcePath, options, result);
+            return result;
         }
 
         public static UnpackResult Unpack(string sourcePath, string destinationPath, UnpackOptions options)
@@ -115,12 +196,32 @@ namespace SteamlessNative
                 return result;
             }
 
+            if (!UnpackCore(sourcePath, options, result)) return result;
+            try
+            {
+                AtomicWrite(destinationPath, result.Output);
+                result.DestinationPath = Path.GetFullPath(destinationPath);
+                result.Output = null;   // the caller asked for a file; do not also pin the whole image in memory
+                return result;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+            {
+                result.Success = false;
+                result.Output = null;
+                result.ErrorCode = UnpackErrorCode.IoError;
+                result.Error = "Output could not be written: " + ex.Message;
+                return result;
+            }
+        }
+
+        static bool UnpackCore(string sourcePath, UnpackOptions options, UnpackResult result)
+        {
             PeImage image;
             if (!PeImage.TryLoad(sourcePath, out image))
             {
                 result.ErrorCode = UnpackErrorCode.InvalidInput;
                 result.Error = "Input is not a valid supported PE file.";
-                return result;
+                return false;
             }
 
             VariantInfo info;
@@ -128,7 +229,7 @@ namespace SteamlessNative
             {
                 result.ErrorCode = UnpackErrorCode.UnsupportedVariant;
                 result.Error = "SteamStub Variant 3.1 was not detected.";
-                return result;
+                return false;
             }
 
             PeHeader header;
@@ -136,7 +237,7 @@ namespace SteamlessNative
             {
                 result.ErrorCode = UnpackErrorCode.InvalidHeader;
                 result.Error = "SteamStub header could not be decoded.";
-                return result;
+                return false;
             }
 
             result.Variant = info;
@@ -145,7 +246,7 @@ namespace SteamlessNative
             {
                 result.ErrorCode = UnpackErrorCode.InvalidPayload;
                 result.Error = "Payload data is outside the input file.";
-                return result;
+                return false;
             }
             result.Payload = payload;
             if (payload.Length > 0 && !string.IsNullOrEmpty(options.DumpPayloadPath))
@@ -155,7 +256,7 @@ namespace SteamlessNative
                 {
                     result.ErrorCode = UnpackErrorCode.IoError;
                     result.Error = "Payload dump could not be written: " + ex.Message;
-                    return result;
+                    return false;
                 }
             }
 
@@ -164,7 +265,7 @@ namespace SteamlessNative
             {
                 result.ErrorCode = UnpackErrorCode.InvalidSteamDrmp;
                 result.Error = "SteamDRMP data is outside the input file.";
-                return result;
+                return false;
             }
             result.SteamDrmp = drmp;
             if (drmp.Length > 0 && !string.IsNullOrEmpty(options.DumpSteamDrmpPath))
@@ -174,7 +275,7 @@ namespace SteamlessNative
                 {
                     result.ErrorCode = UnpackErrorCode.IoError;
                     result.Error = "SteamDRMP dump could not be written: " + ex.Message;
-                    return result;
+                    return false;
                 }
             }
 
@@ -187,7 +288,7 @@ namespace SteamlessNative
                 {
                     result.ErrorCode = UnpackErrorCode.InvalidCodeSection;
                     result.Error = "Encrypted code section was not found.";
-                    return result;
+                    return false;
                 }
                 codeIndex = image.IndexOf(codeSection);
                 int codeLength = image.Is64 ? (int)codeSection.SizeOfRawData : (int)header.CodeSectionRawSize;
@@ -195,7 +296,7 @@ namespace SteamlessNative
                 {
                     result.ErrorCode = UnpackErrorCode.InvalidCodeSection;
                     result.Error = "Encrypted code section size is invalid.";
-                    return result;
+                    return false;
                 }
                 byte[] combined = new byte[header.CodeSectionStolenData.Length + codeLength];
                 Buffer.BlockCopy(header.CodeSectionStolenData, 0, combined, 0, header.CodeSectionStolenData.Length);
@@ -216,7 +317,7 @@ namespace SteamlessNative
                 {
                     result.ErrorCode = UnpackErrorCode.CodeDecryptionFailed;
                     result.Error = "Code section decryption failed.";
-                    return result;
+                    return false;
                 }
             }
 
@@ -225,36 +326,25 @@ namespace SteamlessNative
                 byte[] output = BuildUnpacked(image, header, options, codeIndex, codeData);
                 if (options.RecalculateChecksum)
                     UpdateChecksum(output, image.OptionalOffset + 64);
-                AtomicWrite(destinationPath, output);
-                result.DestinationPath = Path.GetFullPath(destinationPath);
+                ValidateOutput(output, options);
+                result.Output = output;
+                result.SourceSha256 = Sha256Hex(image.Data);
                 result.Success = true;
                 result.ErrorCode = UnpackErrorCode.None;
                 result.Error = null;
-                return result;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                result.ErrorCode = UnpackErrorCode.IoError;
-                result.Error = "Output could not be written: " + ex.Message;
-                return result;
-            }
-            catch (IOException ex)
-            {
-                result.ErrorCode = UnpackErrorCode.IoError;
-                result.Error = "Output could not be written: " + ex.Message;
-                return result;
+                return true;
             }
             catch (InvalidDataException ex)
             {
                 result.ErrorCode = UnpackErrorCode.OutputValidationFailed;
                 result.Error = ex.Message;
-                return result;
+                return false;
             }
             catch (Exception ex)
             {
                 result.ErrorCode = UnpackErrorCode.UnexpectedError;
                 result.Error = ex.Message;
-                return result;
+                return false;
             }
         }
 
@@ -562,7 +652,50 @@ namespace SteamlessNative
 
             if (overlayLength > 0)
                 Buffer.BlockCopy(image.Data, originalOverlayStart, output, overlayStart, overlayLength);
+
+            // The certificate table (data directory 4) is addressed by FILE offset, normally into the overlay.
+            // Dropping .bind moves the overlay, so shift the pointer with it rather than leave it aimed at the
+            // wrong bytes. (The signature no longer verifies either way; this keeps the file self-consistent.)
+            int dirBase = image.OptionalOffset + (image.Is64 ? 112 : 96);
+            int dirCount = (int)PeImage.ReadUInt32(output, image.OptionalOffset + (image.Is64 ? 108 : 92));
+            if (dirCount > 4 && overlayStart != originalOverlayStart)
+            {
+                uint certOffset = PeImage.ReadUInt32(output, dirBase + 4 * 8);
+                uint certSize = PeImage.ReadUInt32(output, dirBase + 4 * 8 + 4);
+                if (certSize != 0 && certOffset >= (uint)originalOverlayStart)
+                    PeImage.WriteUInt32(output, dirBase + 4 * 8, (uint)(certOffset - originalOverlayStart + overlayStart));
+            }
             return output;
+        }
+
+        /// <summary>Cheap semantic checks on the rebuilt image. Parsing as a PE is not enough: a section-rebuild
+        /// mistake still parses, then crashes at launch. The entry point must land in code, and no stub
+        /// section may survive (unless asked to keep it).</summary>
+        private static void ValidateOutput(byte[] output, UnpackOptions options)
+        {
+            PeImage rebuilt;
+            try { rebuilt = new PeImage(output); }
+            catch (Exception ex) { throw new InvalidDataException("Unpacked output is not a valid PE: " + ex.Message); }
+            PeSection bind;
+            if (!options.KeepBindSection && rebuilt.TryGetSection(".bind", out bind))
+                throw new InvalidDataException("Unpacked output still contains the .bind stub section.");
+            PeSection entry;
+            if (!rebuilt.TryFindOwner(rebuilt.EntryPoint, out entry))
+                throw new InvalidDataException("Restored entry point 0x" + rebuilt.EntryPoint.ToString("X") + " is outside every section.");
+            const uint Code = 0x00000020, Execute = 0x20000000;
+            if ((entry.Characteristics & (Code | Execute)) == 0)
+                throw new InvalidDataException("Restored entry point lands in non-executable section " + entry.Name + ".");
+        }
+
+        private static string Sha256Hex(byte[] data)
+        {
+            using (var sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(data);
+                var sb = new StringBuilder(hash.Length * 2);
+                foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
         }
 
         private static bool PathsEqual(string left, string right)
@@ -572,13 +705,14 @@ namespace SteamlessNative
 
         private static bool PathsConflict(string sourcePath, string destinationPath, string payloadPath, string steamDrmpPath)
         {
-            if (PathsEqual(sourcePath, destinationPath))
+            bool hasDestination = !string.IsNullOrEmpty(destinationPath);
+            if (hasDestination && PathsEqual(sourcePath, destinationPath))
                 return true;
             if (!string.IsNullOrEmpty(payloadPath)
-                && (PathsEqual(sourcePath, payloadPath) || PathsEqual(destinationPath, payloadPath)))
+                && (PathsEqual(sourcePath, payloadPath) || (hasDestination && PathsEqual(destinationPath, payloadPath))))
                 return true;
             if (!string.IsNullOrEmpty(steamDrmpPath)
-                && (PathsEqual(sourcePath, steamDrmpPath) || PathsEqual(destinationPath, steamDrmpPath)))
+                && (PathsEqual(sourcePath, steamDrmpPath) || (hasDestination && PathsEqual(destinationPath, steamDrmpPath))))
                 return true;
             return !string.IsNullOrEmpty(payloadPath) && !string.IsNullOrEmpty(steamDrmpPath)
                 && PathsEqual(payloadPath, steamDrmpPath);
@@ -691,6 +825,7 @@ namespace SteamlessNative
             public uint VirtualAddress;
             public uint SizeOfRawData;
             public uint PointerToRawData;
+            public uint Characteristics;
             public int HeaderOffset;
 
             public byte[] GetData(byte[] fileData)
@@ -718,14 +853,17 @@ namespace SteamlessNative
             public List<PeSection> Sections = new List<PeSection>();
             public List<ulong> TlsCallbacks = new List<ulong>();
 
+            /// <summary>Where section data ends and the overlay begins: the furthest raw end of any section. The
+            /// section table need not be sorted by file offset, so the last entry is not necessarily it.</summary>
             public int LastSectionEnd
             {
                 get
                 {
-                    if (Sections.Count == 0)
-                        return 0;
-                    PeSection last = Sections[Sections.Count - 1];
-                    return checked((int)last.PointerToRawData + (int)last.SizeOfRawData);
+                    long end = 0;
+                    foreach (PeSection section in Sections)
+                        if (section.SizeOfRawData > 0)
+                            end = Math.Max(end, (long)section.PointerToRawData + section.SizeOfRawData);
+                    return checked((int)end);
                 }
             }
 
@@ -745,7 +883,7 @@ namespace SteamlessNative
                 }
             }
 
-            private PeImage(byte[] data)
+            public PeImage(byte[] data)
             {
                 Data = data;
                 if (Data.Length < 0x40 || ReadUInt16(Data, 0) != 0x5A4D)
@@ -781,6 +919,7 @@ namespace SteamlessNative
                         VirtualAddress = ReadUInt32(Data, offset + 12),
                         SizeOfRawData = ReadUInt32(Data, offset + 16),
                         PointerToRawData = ReadUInt32(Data, offset + 20),
+                        Characteristics = ReadUInt32(Data, offset + 36),
                         HeaderOffset = offset
                     };
                     if (section.SizeOfRawData > 0 && (ulong)section.PointerToRawData + section.SizeOfRawData > (ulong)Data.Length)

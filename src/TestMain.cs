@@ -118,8 +118,108 @@ static class TestMain
             Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput
                   && missingResult.Payload.Length == 0 && missingResult.SteamDrmp.Length == 0 && !File.Exists(missingOutput),
                   "missing native input returns a structured result", missingResult.Error);
+
+            // header-only stub probe: decides whether anything is loaded or hashed at all
+            string probePacked = Path.Combine(nativeDir, "probe-packed.exe");
+            WriteSteamStub31(probePacked, true);
+            string probePlain = Path.Combine(nativeDir, "probe-plain.exe");
+            WriteNativeX64Pe(probePlain);
+            string probeJunk = Path.Combine(nativeDir, "probe-junk.exe");
+            File.WriteAllBytes(probeJunk, new byte[] { 0x4D, 0x5A, 0, 0 });
+            Check(SteamlessUnpacker.HasStubSection(probePacked) == true
+                  && SteamlessUnpacker.HasStubSection(probePlain) == false
+                  && SteamlessUnpacker.HasStubSection(probeJunk) == null
+                  && SteamlessUnpacker.HasStubSection(Path.Combine(nativeDir, "nope.exe")) == null,
+                  "header-only .bind probe: packed / plain / junk / missing", null);
+
+            // in-memory unpack hands back the image and a hash of exactly what it read
+            UnpackResult inMemory = SteamlessUnpacker.UnpackToMemory(probePacked);
+            Check(inMemory.Success && inMemory.Output != null && inMemory.DestinationPath == null
+                  && inMemory.SourceSha256 == SafePersistence.Hash(probePacked),
+                  "UnpackToMemory returns output and the source hash, writes nothing", inMemory.Error);
+            Check(SteamlessUnpacker.HasStubSection(probePacked) == true && inMemory.Output.Length > 0
+                  && SafePersistence.Hash(inMemory.Output) != inMemory.SourceSha256,
+                  "in-memory output differs from the packed input", null);
+
+            // output guard: an entry point outside executable code is refused, not shipped
+            string noExec = Path.Combine(nativeDir, "noexec.exe");
+            WriteSteamStub31(noExec, true, false);
+            UnpackResult guarded = SteamlessUnpacker.UnpackToMemory(noExec);
+            Check(!guarded.Success && guarded.ErrorCode == UnpackErrorCode.OutputValidationFailed && guarded.Output == null,
+                  "entry point in a non-executable section fails output validation", guarded.Error);
+
+            // overlay + certificate table move together when .bind is dropped
+            foreach (bool is64 in new[] { true, false })
+            {
+                string withOverlay = Path.Combine(nativeDir, "overlay-" + (is64 ? "x64" : "x86") + ".exe");
+                WriteSteamStub31(withOverlay, is64);
+                byte[] packedBytes = File.ReadAllBytes(withOverlay);
+                byte[] overlay = Encoding.ASCII.GetBytes("CERTIFICATE-TABLE-AND-OVERLAY-DATA-0123456789");
+                int optOff = 0x80 + 24, certEntry = optOff + (is64 ? 112 : 96) + 4 * 8;
+                W32(packedBytes, certEntry, (uint)packedBytes.Length);
+                W32(packedBytes, certEntry + 4, (uint)overlay.Length);
+                File.WriteAllBytes(withOverlay, packedBytes.Concat(overlay).ToArray());
+                UnpackResult moved = SteamlessUnpacker.UnpackToMemory(withOverlay);
+                bool ok = moved.Success;
+                if (ok)
+                {
+                    byte[] o = moved.Output;
+                    int newCert = BitConverter.ToInt32(o, certEntry);
+                    ok = newCert + overlay.Length == o.Length && newCert < packedBytes.Length
+                         && o.Skip(newCert).Take(overlay.Length).SequenceEqual(overlay);
+                }
+                Check(ok, "overlay kept and certificate pointer follows it (" + (is64 ? "x64" : "x86") + ")", moved.Error);
+            }
         }
         finally { try { Directory.Delete(nativeDir, true); } catch { } }
+
+        Console.WriteLine("\n[integration: packed game]");
+        string packedWork = Path.Combine(Path.GetTempPath(), "gp_selftest_packed_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            string gameDir = Directory.CreateDirectory(Path.Combine(packedWork, "Packed")).FullName;
+            string exe = Path.Combine(gameDir, "Packed.exe");
+            WriteSteamStub31(exe, true);
+            string packedHash = SafePersistence.Hash(exe);
+            string expectedUnpacked = SafePersistence.Hash(SteamlessUnpacker.UnpackToMemory(exe).Output);
+            var prunner = new PatchRunner();
+            var plog = new List<string>();
+            prunner.LogLine += e => plog.Add(e.Message);
+            var pres = prunner.Run(new PatchOptions { GameExe = exe, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
+            Check(pres.Success && pres.Unpacked, "packed game is unpacked by the built-in path", pres.Summary);
+            Check(SafePersistence.Hash(exe) == expectedUnpacked, "exe on disk is exactly the in-memory output", null);
+            Check(!Directory.GetFiles(gameDir, "*.unpacked.exe").Any(), "no temporary .unpacked.exe is left behind", null);
+            Check(!plog.Any(l => l.IndexOf("Running Steamless", StringComparison.OrdinalIgnoreCase) >= 0),
+                  "the Steamless CLI is not started when the built-in unpacker succeeds", null);
+            var exeWrite = pres.Writes.FirstOrDefault(w => string.Equals(w.Destination, Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase));
+            Check(exeWrite != null && exeWrite.PreviousHash == packedHash && exeWrite.StagedHash == expectedUnpacked
+                  && exeWrite.ExternalRecovery && File.Exists(exeWrite.RecoveryPath) && SafePersistence.Hash(exeWrite.RecoveryPath) == packedHash,
+                  "journal records the packed original (via the verified backup) and the unpacked result", null);
+            var undo = Recovery.RollbackWrites(pres.Writes, (lvl, m) => { });
+            Check(undo.Failed == 0 && SafePersistence.Hash(exe) == packedHash, "undo restores the packed exe byte for byte", undo.Summary);
+        }
+        finally { try { Directory.Delete(packedWork, true); } catch { } }
+
+        Console.WriteLine("\n[hash-on-write]");
+        string howDir = Path.Combine(Path.GetTempPath(), "gp_selftest_how_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        Directory.CreateDirectory(howDir);
+        try
+        {
+            string src = Path.Combine(howDir, "src.bin");
+            var data = new byte[3 * 1024 * 1024 + 17];
+            new Random(7).NextBytes(data);
+            File.WriteAllBytes(src, data);
+            string dst = Path.Combine(howDir, "dst.bin");
+            var rec = SafePersistence.Copy(src, dst);
+            Check(rec.StagedHash == SafePersistence.Hash(dst) && rec.StagedHash == SafePersistence.Hash(data),
+                  "hash taken while writing equals a full re-read", null);
+            File.WriteAllText(dst, "keep me");
+            bool rejected = false;
+            try { SafePersistence.Copy(src, dst, null, null, null, new string('0', 64)); }
+            catch (IOException ex) { rejected = ex.InnerException is InvalidDataException; }
+            Check(rejected && File.ReadAllText(dst) == "keep me", "a wrong known source hash is caught before anything is replaced", null);
+        }
+        finally { try { Directory.Delete(howDir, true); } catch { } }
 
         // ---- synthetic PEs: regression tests for the PeReader offset bugs (bug 1) ----
         Console.WriteLine("\n[PE analysis: synthetic]");
@@ -1014,7 +1114,7 @@ static class TestMain
     static void W32(byte[] b, int off, uint v) { b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24); }
     static void W64(byte[] b, int off, ulong v) { W32(b, off, (uint)v); W32(b, off + 4, (uint)(v >> 32)); }
 
-    static void WriteSteamStub31(string path, bool is64)
+    static void WriteSteamStub31(string path, bool is64, bool executableText = true)
     {
         var b = new byte[0x1600];
         W16(b, 0x00, 0x5A4D);
@@ -1041,6 +1141,8 @@ static class TestMain
         W32(b, sec + 12, 0x1000);
         W32(b, sec + 16, 0x200);
         W32(b, sec + 20, 0x400);
+        if (executableText) W32(b, sec + 36, 0x60000020);   // CODE | EXECUTE | READ, as every real .text has
+        else W32(b, sec + 36, 0x40000040);                  // initialised data, read-only
         sec += 40;
         Array.Copy(Encoding.ASCII.GetBytes(".bind"), 0, b, sec, 5);
         W32(b, sec + 8, 0x1000);

@@ -11,7 +11,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Web.Script.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Xml;
+using System.Xml.Linq;
 using SteamlessNative;
 
 namespace Gp
@@ -324,13 +326,70 @@ namespace Gp
         }
     }
 
+    /// <summary>Write-through stream that hashes every byte on its way to the inner stream, so the hash of
+    /// staged content falls out of the copy itself instead of costing a second full read of the file.</summary>
+    internal sealed class HashingStream : Stream
+    {
+        readonly Stream inner;
+        readonly SHA256 sha = SHA256.Create();
+        string hex;
+
+        internal HashingStream(Stream inner) { this.inner = inner; }
+
+        /// <summary>Hex SHA-256 of everything written so far. Finalises the hash: write nothing after reading it.</summary>
+        internal string Hex
+        {
+            get
+            {
+                if (hex == null) { sha.TransformFinalBlock(new byte[0], 0, 0); hex = SafePersistence.ToHex(sha.Hash); }
+                return hex;
+            }
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (hex != null) throw new InvalidOperationException("Hash already finalised.");
+            sha.TransformBlock(buffer, offset, count, null, 0);
+            inner.Write(buffer, offset, count);
+        }
+        public override void WriteByte(byte value) { Write(new[] { value }, 0, 1); }
+        public override void Flush() { inner.Flush(); }
+        public override bool CanRead { get { return false; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return true; } }
+        public override long Length { get { return inner.Length; } }
+        public override long Position { get { return inner.Position; } set { throw new NotSupportedException(); } }
+        public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        protected override void Dispose(bool disposing) { if (disposing) sha.Dispose(); base.Dispose(disposing); }
+    }
+
     public static class SafePersistence
     {
+        const int IoBuffer = 1 << 20;
+
         public static string Hash(string path)
         {
-            using (var input = File.OpenRead(path))
+            // A large sequential buffer: the default 4 KB FileStream buffer turns a multi-hundred-MB exe
+            // into tens of thousands of tiny reads.
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, IoBuffer, FileOptions.SequentialScan))
             using (var sha = SHA256.Create())
-                return BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
+                return ToHex(sha.ComputeHash(input));
+        }
+
+        public static string Hash(byte[] data)
+        {
+            using (var sha = SHA256.Create()) return ToHex(sha.ComputeHash(data));
+        }
+
+        static readonly char[] HexDigits = "0123456789abcdef".ToCharArray();
+
+        internal static string ToHex(byte[] bytes)
+        {
+            var c = new char[bytes.Length * 2];
+            for (int i = 0; i < bytes.Length; i++) { c[2 * i] = HexDigits[bytes[i] >> 4]; c[2 * i + 1] = HexDigits[bytes[i] & 15]; }
+            return new string(c);
         }
 
         internal static string PathKey(string path)
@@ -380,8 +439,15 @@ namespace Gp
         /// <param name="externalRecovery">Path to an already-verified copy of the current destination
         /// content (the goldberg_backup original). When supplied, no second copy is taken inside the
         /// staging area – the caller has already paid for one – and rollback restores from there.</param>
+        /// <param name="expectedStagedHash">When set, the bytes written must hash to exactly this, or the write
+        /// is abandoned before anything is replaced. Checked against the hash taken while writing, so it costs
+        /// no extra read.</param>
+        /// <param name="knownPreviousHash">Hash of what rollback will restore - the external recovery file, or
+        /// the destination's current content - when the caller has already established it. Saves a full read
+        /// of a file that can be hundreds of megabytes.</param>
         public static FileWriteRecord Write(string path, Action<Stream> write, Action<string> validate = null,
-            List<FileWriteRecord> journal = null, Action<string> checkpoint = null, string externalRecovery = null)
+            List<FileWriteRecord> journal = null, Action<string> checkpoint = null, string externalRecovery = null,
+            string expectedStagedHash = null, string knownPreviousHash = null)
         {
             path = Path.GetFullPath(path);
             return Locked(path, () =>
@@ -404,21 +470,24 @@ namespace Gp
                 if (journal != null) journal.Add(record);
                 try
                 {
-                    using (var stream = new FileStream(record.StagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    using (var stream = new FileStream(record.StagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, IoBuffer))
+                    using (var hashing = new HashingStream(stream))
                     {
-                        write(stream);
+                        write(hashing);
+                        hashing.Flush();
                         stream.Flush(true);
+                        record.StagedHash = hashing.Hex;
                     }
+                    if (expectedStagedHash != null && record.StagedHash != expectedStagedHash)
+                        throw new InvalidDataException("Staged copy hash mismatch: " + path);
                     if (validate != null) validate(record.StagedPath);
                     if (checkpoint != null) checkpoint("staged");
                     // For a local recovery copy, File.Replace will move the destination's current
                     // content there, so the destination is what we must hash. For an external recovery
                     // the copy already exists and is what rollback will restore from.
-                    string oldHash = external
-                        ? Hash(record.RecoveryPath)
-                        : (record.RecoveryPath.Length == 0 ? "absent" : Hash(path));
+                    string oldHash = record.RecoveryPath.Length == 0 && !external ? "absent"
+                        : knownPreviousHash ?? (external ? Hash(record.RecoveryPath) : Hash(path));
                     record.PreviousHash = oldHash;
-                    record.StagedHash = Hash(record.StagedPath);
                     var j = new StringBuilder();
                     j.AppendLine("destination=" + path);
                     j.AppendLine("staged=" + record.StagedPath);
@@ -455,19 +524,20 @@ namespace Gp
             });
         }
 
+        /// <param name="knownSourceHash">The source's hash when the caller already holds it. The copy is
+        /// still checked against it byte for byte (hash-on-write), so a source that changed in between is
+        /// caught exactly as before - only the separate up-front read is skipped.</param>
         public static FileWriteRecord Copy(string source, string destination, List<FileWriteRecord> journal = null,
-            Action<string> validate = null, string externalRecovery = null)
+            Action<string> validate = null, string externalRecovery = null, string knownSourceHash = null,
+            string knownPreviousHash = null)
         {
             if (!File.Exists(source)) throw new FileNotFoundException("Source file for staged copy not found: " + source, source);
-            string expected = Hash(source);
+            string expected = knownSourceHash ?? Hash(source);
             return Write(destination, output =>
             {
-                using (var input = File.OpenRead(source)) input.CopyTo(output);
-            }, staged =>
-            {
-                if (Hash(staged) != expected) throw new InvalidDataException("Staged copy hash mismatch: " + source);
-                if (validate != null) validate(staged);
-            }, journal, null, externalRecovery);
+                using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, IoBuffer, FileOptions.SequentialScan))
+                    input.CopyTo(output, IoBuffer);
+            }, validate, journal, null, externalRecovery, expected, knownPreviousHash);
         }
 
         public static FileWriteRecord WriteText(string path, string text, List<FileWriteRecord> journal = null,
@@ -509,18 +579,25 @@ namespace Gp
         }
 
         internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash,
-            string externalRecovery = null)
+            string externalRecovery = null, string externalRecoveryHash = null)
         {
             if (!IsCurrent(path)) throw new IOException("No current invocation output: " + path);
             string expected = SafePersistence.Hash(path);
+            var stamp = new FileInfo(path);
+            long length = stamp.Length; DateTime written = stamp.LastWriteTimeUtc;
+            // The staged copy is checked against 'expected' while it is written; the input re-hash is what
+            // proves nobody modified the game exe while Steamless ran, and it also vouches for the content
+            // a local recovery copy will hold.
             SafePersistence.Copy(path, input, journal, staged =>
             {
-                if (SafePersistence.Hash(staged) != expected || SafePersistence.Hash(input) != expectedInputHash)
+                if (SafePersistence.Hash(input) != expectedInputHash)
                     throw new IOException("Executable or output changed during processing: " + input);
                 if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
                     throw new InvalidDataException("Unsupported unpacked executable architecture.");
-            }, externalRecovery);
-            if (SafePersistence.Hash(path) == expected) File.Delete(path);
+            }, externalRecovery, expected, externalRecovery != null ? externalRecoveryHash : expectedInputHash);
+            // Our own temporary output: an unchanged size and timestamp is enough to know it is still ours.
+            var now = new FileInfo(path);
+            if (now.Exists && now.Length == length && now.LastWriteTimeUtc == written) File.Delete(path);
         }
     }
 
@@ -603,27 +680,50 @@ namespace Gp
 
         public static string Preserve(string root, string source, Action<LogLevel, string> log = null)
         {
+            string ignored;
+            return Preserve(root, source, log, null, out ignored);
+        }
+
+        /// <param name="knownSourceHash">Hash of <paramref name="source"/> when the caller already has it.</param>
+        /// <param name="backupHash">Hash of the backup that is returned, so callers can hand it on instead
+        /// of reading the backup again.</param>
+        public static string Preserve(string root, string source, Action<LogLevel, string> log, string knownSourceHash, out string backupHash)
+        {
             string destination = Location(root, source);
-            return SafePersistence.Locked(destination, () =>
+            string result = null, resultHash = null;
+            SafePersistence.Locked(destination, () =>
             {
                 string hash;
                 string existing = Existing(root, source, out hash, log);
-                if (existing != null && File.Exists(destination)) return existing;
+                if (existing != null && File.Exists(destination)) { result = existing; resultHash = hash; return true; }
                 string content = existing ?? source;
-                if (!Eligible(content)) return null;
-                hash = hash ?? SafePersistence.Hash(content);
+                if (!Eligible(content)) return true;
+                if (hash == null && existing == null) hash = knownSourceHash;
                 // These two writes are the backup itself, so they need no undo record of their own –
                 // and they are not part of any run's journal, so nothing else would ever collect their
                 // staging areas. Drop them here or goldberg_backup accumulates .gp-recovery litter.
-                var backupWrite = SafePersistence.Copy(content, destination, null, staged =>
+                // Copy verifies the bytes it wrote against 'hash' (or hashes the source first when no hash
+                // is known); either way a source that changes mid-copy is rejected.
+                FileWriteRecord backupWrite;
+                try
                 {
-                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
-                        throw new IOException("Original changed while preserving: " + content);
-                });
+                    backupWrite = SafePersistence.Copy(content, destination, null, staged =>
+                    {
+                        if (!Eligible(staged)) throw new IOException("Original changed while preserving: " + content);
+                    }, null, hash);
+                }
+                catch (IOException ex) when (ex.InnerException is InvalidDataException)
+                {
+                    throw new IOException("Original changed while preserving: " + content, ex);
+                }
+                hash = backupWrite.StagedHash;
                 var manifestWrite = SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + hash + "\r\n");
                 Recovery.Discard(new[] { backupWrite, manifestWrite });
-                return destination;
+                result = destination; resultHash = hash;
+                return true;
             });
+            backupHash = resultHash;
+            return result;
         }
 
         public static void Restore(string root, string source, List<FileWriteRecord> journal = null, Action<LogLevel, string> log = null)
@@ -633,11 +733,18 @@ namespace Gp
                 string hash;
                 string backup = Existing(root, source, out hash, log);
                 if (backup == null) throw new IOException("No verified or eligible legacy original backup exists for " + source);
-                var write = SafePersistence.Copy(backup, source, journal, staged =>
+                FileWriteRecord write;
+                try
                 {
-                    if (SafePersistence.Hash(staged) != hash || !Eligible(staged))
-                        throw new IOException("Original backup changed while restoring: " + backup);
-                });
+                    write = SafePersistence.Copy(backup, source, journal, staged =>
+                    {
+                        if (!Eligible(staged)) throw new IOException("Original backup changed while restoring: " + backup);
+                    }, null, hash);
+                }
+                catch (IOException ex) when (ex.InnerException is InvalidDataException)
+                {
+                    throw new IOException("Original backup changed while restoring: " + backup, ex);
+                }
                 // When no run journal was supplied nothing will collect this staging area.
                 if (journal == null) Recovery.Discard(new[] { write });
                 return true;
@@ -1533,6 +1640,11 @@ namespace Gp
     }
 
     /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
+    /// <summary>Preserves <paramref name="source"/> in goldberg_backup. <paramref name="knownSourceHash"/>
+    /// spares a re-read when the caller already hashed the source; <paramref name="backupHash"/> returns the
+    /// backup's hash for the same reason. Returns null when backups are off or the file is not eligible.</summary>
+    public delegate string BackupTaker(string source, string knownSourceHash, out string backupHash);
+
     public class PatchRunner
     {
         public event Action<PatchLogEntry> LogLine;
@@ -1615,10 +1727,11 @@ namespace Gp
                 // ---- backup dir ----------------------------------------------
                 string backupDir = Path.Combine(installDir, "goldberg_backup");
                 bool anyBackup = false;
-                Func<string, string> backup = (src) =>
+                BackupTaker backup = (string src, string known, out string backupHash) =>
                 {
+                    backupHash = null;
                     if (!o.Backup) return null;
-                    var dst = OriginalBackups.Preserve(backupDir, src, Log);
+                    var dst = OriginalBackups.Preserve(backupDir, src, Log, known, out backupHash);
                     if (dst != null) anyBackup = true;
                     return dst;
                 };
@@ -1803,55 +1916,62 @@ namespace Gp
 
         // ------------------------------------------------------------------ steps
 
-        private string TryUnpack(string exePath, Func<string, string> backup, PatchResult res, CancellationToken ct)
+        private string TryUnpack(string exePath, BackupTaker backup, PatchResult res, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            VariantInfo nativeVariant = SteamlessUnpacker.Detect(exePath);
-            if (nativeVariant != null)
+
+            // Every SteamStub variant lives in a .bind section. Reading just the headers settles the common
+            // DRM-free case without loading the whole exe, hashing it, or starting the Steamless process.
+            bool? hasStub = SteamlessUnpacker.HasStubSection(exePath);
+            if (hasStub == false)
             {
-                Log(LogLevel.Info, "Detected " + nativeVariant.Name + " – using the built-in unpacker.");
-                var nativeOutputs = new InvocationOutputs(exePath);
-                string nativeInputHash = SafePersistence.Hash(exePath);
-                string nativeOutputPath = exePath + ".unpacked.exe";
-                UnpackResult nativeResult;
-                try { nativeResult = SteamlessUnpacker.Unpack(exePath, nativeOutputPath); }
-                catch (Exception ex) { nativeResult = null; Log(LogLevel.Warn, "Built-in Steamless unpack crashed: " + ex.Message); }
-
-                string nativeProblem = null;
-                if (nativeResult == null) nativeProblem = "the built-in unpacker crashed";
-                else if (!nativeResult.Success) nativeProblem = "built-in unpack failed: " + nativeResult.Error;
-                else if (!nativeOutputs.IsCurrent(nativeOutputPath)) nativeProblem = "built-in output could not be verified";
-                else
-                {
-                    try { PeReader.Analyze(nativeOutputPath); }
-                    catch (Exception ex) { nativeProblem = "built-in output is not a valid PE (" + ex.Message + ")"; }
-                }
-
-                if (nativeProblem == null)
-                {
-                    string nativeBackup = backup(exePath);
-                    try
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        nativeOutputs.CopyAndDelete(nativeOutputPath, res.Writes, nativeInputHash, nativeBackup);
-                    }
-                    catch (IOException ex)
-                    {
-                        throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
-                    }
-                    res.Unpacked = true;
-                    Log(LogLevel.Ok, "DRM removed with the built-in unpacker!");
-                    if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
-                    return exePath;
-                }
-
-                // A failed in-process attempt used to end the unpack step outright, leaving the DRM in place
-                // even though the bundled Steamless CLI handles the same variant. Remove what this attempt
-                // wrote (only if it is ours - a pre-existing file is left alone) and let the CLI try.
-                Log(LogLevel.Warn, "Steamless: " + nativeProblem + " – falling back to the Steamless CLI.");
-                try { if (nativeOutputs.IsCurrent(nativeOutputPath)) File.Delete(nativeOutputPath); } catch { }
-                ct.ThrowIfCancellationRequested();
+                Log(LogLevel.Info, "No SteamStub section (.bind) – no Steam DRM to remove.");
+                return exePath;
             }
+
+            var before = new FileInfo(exePath);
+            long stampLength = before.Length; DateTime stampTime = before.LastWriteTimeUtc;
+            UnpackResult native;
+            try { native = SteamlessUnpacker.UnpackToMemory(exePath); }
+            catch (Exception ex) { native = null; Log(LogLevel.Warn, "Built-in Steamless unpack crashed: " + ex.Message); }
+
+            if (native != null && native.Variant != null)
+                Log(LogLevel.Info, "Detected " + native.Variant.Name + " – using the built-in unpacker.");
+            if (native != null && native.Success)
+            {
+                string backupHash;
+                string nativeBackup = backup(exePath, native.SourceSha256, out backupHash);
+                byte[] output = native.Output;
+                try
+                {
+                    ct.ThrowIfCancellationRequested();
+                    SafePersistence.Write(exePath, stream => stream.Write(output, 0, output.Length), staged =>
+                    {
+                        // Prove the exe on disk is still the one that was unpacked. Size and timestamp settle
+                        // it for free; only if either moved is the file hashed.
+                        var now = new FileInfo(exePath);
+                        if ((now.Length != stampLength || now.LastWriteTimeUtc != stampTime)
+                            && SafePersistence.Hash(exePath) != native.SourceSha256)
+                            throw new IOException("Executable changed during processing: " + exePath);
+                        if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
+                            throw new InvalidDataException("Unsupported unpacked executable architecture.");
+                    }, res.Writes, null, nativeBackup, null, nativeBackup != null ? backupHash : native.SourceSha256);
+                }
+                catch (IOException ex)
+                {
+                    throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
+                }
+                res.Unpacked = true;
+                Log(LogLevel.Ok, "DRM removed with the built-in unpacker!");
+                if (nativeBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
+                return exePath;
+            }
+
+            // Not a variant the built-in unpacker handles, or its output failed validation: the bundled
+            // Steamless CLI covers every variant, so let it try.
+            if (native != null && native.ErrorCode != UnpackErrorCode.UnsupportedVariant)
+                Log(LogLevel.Warn, "Steamless: built-in unpack failed (" + native.Error + ") – falling back to the Steamless CLI.");
+            ct.ThrowIfCancellationRequested();
 
             if (!File.Exists(Tools.SteamlessCli))
             {
@@ -1885,15 +2005,12 @@ namespace Gp
                     p.BeginOutputReadLine();
                     p.BeginErrorReadLine();
 
-                    // wait with cancellation support (max 10 minutes)
-                    var sw = Stopwatch.StartNew();
-                    while (!p.HasExited)
+                    if (!WaitOrKill(p, 10 * 60 * 1000, ct))
                     {
-                        if (ct.IsCancellationRequested) { try { p.Kill(); } catch { } throw new OperationCanceledException(ct); }
-                        if (sw.Elapsed.TotalMinutes > 10) { timedOut = true; Log(LogLevel.Warn, "Steamless took over 10 minutes – killing it."); try { p.Kill(); } catch { } break; }
-                        Thread.Sleep(120);
+                        timedOut = true;
+                        Log(LogLevel.Warn, "Steamless took over 10 minutes – killed it.");
                     }
-                    p.WaitForExit(2000);
+                    p.WaitForExit(2000);   // let the async output readers drain
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -1949,14 +2066,15 @@ namespace Gp
                     return exePath;
                 }
 
-                var origBackup = backup(exePath);
+                string origBackupHash;
+                var origBackup = backup(exePath, inputHash, out origBackupHash);
                 try
                 {
                     ct.ThrowIfCancellationRequested();
                     // origBackup already holds a hash-verified copy of the packed exe, so the write
                     // reuses it as the recovery source instead of storing a second copy of a file
                     // that can be hundreds of megabytes.
-                    outputs.CopyAndDelete(outPath, res.Writes, inputHash, origBackup);
+                    outputs.CopyAndDelete(outPath, res.Writes, inputHash, origBackup, origBackupHash);
                 }
                 catch (IOException ex)
                 {
@@ -1973,6 +2091,20 @@ namespace Gp
             else
                 Log(LogLevel.Info, "No Steam DRM detected on this exe – continuing as-is.");
             return exePath;
+        }
+
+        /// <summary>Waits for a child process without polling. Cancellation kills it at once (instead of on
+        /// the next poll tick) and surfaces as OperationCanceledException; a timeout kills it and returns
+        /// false.</summary>
+        static bool WaitOrKill(Process p, int timeoutMs, CancellationToken ct)
+        {
+            using (ct.Register(() => { try { p.Kill(); } catch { } }))
+            {
+                bool exited = p.WaitForExit(timeoutMs);
+                if (!exited) { try { p.Kill(); } catch { } p.WaitForExit(2000); }
+                ct.ThrowIfCancellationRequested();
+                return exited;
+            }
         }
 
         /// <summary>Condenses a child process's stdout/stderr into one short line for the log: the last few
@@ -2063,13 +2195,7 @@ namespace Gp
                     // Drain both pipes while waiting, or a chatty tool fills its buffer and deadlocks.
                     var outTask = p.StandardOutput.ReadToEndAsync();
                     var errTask = p.StandardError.ReadToEndAsync();
-                    var sw = Stopwatch.StartNew();
-                    while (!p.HasExited)
-                    {
-                        if (ct.IsCancellationRequested) { try { p.Kill(); } catch { } throw new OperationCanceledException(); }
-                        if (sw.Elapsed.TotalSeconds > 60) { try { p.Kill(); } catch { } break; }
-                        Thread.Sleep(80);
-                    }
+                    WaitOrKill(p, 60 * 1000, ct);
                     try { stdOut = outTask.Result; } catch { }
                     try { stdErr = errTask.Result; } catch { }
                     try { exit = p.ExitCode; } catch { }
@@ -2185,7 +2311,7 @@ namespace Gp
             return total;
         }
 
-        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, Func<string, string> backup, PatchResult res)
+        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, BackupTaker backup, PatchResult res)
         {
             // The *name* comes from the import table; the *architecture* comes from the PE header. Deriving
             // the name from the architecture is the worst failure mode in the app: a correctly-architected
@@ -2241,7 +2367,8 @@ namespace Gp
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
                 {
-                    if (backup(dst) != null) Log(LogLevel.Dim, "Preserved original backup for " + dllName);
+                    string ignored;
+                    if (backup(dst, null, out ignored) != null) Log(LogLevel.Dim, "Preserved original backup for " + dllName);
                 }
                 SafePersistence.Copy(src, dst, res.Writes, staged =>
                 {
@@ -2760,42 +2887,37 @@ namespace Gp
 
         public const int MaxResponseLength = 1024 * 1024;
 
-        public sealed class StoreResponse
-        {
-            public StoreItem[] items { get; set; }
-        }
-
-        public sealed class StoreItem
-        {
-            public object id { get; set; }
-            public object appid { get; set; }
-            public object name { get; set; }
-        }
-
+        /// <summary>Pulls (appid, name) pairs out of a store search response. Uses the JSON reader that ships
+        /// with .NET Framework (JSON surfaced as typed XML), which is what removed the System.Web.Extensions
+        /// dependency. Every element carries its JSON type, so ids sent as numbers or as strings both work.</summary>
         public static List<SteamMatch> ParseItems(string json)
         {
             var list = new List<SteamMatch>();
             if (string.IsNullOrWhiteSpace(json) || json.Length > MaxResponseLength) return list;
             try
             {
-                var serializer = new JavaScriptSerializer { MaxJsonLength = MaxResponseLength, RecursionLimit = 32 };
-                var response = serializer.Deserialize<StoreResponse>(json);
-                if (response == null || response.items == null) return list;
-                foreach (var item in response.items)
+                var quotas = new XmlDictionaryReaderQuotas { MaxDepth = 32, MaxStringContentLength = MaxResponseLength };
+                XElement root;
+                using (var reader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(json), quotas))
+                    root = XElement.Load(reader);
+                var items = root.Element("items");
+                if (items == null || (string)items.Attribute("type") != "array") return list;
+                foreach (var item in items.Elements("item"))
                 {
-                    if (item == null || !(item.name is string) || string.IsNullOrWhiteSpace((string)item.name)) continue;
-                    object id = item.id ?? item.appid;
-                    if (!(id is string) && !(id is int) && !(id is long)) continue;
-                    string normalized = AppIdDetector.Normalize(Convert.ToString(id, CultureInfo.InvariantCulture));
+                    if ((string)item.Attribute("type") != "object") continue;
+                    var name = item.Element("name");
+                    if (name == null || (string)name.Attribute("type") != "string" || string.IsNullOrWhiteSpace(name.Value)) continue;
+                    var id = item.Element("id") ?? item.Element("appid");
+                    string idType = id == null ? null : (string)id.Attribute("type");
+                    if (idType != "string" && idType != "number") continue;
+                    string normalized = AppIdDetector.Normalize(id.Value);
                     if (normalized.Length != 0)
-                        list.Add(new SteamMatch { AppId = normalized, GameName = (string)item.name });
+                        list.Add(new SteamMatch { AppId = normalized, GameName = name.Value });
                 }
             }
+            catch (XmlException) { list.Clear(); }
             catch (ArgumentException) { list.Clear(); }
             catch (InvalidOperationException) { list.Clear(); }
-            catch (NotSupportedException) { list.Clear(); }
-            catch (IndexOutOfRangeException) { list.Clear(); }
-            catch (FormatException) { list.Clear(); }
             return list;
         }
 

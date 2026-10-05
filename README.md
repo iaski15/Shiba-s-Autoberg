@@ -17,7 +17,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 ## Quick start
 
-1. Run `Goldberg Patcher.exe` (Windows 10/11, x64 or x86)
+1. Download `Goldberg-Patcher-<version>.exe` from the [Releases](https://github.com/iaski15/Shiba-s-Autoberg/releases) page and run it (Windows 10/11, x64 or x86) – or build it yourself, see below
 2. Drag & drop your game `.exe` onto the window (or click it to browse)
 3. Enter the Steam AppID — found on [steamdb.info](https://steamdb.info/) under *App ID* (the app tries to detect/cache it for you)
 4. Adjust the options if needed, then click **Patch Game**
@@ -88,8 +88,8 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 
 ```
 src/                      C# sources (Core.cs = patch pipeline + PE reader, Ui.cs, MainForm.cs, Batch.cs)
-Goldberg Patcher.exe      built GUI app (self-contained)
-_selftest.exe             built console self-test
+Goldberg Patcher.exe      built GUI app (self-contained) – build output, not tracked
+_selftest.exe             built console self-test – build output, not tracked
 steamless/                Steamless CLI + unpacker plugins (DRM removal)
 release/regular/          Goldberg emulator steam_api.dll / steam_api64.dll
 release/experimental/     experimental GSE builds (CPY dll crack support, overlay)
