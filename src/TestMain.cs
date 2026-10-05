@@ -200,6 +200,90 @@ static class TestMain
         }
         finally { try { Directory.Delete(packedWork, true); } catch { } }
 
+        Console.WriteLine("\n[install check]");
+        string icWork = Path.Combine(Path.GetTempPath(), "gp_selftest_check_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+        try
+        {
+            string gse64 = Path.Combine(root, @"release\regular\x64\steam_api64.dll");
+            string gse86 = Path.Combine(root, @"release\regular\x86\steam_api.dll");
+            Check(InstallCheck.IsEmulatorDll(gse64) && InstallCheck.IsEmulatorDll(gse86),
+                  "bundled GSE dlls are recognised as the emulator", null);
+            Func<string, string, List<InstallCheckItem>> setup = (name, dll) =>
+            {
+                string d = Directory.CreateDirectory(Path.Combine(icWork, name)).FullName;
+                string e = Path.Combine(d, "Game.exe");
+                WritePeWithImport(e, "steam_api64.dll");
+                if (dll != null) File.Copy(dll, Path.Combine(d, "steam_api64.dll"));
+                File.WriteAllText(Path.Combine(d, "steam_appid.txt"), "1250\r\n");
+                return null;
+            };
+            Func<string, string, bool, List<InstallCheckItem>> run = (name, appId, onlineFix) =>
+                InstallCheck.Run(Path.Combine(icWork, name, "Game.exe"), appId, onlineFix);
+            Func<List<InstallCheckItem>, string> dump = l => string.Join(" | ", l.Select(i => i.ToString()).ToArray());
+
+            setup("good", gse64);
+            var good = run("good", "1250", false);
+            Check(good.All(i => i.Status == CheckStatus.Pass), "patched install passes every check", dump(good));
+
+            string valveLike = Path.Combine(icWork, "valve_like.dll");
+            WriteNativeX64Pe(valveLike);
+            Check(!InstallCheck.IsEmulatorDll(valveLike), "a non-emulator dll is not mistaken for GSE", null);
+            setup("shadowed", valveLike);
+            var shadowed = run("shadowed", "1250", false);
+            Check(shadowed.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("loads the emulator")),
+                  "Valve's dll beside the exe fails the check", dump(shadowed));
+            var onlineFixOk = run("shadowed", null, true);
+            Check(!onlineFixOk.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("loads")),
+                  "online-fix expects Valve's dll, not the emulator", dump(onlineFixOk));
+
+            setup("wrongarch", gse86);
+            var wrongArch = run("wrongarch", "1250", false);
+            Check(wrongArch.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("architecture")),
+                  "a 32-bit emulator under a 64-bit exe fails the architecture check", dump(wrongArch));
+
+            setup("missing", null);
+            var missingDll = run("missing", "1250", false);
+            Check(missingDll.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("beside the exe")),
+                  "a statically imported dll that is absent fails", dump(missingDll));
+
+            var wrongId = run("good", "730", false);
+            Check(wrongId.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("730")),
+                  "an AppID other than the expected one fails", dump(wrongId));
+
+            // Unreal layout: <root>\Launcher.exe, <root>\Proj\Binaries\Win64\Proj-Win64-Shipping.exe,
+            // <root>\Engine\Binaries\ThirdParty\Steamworks\SteamvX\Win64\steam_api64.dll
+            string ue = Directory.CreateDirectory(Path.Combine(icWork, "ue")).FullName;
+            string launcher = Path.Combine(ue, "Proj.exe");
+            WriteNativeX64Pe(launcher);
+            string ship = Path.Combine(Directory.CreateDirectory(Path.Combine(ue, @"Proj\Binaries\Win64")).FullName, "Proj-Win64-Shipping.exe");
+            WriteSteamStub31(ship, true);
+            string sdkDir = Directory.CreateDirectory(Path.Combine(ue, @"Engine\Binaries\ThirdParty\Steamworks\Steamv157\Win64")).FullName;
+            File.Copy(valveLike, Path.Combine(sdkDir, "steam_api64.dll"));
+            Check(string.Equals(PatchRunner.SearchRoot(ship), ue, StringComparison.OrdinalIgnoreCase)
+                  && string.Equals(PatchRunner.SearchRoot(launcher), ue, StringComparison.OrdinalIgnoreCase),
+                  "Unreal: the Steamworks search starts at the game root from either exe", PatchRunner.SearchRoot(ship));
+            Check(string.Equals(PatchRunner.UnrealCompanion(launcher), ship, StringComparison.OrdinalIgnoreCase)
+                  && PatchRunner.UnrealCompanion(ship) == null,
+                  "Unreal: the launcher's -Shipping exe is found, and the Shipping exe has no companion", null);
+
+            var uer = new PatchRunner();
+            var ueRes = uer.Run(new PatchOptions { GameExe = launcher, AppId = "1250", UnpackDrm = true, Backup = true, WriteAppIdTxt = true }, CancellationToken.None);
+            Check(ueRes.Success && SteamlessUnpacker.HasStubSection(ship) == false,
+                  "Unreal: patching the launcher also unpacks the -Shipping exe", ueRes.Summary);
+            Check(InstallCheck.IsEmulatorDll(Path.Combine(sdkDir, "steam_api64.dll")) && !File.Exists(Path.Combine(ue, "steam_api64.dll"))
+                  && ueRes.FirstFailedCheck == null,
+                  "Unreal: the emulator goes into Engine\\...\\Steamworks, not beside the launcher, and the check passes",
+                  string.Join(" | ", ueRes.Checks.Select(i => i.ToString()).ToArray()));
+            Recovery.RollbackWrites(ueRes.Writes, (l, m) => { });
+
+            string stubDir = Directory.CreateDirectory(Path.Combine(icWork, "stub")).FullName;
+            WriteSteamStub31(Path.Combine(stubDir, "Game.exe"), true);
+            var stubbed = run("stub", null, false);
+            Check(stubbed.Any(i => i.Status == CheckStatus.Fail && i.Title.Contains("SteamStub")),
+                  "an exe that still carries SteamStub fails", dump(stubbed));
+        }
+        finally { try { Directory.Delete(icWork, true); } catch { } }
+
         Console.WriteLine("\n[hash-on-write]");
         string howDir = Path.Combine(Path.GetTempPath(), "gp_selftest_how_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(howDir);
@@ -218,6 +302,20 @@ static class TestMain
             try { SafePersistence.Copy(src, dst, null, null, null, new string('0', 64)); }
             catch (IOException ex) { rejected = ex.InnerException is InvalidDataException; }
             Check(rejected && File.ReadAllText(dst) == "keep me", "a wrong known source hash is caught before anything is replaced", null);
+
+            // a backup taken by v0.5 (full 64-digit key folder) must still be found and restored
+            string legacyRoot = Path.Combine(howDir, "goldberg_backup");
+            string live = Path.Combine(howDir, "Game.exe");
+            File.WriteAllText(live, "patched content");
+            string legacyBackup = Path.Combine(legacyRoot, "sources", SafePersistence.PathKey(live), "Game.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(legacyBackup));
+            File.WriteAllText(legacyBackup, "original content");
+            File.WriteAllText(legacyBackup + ".source.txt", Path.GetFullPath(live) + "\r\n" + SafePersistence.Hash(legacyBackup) + "\r\n");
+            Check(OriginalBackups.Find(legacyRoot, live) == legacyBackup && OriginalBackups.Location(legacyRoot, live) != legacyBackup
+                  && OriginalBackups.Location(legacyRoot, live).Length < legacyBackup.Length - 40,
+                  "new backup folders are 48 characters shorter, and legacy ones are still found", null);
+            OriginalBackups.Restore(legacyRoot, live);
+            Check(File.ReadAllText(live) == "original content", "restore works from a legacy-layout backup", null);
         }
         finally { try { Directory.Delete(howDir, true); } catch { } }
 

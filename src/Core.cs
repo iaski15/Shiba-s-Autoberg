@@ -453,7 +453,10 @@ namespace Gp
             return Locked(path, () =>
             {
                 string parent = Path.GetDirectoryName(path);
-                string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N"));
+                // 12 hex digits, not 32: these areas nest inside goldberg_backup under Unreal's already deep
+                // Engine\Binaries\ThirdParty\Steamworks\...\Win64 folders, and the full GUID pushed staging
+                // paths past the 260-character MAX_PATH limit.
+                string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N").Substring(0, 12));
                 Directory.CreateDirectory(area);
                 string name = Path.GetFileName(path);
                 bool external = !string.IsNullOrEmpty(externalRecovery);
@@ -603,9 +606,29 @@ namespace Gp
 
     public static class OriginalBackups
     {
+        /// <summary>Where the backup of <paramref name="source"/> is kept. The folder is the first 16 hex digits
+        /// of the path hash - ample to keep the handful of files in one backup root apart, and 48 characters
+        /// shorter than the full hash, which put staging paths under Unreal games past MAX_PATH.</summary>
         public static string Location(string root, string source)
         {
+            return Path.Combine(root, "sources", SafePersistence.PathKey(source).Substring(0, 16), Path.GetFileName(source));
+        }
+
+        /// <summary>The full-hash location used by releases up to 0.5. Still read, so a backup taken by an
+        /// older version is found instead of a fresh "original" being taken from the already patched file.</summary>
+        static string LegacyLocation(string root, string source)
+        {
             return Path.Combine(root, "sources", SafePersistence.PathKey(source), Path.GetFileName(source));
+        }
+
+        /// <summary>The backup of <paramref name="source"/> as it exists on disk - current or legacy layout -
+        /// or the current location when neither exists.</summary>
+        public static string Find(string root, string source)
+        {
+            string current = Location(root, source);
+            if (File.Exists(current)) return current;
+            string legacy = LegacyLocation(root, source);
+            return File.Exists(legacy) ? legacy : current;
         }
 
         static string VerifiedHash(string backup, string source)
@@ -645,7 +668,7 @@ namespace Gp
 
         static string Existing(string root, string source, out string hash, Action<LogLevel, string> log)
         {
-            string destination = Location(root, source);
+            string destination = Find(root, source);
             IOException failure = null;
             hash = null;
             if (File.Exists(destination))
@@ -1220,6 +1243,14 @@ namespace Gp
 
         public List<FileWriteRecord> Writes = new List<FileWriteRecord>();
         public SettingsOutcome Settings = new SettingsOutcome();
+
+        /// <summary>Post-patch install checks (see <see cref="InstallCheck"/>); empty when the run failed.</summary>
+        public List<InstallCheckItem> Checks = new List<InstallCheckItem>();
+
+        public InstallCheckItem FirstFailedCheck
+        {
+            get { return Checks.FirstOrDefault(c => c.Status == CheckStatus.Fail); }
+        }
     }
 
     public enum SettingsStatus { NotRequested, Copied, AlreadyPresent, Missing, Failed }
@@ -1696,7 +1727,10 @@ namespace Gp
 
                 // ---- locate steam api install dir ------------------------------
                 Pct(8);
-                var foundApi = FindSteamApiFiles(gameDir, ct);
+                string searchRoot = SearchRoot(exePath);
+                if (!string.Equals(searchRoot, gameDir, StringComparison.OrdinalIgnoreCase))
+                    Log(LogLevel.Dim, "Unreal project layout – searching for Steamworks from the game root: " + searchRoot);
+                var foundApi = FindSteamApiFiles(searchRoot, ct);
                 string installDir = gameDir;
                 // Prefer the name the loader will actually ask for; the architecture only breaks ties and
                 // covers executables that load the library dynamically.
@@ -1707,7 +1741,7 @@ namespace Gp
 
                 if (foundApi.Count > 0)
                 {
-                    var best = PickApiTarget(foundApi, gameDir, preferredName);
+                    var best = PickApiTarget(foundApi, searchRoot, preferredName);
                     installDir = Path.GetDirectoryName(best);
                     Log(LogLevel.Ok, "Found Steamworks dll(s): " +
                         string.Join(", ", foundApi.Select(f => ShortRel(gameDir, f))));
@@ -1743,6 +1777,13 @@ namespace Gp
                 {
                     Pct(12);
                     finalExe = TryUnpack(exePath, backup, res, ct);
+                    string companion = UnrealCompanion(exePath);
+                    if (companion != null)
+                    {
+                        Pct(30);
+                        Log(LogLevel.Info, "Unreal launcher – also checking the game exe it starts: " + ShortRel(gameDir, companion));
+                        TryUnpack(companion, backup, res, ct);
+                    }
                     Pct(48);
                 }
                 else Log(LogLevel.Dim, "Steamless auto-unpack disabled – skipping.");
@@ -1778,7 +1819,7 @@ namespace Gp
                 if (o.GenerateInterfaces && !o.OnlineFix)
                 {
                     Pct(52);
-                    interfacesTxt = TryGenerateInterfaces(foundApi, gameDir, preferredName, ct);
+                    interfacesTxt = TryGenerateInterfaces(foundApi, searchRoot, preferredName, ct);
                 }
 
                 // ---- dlls --------------------------------------------------------
@@ -1833,6 +1874,14 @@ namespace Gp
                     Log(LogLevel.Ok, "steam_interfaces.txt written (move into steam_settings later if you create one).");
                 }
 
+                // ---- verify the install as a whole ---------------------------------
+                Pct(96);
+                Log(LogLevel.Dim, "Checking the finished install…");
+                res.Checks = InstallCheck.Run(finalExe, o.EffectiveAppId, o.OnlineFix, ct);
+                foreach (var c in res.Checks)
+                    Log(c.Status == CheckStatus.Pass ? LogLevel.Ok : c.Status == CheckStatus.Warn ? LogLevel.Warn : LogLevel.Error,
+                        (c.Status == CheckStatus.Pass ? "✔ " : c.Status == CheckStatus.Warn ? "! " : "✖ ") + c.Title + (c.Detail.Length > 0 ? " – " + c.Detail : ""));
+
                 // ---- done ---------------------------------------------------------
                 Pct(100);
                 res.Success = true;
@@ -1840,11 +1889,16 @@ namespace Gp
                     ? string.Format("Online-fix ready (Spacewar · 480). Start Steam, then launch {0} – it will show up as playing Spacewar.", Path.GetFileName(finalExe))
                     : string.Format("Patched with AppID {0}. Goldberg dll installed to: {1}",
                         o.EffectiveAppId, ShortRel(gameDir, Path.Combine(installDir, preferredName)));
-                Log(LogLevel.Ok, res.Summary);
+                var failedCheck = res.FirstFailedCheck;
+                if (failedCheck != null)
+                    res.Summary += " – but the install check failed: " + failedCheck.Title + (failedCheck.Detail.Length > 0 ? " (" + failedCheck.Detail + ")" : "") + ".";
+                Log(failedCheck == null ? LogLevel.Ok : LogLevel.Warn, res.Summary);
                 if (o.OnlineFix)
                     Log(LogLevel.Dim, "Multiplayer traffic is routed through Steam's own servers under Spacewar's AppID.");
                 if (anyBackup && res.BackupDir != "") Log(LogLevel.Dim, "Originals backed up in: " + ShortRel(gameDir, res.BackupDir));
-                Log(LogLevel.Ok, "✔ Done! Launch the game to test.");
+                Log(failedCheck == null ? LogLevel.Ok : LogLevel.Warn, failedCheck == null
+                    ? "✔ Done! Launch the game to test."
+                    : "Done, with a failed check – fix the item above or the game may not start offline.");
             }
             catch (OperationCanceledException)
             {
@@ -2141,7 +2195,7 @@ namespace Gp
                 string original = null;
                 try
                 {
-                    string candidate = OriginalBackups.Location(
+                    string candidate = OriginalBackups.Find(
                         Path.Combine(Path.GetDirectoryName(target), "goldberg_backup"), target);
                     if (File.Exists(candidate) && !LooksLikeBundledGoldberg(candidate)) original = candidate;
                 }
@@ -2340,7 +2394,7 @@ namespace Gp
                     string probe = otherPath;
                     if (LooksLikeBundledGoldberg(probe))
                     {
-                        string original = OriginalBackups.Location(Path.Combine(installDir, "goldberg_backup"), probe);
+                        string original = OriginalBackups.Find(Path.Combine(installDir, "goldberg_backup"), probe);
                         probe = File.Exists(original) ? original : null;
                         if (probe == null && FilesEqual(otherPath, Tools.ApiDll86)) otherArch = ExeArch.X86;
                         else if (probe == null && FilesEqual(otherPath, Tools.ApiDll64)) otherArch = ExeArch.X64;
@@ -2418,6 +2472,59 @@ namespace Gp
 
         /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
         /// A dll sitting right next to the exe always wins over deep copies.</summary>
+        /// <summary>Where to look for the game's Steamworks libraries. Normally the exe's own folder, but an
+        /// Unreal game's real exe sits in &lt;Project&gt;\Binaries\Win64 while the library lives under the game
+        /// root's Engine\Binaries\ThirdParty - searching down from the exe never finds it, and the emulator
+        /// would be dropped beside an exe that never loads it. Climbs out of Binaries\Win64|Win32 to the
+        /// folder holding Engine\, and only that far.</summary>
+        public static string SearchRoot(string exePath)
+        {
+            string dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+            try
+            {
+                var platform = new DirectoryInfo(dir);
+                if (!IsBinariesPlatform(platform)) return dir;
+                var project = platform.Parent.Parent;          // <Project>
+                var gameRoot = project == null ? null : project.Parent;
+                if (gameRoot != null && Directory.Exists(Path.Combine(gameRoot.FullName, "Engine"))) return gameRoot.FullName;
+                return project != null ? project.FullName : dir;
+            }
+            catch { return dir; }
+        }
+
+        static bool IsBinariesPlatform(DirectoryInfo d)
+        {
+            return d != null && d.Parent != null
+                && (string.Equals(d.Name, "Win64", StringComparison.OrdinalIgnoreCase) || string.Equals(d.Name, "Win32", StringComparison.OrdinalIgnoreCase))
+                && string.Equals(d.Parent.Name, "Binaries", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>For an Unreal launcher exe in the game root, the -Shipping exe it starts: that is the binary
+        /// SteamStub is usually applied to, so unpacking only the launcher can leave the DRM in place. Looks
+        /// exactly one project folder deep (&lt;root&gt;\&lt;Project&gt;\Binaries\Win64|Win32). Null when there is
+        /// none, or more than one and none matches the launcher's name.</summary>
+        public static string UnrealCompanion(string exePath)
+        {
+            try
+            {
+                string full = Path.GetFullPath(exePath);
+                string dir = Path.GetDirectoryName(full);
+                if (IsBinariesPlatform(new DirectoryInfo(dir))) return null;           // already the real exe
+                var hits = new List<string>();
+                foreach (var project in Directory.GetDirectories(dir))
+                    foreach (var platform in new[] { "Win64", "Win32" })
+                    {
+                        string bin = Path.Combine(project, "Binaries", platform);
+                        if (Directory.Exists(bin)) hits.AddRange(Directory.GetFiles(bin, "*-Shipping.exe"));
+                    }
+                if (hits.Count == 1) return hits[0];
+                string stem = Path.GetFileNameWithoutExtension(full);
+                var named = hits.Where(h => Path.GetFileName(h).StartsWith(stem + "-", StringComparison.OrdinalIgnoreCase)).ToList();
+                return named.Count == 1 ? named[0] : null;
+            }
+            catch { return null; }
+        }
+
         public static string PickApiTarget(List<string> files, string gameDir, string preferredName)
         {
             return files
@@ -2534,6 +2641,174 @@ namespace Gp
     // --------------------------------------------------------------------- batch patching
 
     /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
+    public enum CheckStatus { Pass, Warn, Fail }
+
+    public sealed class InstallCheckItem
+    {
+        public CheckStatus Status;
+        public string Title = "";
+        public string Detail = "";
+        public override string ToString() { return Status.ToString().ToUpperInvariant() + "  " + Title + (Detail.Length > 0 ? " – " + Detail : ""); }
+    }
+
+    /// <summary>Checks a finished install as a whole: every individual write is verified when it happens,
+    /// but nothing else asks the question that matters - will the game actually load the emulator? This
+    /// catches the "patched successfully, still talks to real Steam" class of failure.</summary>
+    public static class InstallCheck
+    {
+        /// <summary>True for a Goldberg/GSE steam_api build of any version. GSE reads its config from a
+        /// "steam_settings" folder and never loads steamclient; Valve's library does the opposite. Comparing
+        /// against the bundled dll byte-for-byte would miss an install made by any other patcher release.</summary>
+        public static bool IsEmulatorDll(string path)
+        {
+            byte[] data;
+            try { data = File.ReadAllBytes(path); }
+            catch { return false; }
+            return IndexOf(data, Encoding.ASCII.GetBytes("steam_settings")) >= 0
+                && IndexOf(data, Encoding.ASCII.GetBytes("steamclient")) < 0;
+        }
+
+        static int IndexOf(byte[] haystack, byte[] needle)
+        {
+            byte first = needle[0];
+            int last = haystack.Length - needle.Length;
+            for (int i = Array.IndexOf(haystack, first); i >= 0 && i <= last; i = Array.IndexOf(haystack, first, i + 1))
+            {
+                int j = 1;
+                while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+                if (j == needle.Length) return i;
+            }
+            return -1;
+        }
+
+        /// <summary>Whether an existing install looks like an online-fix one: every steam_appid.txt says 480
+        /// AND no Steamworks library in the game is the emulator. AppID 480 alone is not enough - a normal patch
+        /// can use 480 too. Used by --check when the mode is not given, so an online-fix game is not reported as
+        /// broken for still loading Valve's library.</summary>
+        public static bool LooksLikeOnlineFix(string exePath)
+        {
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+                var libs = PatchRunner.FindSteamApiFiles(PatchRunner.SearchRoot(exePath));
+                if (libs.Count == 0 || libs.Any(IsEmulatorDll)) return false;
+                var values = new[] { exeDir }.Concat(libs.Select(Path.GetDirectoryName))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Select(d => Path.Combine(d, "steam_appid.txt")).Where(File.Exists)
+                    .Select(f => AppIdDetector.Normalize(File.ReadAllText(f))).ToList();
+                return values.Count > 0 && values.All(v => v == "480");
+            }
+            catch { return false; }
+        }
+
+        /// <param name="expectedAppId">The AppID the install should carry, or null to only check that all
+        /// copies agree. Online-fix installs are expected to carry 480.</param>
+        public static List<InstallCheckItem> Run(string exePath, string expectedAppId, bool onlineFix, CancellationToken ct = default(CancellationToken))
+        {
+            var items = new List<InstallCheckItem>();
+            Action<CheckStatus, string, string> add = (st, t, d) => items.Add(new InstallCheckItem { Status = st, Title = t, Detail = d ?? "" });
+
+            if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+            {
+                add(CheckStatus.Fail, "Game executable exists", exePath);
+                return items;
+            }
+            exePath = Path.GetFullPath(exePath);
+            string exeDir = Path.GetDirectoryName(exePath);
+            PeInfo pe;
+            try { pe = PeReader.Analyze(exePath); }
+            catch (Exception ex) { add(CheckStatus.Fail, "Executable is readable", ex.Message); return items; }
+
+            // 1. SteamStub left in place makes the game hand itself to real Steam before any dll loads. For an
+            //    Unreal launcher the exe that matters is the -Shipping one it starts.
+            var stubTargets = new List<string> { exePath };
+            string companion = PatchRunner.UnrealCompanion(exePath);
+            if (companion != null) stubTargets.Add(companion);
+            foreach (var target in stubTargets)
+            {
+                string label = target == exePath ? "SteamStub DRM removed" : "SteamStub DRM removed from " + Path.GetFileName(target);
+                bool? stub = SteamlessNative.SteamlessUnpacker.HasStubSection(target);
+                if (stub == true)
+                    add(onlineFix ? CheckStatus.Pass : CheckStatus.Fail, label,
+                        onlineFix ? "still present, which online-fix mode tolerates" : "still has its .bind stub – it will try to start through Steam");
+                else
+                    add(CheckStatus.Pass, label, stub == null ? "could not read the section table" : "");
+            }
+
+            // 2. Which library will the loader actually pick up?
+            string searchRoot = PatchRunner.SearchRoot(exePath);
+            var found = PatchRunner.FindSteamApiFiles(searchRoot, ct);
+            string imported = PatchRunner.ImportedSteamApiName(exePath);
+            string wantedKind = onlineFix ? "Valve's original" : "the emulator";
+            if (imported != null)
+            {
+                // A static import is resolved from the exe's own folder first; for a Steam game nothing
+                // later on the search path supplies it.
+                string resolved = Path.Combine(exeDir, imported);
+                if (!File.Exists(resolved))
+                    add(CheckStatus.Fail, "Imported " + imported + " is beside the exe", "the loader will not find it and the game will not start");
+                else
+                {
+                    bool emu = IsEmulatorDll(resolved);
+                    add(emu != onlineFix ? CheckStatus.Pass : CheckStatus.Fail, "The game loads " + wantedKind,
+                        imported + " beside the exe is " + (emu ? "the emulator" : "Valve's original"));
+                    ExeArch dllArch = ExeArch.Unknown;
+                    try { dllArch = PeReader.Analyze(resolved).Arch; } catch { }
+                    add(dllArch == pe.Arch ? CheckStatus.Pass : CheckStatus.Fail, "Library architecture matches the exe",
+                        imported + " is " + dllArch + ", the exe is " + pe.Arch);
+                }
+            }
+            else if (found.Count == 0)
+            {
+                add(CheckStatus.Warn, "A Steamworks library is present", "none found and the exe imports none – is this the game's main exe?");
+            }
+            else
+            {
+                // Loaded at runtime by path (typical for Unreal). Judge the copy the patcher targets - the same
+                // pick it installs into - and only warn about other copies: games and their tools can carry
+                // extra libraries the game itself never loads.
+                string preferred = pe.Arch == ExeArch.X64 ? "steam_api64.dll" : "steam_api.dll";
+                string target = PatchRunner.PickApiTarget(found, searchRoot, preferred);
+                bool targetEmu = IsEmulatorDll(target);
+                add(targetEmu != onlineFix ? CheckStatus.Pass : CheckStatus.Fail, "The game loads " + wantedKind,
+                    PatchRunner.ShortRel(exeDir, target) + " is " + (targetEmu ? "the emulator" : "Valve's original"));
+                var others = found.Where(f => !string.Equals(f, target, StringComparison.OrdinalIgnoreCase) && IsEmulatorDll(f) == onlineFix).ToList();
+                if (others.Count > 0)
+                    add(CheckStatus.Warn, "Other Steamworks libraries in the game folder",
+                        string.Join(", ", others.Select(f => PatchRunner.ShortRel(exeDir, f)).ToArray())
+                        + (onlineFix ? " – the emulator" : " – still Valve's original; fine unless the game loads one of these"));
+                foreach (var f in found.Where(f => string.Equals(Path.GetFileName(f), preferred, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ExeArch a = ExeArch.Unknown;
+                    try { a = PeReader.Analyze(f).Arch; } catch { }
+                    if (a != pe.Arch)
+                        add(CheckStatus.Fail, "Library architecture matches the exe", PatchRunner.ShortRel(exeDir, f) + " is " + a + ", the exe is " + pe.Arch);
+                }
+            }
+
+            // 3. steam_appid.txt: beside the exe and beside each library, all saying the same thing.
+            var appIdFiles = new[] { exeDir }.Concat(found.Select(Path.GetDirectoryName))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(d => Path.Combine(d, "steam_appid.txt")).Where(File.Exists).ToList();
+            string expected = onlineFix ? "480" : (expectedAppId ?? "").Trim();
+            if (appIdFiles.Count == 0)
+                add(CheckStatus.Warn, "steam_appid.txt present", "none beside the exe or the libraries");
+            else
+            {
+                var values = appIdFiles.Select(f => { try { return AppIdDetector.Normalize(File.ReadAllText(f)); } catch { return ""; } }).ToList();
+                var distinct = values.Distinct().ToList();
+                if (distinct.Count > 1)
+                    add(CheckStatus.Warn, "steam_appid.txt copies agree", string.Join(", ", appIdFiles.Select((f, i) => PatchRunner.ShortRel(exeDir, f) + "=" + values[i]).ToArray()));
+                else if (expected.Length > 0 && distinct[0] != expected)
+                    add(CheckStatus.Fail, "steam_appid.txt carries AppID " + expected, "found " + (distinct[0].Length == 0 ? "an invalid value" : distinct[0]));
+                else
+                    add(distinct[0].Length > 0 ? CheckStatus.Pass : CheckStatus.Fail, "steam_appid.txt is valid",
+                        distinct[0].Length > 0 ? "AppID " + distinct[0] + " in " + appIdFiles.Count + " place(s)" : "not a numeric AppID");
+            }
+            return items;
+        }
+    }
+
     public class AppIdDetection
     {
         public string AppId = "";   // "" when nothing was found
