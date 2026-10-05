@@ -50,18 +50,19 @@ namespace SteamlessNative
         static SteamlessUnpacker()
         {
             // The 2.x unpackers use SharpDisasm, which upstream ships only as a binary. It is embedded in this
-            // exe as a resource and handed to the runtime the first time a 2.x unpacker needs it.
+            // exe as a deflated resource and handed to the runtime the first time a 2.x unpacker needs it.
             AppDomain.CurrentDomain.AssemblyResolve += (sender, e) =>
             {
                 if (new AssemblyName(e.Name).Name != "SharpDisasm") return null;
                 lock (sharpDisasmLock)
                 {
                     if (sharpDisasm != null) return sharpDisasm;
-                    using (var res = typeof(SteamlessUnpacker).Assembly.GetManifestResourceStream("SharpDisasm.dll"))
+                    using (var res = typeof(SteamlessUnpacker).Assembly.GetManifestResourceStream("SharpDisasm.dll.deflate"))
                     {
                         if (res == null) return null;
                         var ms = new MemoryStream();
-                        res.CopyTo(ms);
+                        using (var inflate = new System.IO.Compression.DeflateStream(res, System.IO.Compression.CompressionMode.Decompress))
+                            inflate.CopyTo(ms);
                         return sharpDisasm = Assembly.Load(ms.ToArray());
                     }
                 }
@@ -170,10 +171,17 @@ namespace SteamlessNative
             foreach (var unpacker in Unpackers(packed.Is64))
             {
                 unpacker.Initialize(logService);
-                if (!unpacker.CanProcessFile(sourcePath)) continue;
+                bool claimed = unpacker.CanProcessFile(sourcePath);
+                // Upstream probes and unpacks by re-reading and copying the whole file each time; on a
+                // multi-hundred-MB exe that is gigabytes of large-object garbage the GC would otherwise let
+                // pile up before the next copy. Measured on a 248 MB exe: peak working set 3.3 GB -> 1.5 GB.
+                // ponytail: upstream still holds ~4 copies while unpacking; a Pe32File/Pe64File-from-bytes
+                // patch to the fork would cut that further if large exes ever hit memory limits.
+                GC.Collect();
+                if (!claimed) continue;
 
                 result.Unpacker = unpacker.Name;
-                var sink = new MemoryStream();
+                var sink = new MemoryStream(input.Length);   // the output is about the input's size: no regrowth
                 // Same defaults Steamless.CLI runs with; only the output destination differs.
                 var options = new SteamlessOptions { OutputStreamFactory = path => sink };
                 bool ok;
@@ -187,7 +195,9 @@ namespace SteamlessNative
                     continue;
                 }
 
+                GC.Collect();
                 byte[] output = sink.ToArray();   // valid after the unpacker disposed the stream
+                sink = null;
                 try
                 {
                     RelocateCertificate(packed, output);

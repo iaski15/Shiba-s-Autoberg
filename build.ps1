@@ -148,27 +148,19 @@ $steamlessSrc = @(Get-ChildItem -LiteralPath $steamlessDir -Recurse -File |
     Where-Object { $_.Extension -eq '.cs' -and $_.Directory.Name -ne 'Properties' -and $_.Name -ne 'ViewModelBase.cs' -and $_.Name -ne 'NavigatedEventArgs.cs' } |
     Sort-Object FullName | ForEach-Object { "`"$($_.FullName)`"" })
 # SharpDisasm (used by the 2.x unpackers) is a prebuilt upstream binary: referenced, and embedded so the
-# exe stays self-contained - SteamlessUnpacker resolves it from the resource.
+# exe stays self-contained (deflated, 220 KB -> 71 KB) - SteamlessUnpacker resolves it from the resource.
 $sharpDisasm = Join-Path $steamlessDir 'Steamless.Unpacker.Variant21.x86\SharpDisasm.dll'
-$steamlessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasm`",SharpDisasm.dll")
+$sharpDisasmDeflated = Join-Path $env:TEMP ('gp_sharpdisasm_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.bin')
+Compress-File $sharpDisasm $sharpDisasmDeflated
+$steamlessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDisasm.dll.deflate")
 
 # ---- self test host (console) ----
 Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\SteamlessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $steamlessSrc) (Join-Path $root '_selftest.exe') $steamlessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
-$pay = @(
-    'steamless\Steamless.CLI.exe',
-    'steamless\Steamless.CLI.exe.config'
-)
-$pluginsDir = Join-Path $root 'steamless\Plugins'
-if (Test-Path $pluginsDir) {
-    # ExamplePlugin is Steamless's sample/template plugin - it implements the API and does nothing.
-    # Shipping it only means the CLI loads a no-op plugin on every run. The file stays in the vendored
-    # tree (the fork is meant to be rebasable); it just is not part of the payload.
-    Get-ChildItem $pluginsDir -Filter '*.dll' | Where-Object { $_.Name -ne 'ExamplePlugin.dll' } |
-        ForEach-Object { $pay += 'steamless\Plugins\' + $_.Name }
-}
-$pay += @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
+# Steamless is not in the payload: its unpackers are compiled into the exe (third_party\steamless).
+# tools\steamless\ holds the official binaries only for the self-test's --corpus comparison.
+$pay = @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
 # generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
 Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
@@ -221,6 +213,7 @@ try {
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $manTmp -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $verFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sharpDisasmDeflated -Force -ErrorAction SilentlyContinue
 }
 
 if ($Verify) {

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -548,59 +547,6 @@ namespace Gp
         {
             byte[] bytes = new UTF8Encoding(false).GetBytes(text);
             return Write(path, stream => stream.Write(bytes, 0, bytes.Length), null, journal, null, externalRecovery);
-        }
-    }
-
-    internal sealed class InvocationOutputs
-    {
-        readonly string directory;
-        readonly string input;
-        readonly Dictionary<string, string> before = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        internal InvocationOutputs(string inputPath)
-        {
-            input = Path.GetFullPath(inputPath);
-            directory = Path.GetDirectoryName(input);
-            foreach (string path in Directory.GetFiles(directory))
-                if (IsCandidate(path)) before.Add(Path.GetFullPath(path), SafePersistence.Hash(path));
-        }
-
-        bool IsCandidate(string path)
-        {
-            return !string.Equals(path, input, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(Path.GetDirectoryName(path), directory, StringComparison.OrdinalIgnoreCase)
-                && path.EndsWith(".unpacked.exe", StringComparison.OrdinalIgnoreCase);
-        }
-
-        internal bool IsCurrent(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            path = Path.GetFullPath(path);
-            if (!IsCandidate(path) || !File.Exists(path)) return false;
-            string hash;
-            return !before.TryGetValue(path, out hash) || hash != SafePersistence.Hash(path);
-        }
-
-        internal void CopyAndDelete(string path, List<FileWriteRecord> journal, string expectedInputHash,
-            string externalRecovery = null, string externalRecoveryHash = null)
-        {
-            if (!IsCurrent(path)) throw new IOException("No current invocation output: " + path);
-            string expected = SafePersistence.Hash(path);
-            var stamp = new FileInfo(path);
-            long length = stamp.Length; DateTime written = stamp.LastWriteTimeUtc;
-            // The staged copy is checked against 'expected' while it is written; the input re-hash is what
-            // proves nobody modified the game exe while Steamless ran, and it also vouches for the content
-            // a local recovery copy will hold.
-            SafePersistence.Copy(path, input, journal, staged =>
-            {
-                if (SafePersistence.Hash(input) != expectedInputHash)
-                    throw new IOException("Executable or output changed during processing: " + input);
-                if (PeReader.Analyze(staged).Arch == ExeArch.Unknown)
-                    throw new InvalidDataException("Unsupported unpacked executable architecture.");
-            }, externalRecovery, expected, externalRecovery != null ? externalRecoveryHash : expectedInputHash);
-            // Our own temporary output: an unchanged size and timestamp is enough to know it is still ours.
-            var now = new FileInfo(path);
-            if (now.Exists && now.Length == length && now.LastWriteTimeUtc == written) File.Delete(path);
         }
     }
 
@@ -1338,8 +1284,6 @@ namespace Gp
         /// <summary>Root of the extracted payload. Everything below hangs off this, so pointing it at
         /// %LOCALAPPDATA% is what lets the app run from a read-only application directory.</summary>
         public static string BaseDir { get { return Payload.Root; } }
-        public static string SteamlessCli { get { return Path.Combine(BaseDir, @"steamless\Steamless.CLI.exe"); } }
-        public static string SteamlessDir { get { return Path.Combine(BaseDir, "steamless"); } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
         public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api64.dll"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"release\steam_settings.EXAMPLE"); } }
@@ -1347,7 +1291,6 @@ namespace Gp
         public static List<string> Missing()
         {
             var missing = new List<string>();
-            if (!File.Exists(SteamlessCli)) missing.Add("steamless\\Steamless.CLI.exe");
             if (!File.Exists(ApiDll86)) missing.Add("release\\regular\\x86\\steam_api.dll");
             if (!File.Exists(ApiDll64)) missing.Add("release\\regular\\x64\\steam_api64.dll");
             return missing;
@@ -1977,7 +1920,7 @@ namespace Gp
             ct.ThrowIfCancellationRequested();
 
             // Every SteamStub variant lives in a .bind section. Reading just the headers settles the common
-            // DRM-free case without loading the whole exe, hashing it, or starting the Steamless process.
+            // DRM-free case without loading the whole exe or hashing it.
             bool? hasStub = SteamlessUnpacker.HasStubSection(exePath);
             if (hasStub == false)
             {
@@ -2022,144 +1965,12 @@ namespace Gp
                 return exePath;
             }
 
-            // Not a variant the built-in unpacker handles, or its output failed validation: the bundled
-            // Steamless CLI covers every variant, so let it try.
-            if (native != null && native.ErrorCode != UnpackErrorCode.UnsupportedVariant)
-                Log(LogLevel.Warn, "Steamless: in-process unpack failed (" + native.Error + ") – falling back to the Steamless CLI.");
-            ct.ThrowIfCancellationRequested();
-
-            if (!File.Exists(Tools.SteamlessCli))
-            {
-                Log(LogLevel.Warn, "Steamless CLI not found – skipping DRM unpack. (" + Tools.SteamlessCli + ")");
-                return exePath;
-            }
-
-            Log(LogLevel.Info, "Running Steamless to check/remove SteamStub DRM…");
-            var outputs = new InvocationOutputs(exePath);
-            string inputHash = SafePersistence.Hash(exePath);
-            var outputLines = new List<string>();
-            bool timedOut = false;
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = Tools.SteamlessCli,
-                Arguments = "\"" + exePath + "\"",
-                WorkingDirectory = Tools.SteamlessDir,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-
-            try
-            {
-                using (var p = Process.Start(psi))
-                {
-                    p.OutputDataReceived += (s, e) => { if (e.Data != null) lock (outputLines) outputLines.Add(e.Data); };
-                    p.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (outputLines) outputLines.Add(e.Data); };
-                    p.BeginOutputReadLine();
-                    p.BeginErrorReadLine();
-
-                    if (!WaitOrKill(p, 10 * 60 * 1000, ct))
-                    {
-                        timedOut = true;
-                        Log(LogLevel.Warn, "Steamless took over 10 minutes – killed it.");
-                    }
-                    p.WaitForExit(2000);   // let the async output readers drain
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                Log(LogLevel.Warn, "Steamless could not run: " + ex.Message);
-                return exePath;
-            }
-
-            // find the produced file
-            string outPath = null;
-            // Discover the output from the filesystem rather than by scraping Steamless' stdout. The regex
-            // this used to depend on required an absolute, backslash-separated path - forward slashes,
-            // quoted paths and \\?\ prefixes all failed to match - and it silently changed behaviour between
-            // Steamless versions. InvocationOutputs already fingerprints the directory before and after the
-            // run, so filesystem truth was always available and is now the only mechanism.
-            {
-                var cand1 = exePath + ".unpacked.exe";
-                var nameOnly = Path.GetFileNameWithoutExtension(exePath);
-                var cand2 = Path.Combine(Path.GetDirectoryName(exePath), nameOnly + ".unpacked.exe");
-                var cands = new[] { cand1, cand2 }
-                    .Concat(SafeFiles(Path.GetDirectoryName(exePath)))
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(outputs.IsCurrent)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).ToList();
-                outPath = cands.FirstOrDefault();
-            }
-
-            bool successMsg = false;
-            lock (outputLines)
-            {
-                successMsg = outputLines.Any(l => l.IndexOf("Successfully unpacked", StringComparison.OrdinalIgnoreCase) >= 0);
-                foreach (var l in outputLines.TakeLastVisible(50)) // echo only the tail – Steamless can be verbose
-                {
-                    var t = l.TrimEnd();
-                    if (t.Length == 0) continue;
-                    if (t.StartsWith("[Steamless]", StringComparison.OrdinalIgnoreCase)) t = t.Substring(11).Trim();
-                    Log(LogLevel.Dim, "   " + t);
-                }
-            }
-
-            if (outPath != null && File.Exists(outPath))
-            {
-                // Never replace the original with a file we can't verify as a real PE. On timeout in
-                // particular, Steamless was killed mid-write and the .unpacked.exe may be half-written.
-                bool validPe;
-                try { PeReader.Analyze(outPath); validPe = true; }
-                catch { validPe = false; }
-                if (!validPe)
-                {
-                    Log(LogLevel.Error, "Steamless output \"" + Path.GetFileName(outPath) + "\" is not a valid PE"
-                        + (timedOut ? " – the unpack was killed after 10 minutes and the file may be incomplete." : ".")
-                        + "\nKeeping the original exe untouched; delete the .unpacked.exe manually if you're sure it's junk.");
-                    return exePath;
-                }
-
-                string origBackupHash;
-                var origBackup = backup(exePath, inputHash, out origBackupHash);
-                try
-                {
-                    ct.ThrowIfCancellationRequested();
-                    // origBackup already holds a hash-verified copy of the packed exe, so the write
-                    // reuses it as the recovery source instead of storing a second copy of a file
-                    // that can be hundreds of megabytes.
-                    outputs.CopyAndDelete(outPath, res.Writes, inputHash, origBackup, origBackupHash);
-                }
-                catch (IOException ex)
-                {
-                    throw new Exception("Could not replace the packed exe (is the game still running?).\n" + ex.Message);
-                }
-                res.Unpacked = true;
-                Log(LogLevel.Ok, "DRM removed! Unpacked exe is now: " + Path.GetFileName(exePath));
-                if (origBackup != null) Log(LogLevel.Dim, "Original packed exe backed up.");
-                return exePath;
-            }
-
-            if (successMsg)
-                Log(LogLevel.Warn, "Steamless reported success but no output file was found – continuing with original exe.");
-            else
-                Log(LogLevel.Info, "No Steam DRM detected on this exe – continuing as-is.");
+            // Nothing replaced the exe; the post-patch check reports the .bind that is still there.
+            if (native != null && native.ErrorCode == UnpackErrorCode.UnsupportedVariant)
+                Log(LogLevel.Warn, "The exe has a .bind section, but no Steamless unpacker recognised the SteamStub variant – continuing with the original exe.");
+            else if (native != null)
+                Log(LogLevel.Warn, "Steamless could not unpack the exe (" + native.Error + ") – keeping the original exe untouched.");
             return exePath;
-        }
-
-        /// <summary>Waits for a child process without polling. Cancellation kills it at once (instead of on
-        /// the next poll tick) and surfaces as OperationCanceledException; a timeout kills it and returns
-        /// false.</summary>
-        static bool WaitOrKill(Process p, int timeoutMs, CancellationToken ct)
-        {
-            using (ct.Register(() => { try { p.Kill(); } catch { } }))
-            {
-                bool exited = p.WaitForExit(timeoutMs);
-                if (!exited) { try { p.Kill(); } catch { } p.WaitForExit(2000); }
-                ct.ThrowIfCancellationRequested();
-                return exited;
-            }
         }
 
         private string TryGenerateInterfaces(List<string> foundApi, string gameDir, string preferredName, CancellationToken ct)
@@ -2540,11 +2351,6 @@ namespace Gp
                 }
             }
             return "";
-        }
-
-        static IEnumerable<string> SafeFiles(string dir)
-        {
-            try { return Directory.GetFiles(dir); } catch { return new string[0]; }
         }
 
         static void WriteIfChanged(string path, string content, PatchResult res)
@@ -3271,16 +3077,6 @@ namespace Gp
             }
             catch (OperationCanceledException) { throw; }
             catch { ct.ThrowIfCancellationRequested(); return null; }
-        }
-    }
-
-    internal static class Ext
-    {
-        /// <summary>Returns the last n items of a list (all of it when n >= count).</summary>
-        public static IEnumerable<T> TakeLastVisible<T>(this IList<T> list, int n)
-        {
-            if (list == null || n <= 0) yield break;
-            for (int i = Math.Max(0, list.Count - n); i < list.Count; i++) yield return list[i];
         }
     }
 

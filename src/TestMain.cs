@@ -31,8 +31,8 @@ static class TestMain
     static int Corpus(string dir)
     {
         string root = AppDomain.CurrentDomain.BaseDirectory;
-        string cli = Path.Combine(root, @"steamless\Steamless.CLI.exe");
-        if (!Directory.Exists(dir) || !File.Exists(cli)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>  (needs steamless\\ beside it)"); return 2; }
+        string cli = Path.Combine(root, @"tools\steamless\Steamless.CLI.exe");
+        if (!Directory.Exists(dir) || !File.Exists(cli)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>  (needs tools\\steamless\\ - the official binaries - beside it)"); return 2; }
         string work = Path.Combine(Path.GetTempPath(), "gp_corpus_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(work);
         int same = 0, differ = 0, nativeOnlyFail = 0, cliFail = 0, total = 0;
@@ -142,7 +142,7 @@ static class TestMain
         Check(p86.Machine == 0x14c, "x86 dll machine=I386", "0x" + p86.Machine.ToString("X"));
         Check(p86.Arch == ExeArch.X86, "x86 dll arch resolved", p86.MachineText);
 
-        var cli = PeReader.Analyze(Path.Combine(root, @"steamless\Steamless.CLI.exe"));
+        var cli = PeReader.Analyze(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
         Check(cli.Managed, "Steamless CLI detected as .NET", cli.MachineText);
         var expectedAnyCpu = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
         Check(cli.Arch == ExeArch.X86 && !cli.AnyCpu, "Steamless CLI 32-bit execution flags", cli.MachineText);
@@ -152,7 +152,7 @@ static class TestMain
         Console.WriteLine("\n[import table]");
         // The import table decides which name the emulator must be installed under, so it has to be read
         // correctly from real binaries - not just synthetic fixtures.
-        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"steamless\Steamless.CLI.exe"));
+        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
         Check(cliImports.Any(n => string.Equals(n, "mscoree.dll", StringComparison.OrdinalIgnoreCase)),
               "managed exe reports its mscoree.dll import", string.Join(", ", cliImports.ToArray()));
 
@@ -168,7 +168,7 @@ static class TestMain
         var api86Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
         Check(api86Imports.Count > 0, "32-bit dll import table is parsed too", api86Imports.Count.ToString());
 
-        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"steamless\Steamless.CLI.exe")) == null,
+        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe")) == null,
               "an exe importing no Steamworks dll reports null rather than guessing", null);
         Check(PatchRunner.IsSteamApiName("steam_api.dll") && PatchRunner.IsSteamApiName("STEAM_API64.DLL")
               && !PatchRunner.IsSteamApiName("steam_api_extra.dll") && !PatchRunner.IsSteamApiName("mscoree.dll"),
@@ -209,6 +209,11 @@ static class TestMain
                 Check(!negative.Success && negative.ErrorCode == UnpackErrorCode.UnsupportedVariant && negative.Output == null,
                       "already-unpacked " + architecture + " negative control", negative.Error);
             }
+            // the 2.x unpackers need SharpDisasm; it must come from the exe's own resource, not a file on disk
+            System.Reflection.Assembly disasm = null;
+            try { disasm = System.Reflection.Assembly.Load(new System.Reflection.AssemblyName("SharpDisasm")); } catch { }
+            Check(disasm != null && disasm.Location == "" && disasm.GetType("SharpDisasm.Disassembler") != null,
+                  "SharpDisasm resolves from the embedded resource", disasm == null ? "(not found)" : disasm.Location);
             UnpackResult missingResult = SteamlessUnpacker.UnpackToMemory(Path.Combine(nativeDir, "missing.exe"));
             Check(!missingResult.Success && missingResult.ErrorCode == UnpackErrorCode.InvalidInput && missingResult.Output == null,
                   "missing input returns a structured result", missingResult.Error);
@@ -298,8 +303,8 @@ static class TestMain
             Check(pres.Success && pres.Unpacked, "packed game is unpacked in-process", pres.Summary);
             Check(SafePersistence.Hash(exe) == expectedUnpacked, "exe on disk is exactly the in-memory output", null);
             Check(!Directory.GetFiles(gameDir, "*.unpacked.exe").Any(), "no temporary .unpacked.exe is left behind", null);
-            Check(!plog.Any(l => l.IndexOf("Running Steamless", StringComparison.OrdinalIgnoreCase) >= 0),
-                  "the Steamless CLI is not started when the in-process unpack succeeds", null);
+            Check(plog.Any(l => l.Contains("SteamStub Variant 3.1")),
+                  "the Steamless unpacker's own log lines reach the patch log", null);
             var exeWrite = pres.Writes.FirstOrDefault(w => string.Equals(w.Destination, Path.GetFullPath(exe), StringComparison.OrdinalIgnoreCase));
             Check(exeWrite != null && exeWrite.PreviousHash == packedHash && exeWrite.StagedHash == expectedUnpacked
                   && exeWrite.ExternalRecovery && File.Exists(exeWrite.RecoveryPath) && SafePersistence.Hash(exeWrite.RecoveryPath) == packedHash,
@@ -571,7 +576,7 @@ static class TestMain
             var gameDir = Path.Combine(work, "MyGame");
             Directory.CreateDirectory(gameDir);
             var dummyExe = Path.Combine(gameDir, "MyGame.exe");
-            File.Copy(Path.Combine(root, @"steamless\Steamless.CLI.exe"), dummyExe);
+            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), dummyExe);
             var exeHash = SafePersistence.Hash(dummyExe);
             var stalePaths = new[] { dummyExe + ".unpacked.exe", Path.Combine(gameDir, "MyGame.unpacked.exe"), Path.Combine(gameDir, "unrelated.unpacked.exe") };
             foreach (var stale in stalePaths)
@@ -701,7 +706,7 @@ static class TestMain
         {
             var gameDir2 = Directory.CreateDirectory(Path.Combine(work2, "OFGame")).FullName;
             var exe2 = Path.Combine(gameDir2, "OFGame.exe");
-            File.Copy(Path.Combine(root, @"steamless\Steamless.CLI.exe"), exe2);
+            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), exe2);
 
             var opts2 = new PatchOptions
             {
@@ -1273,36 +1278,7 @@ static class TestMain
 
             string input = Path.Combine(dir, "input.exe");
             WriteAnyCpuDotNetPe(input);
-            string output = input + ".unpacked.exe";
-            WriteNativeX64Pe(output);
-            var invocation = new InvocationOutputs(input);
-            File.SetLastWriteTimeUtc(output, DateTime.UtcNow.AddDays(1));
-            Check(!invocation.IsCurrent(output), "timestamp-only stale output rejected");
-            var changed = File.ReadAllBytes(output);
-            changed[changed.Length - 1] ^= 1;
-            File.WriteAllBytes(output, changed);
-            Check(invocation.IsCurrent(output), "rewritten output fingerprint accepted");
-            string oldInputHash = SafePersistence.Hash(input);
-            File.WriteAllText(input, "concurrent update");
-            bool updateRejected = false;
-            try { invocation.CopyAndDelete(output, null, oldInputHash); }
-            catch (IOException) { updateRejected = true; }
-            Check(updateRejected && File.ReadAllText(input) == "concurrent update" && File.Exists(output),
-                  "concurrent executable update preserved and output retained");
-            WriteAnyCpuDotNetPe(input);
-            var copied = new List<FileWriteRecord>();
-            invocation.CopyAndDelete(output, copied, SafePersistence.Hash(input));
-            Check(copied.Count == 1 && copied[0].Completed && !File.Exists(output) && File.ReadAllBytes(input).SequenceEqual(changed),
-                  "confirmed output copy deletes produced output");
-            var next = new InvocationOutputs(input);
-            Check(!next.IsCurrent(output), "next invocation cannot reuse consumed output");
-            File.WriteAllText(output, "not a PE");
             string intactHash = SafePersistence.Hash(input);
-            bool invalidRejected = false;
-            try { next.CopyAndDelete(output, null, intactHash); }
-            catch (IOException) { invalidRejected = true; }
-            Check(invalidRejected && SafePersistence.Hash(input) == intactHash && File.Exists(output),
-                  "output validator failure retains original and failed output");
 
             var denied = new UnauthorizedAccessException("injected access denial");
             bool deniedPreserved = false;
