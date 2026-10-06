@@ -36,7 +36,7 @@ namespace Gp
         /// <summary>--check: verify an already-patched install and exit, changing nothing.</summary>
         public string Check = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Goldberg Patcher.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Goldberg Patcher.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Goldberg Patcher.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -199,7 +199,7 @@ namespace Gp
             Application.ThreadException += (s, e) =>
             {
                 LogFatal("UI thread", e.Exception);
-                MessageBox.Show(e.Exception.Message, "Goldberg Patcher – unexpected error");
+                MessageBox.Show(e.Exception.Message, BuildInfo.AppName + " – unexpected error");
             };
             // Without these two, an exception on a background thread or an unobserved task fault kills the
             // process with no errors.log entry and no message at all - the batch and scan paths both run
@@ -296,7 +296,7 @@ namespace Gp
 
             if (items.Count == 0)
             {
-                Console.WriteLine("Goldberg Patcher --batch: no usable game entries.");
+                Console.WriteLine("Shibaberg --batch: no usable game entries.");
                 Console.WriteLine(StartupArgs.Usage);
                 return invalid > 0 ? 1 : 2;
             }
@@ -306,7 +306,7 @@ namespace Gp
                 if (string.IsNullOrEmpty(it.AppId))
                     try { var d = AppIdDetector.Detect(it.Exe, "", false); if (d.Found) it.AppId = d.AppId; } catch { }
 
-            Console.WriteLine("Goldberg Patcher --batch: " + items.Count + (items.Count == 1 ? " game" : " games")
+            Console.WriteLine("Shibaberg --batch: " + items.Count + (items.Count == 1 ? " game" : " games")
                 + (invalid > 0 ? ", " + invalid + " invalid entr" + (invalid == 1 ? "y" : "ies") + " (counted as failures)" : ""));
             var prefs = new BatchPrefs
             {
@@ -428,7 +428,7 @@ namespace Gp
     {
         public string StatusText = "Ready";
         public Color DotColor = Ui.MutedC;
-        public string RightText = "goldberg emu · steamless";
+        public string RightText = "shibaberg emu · shibaless";
 
         bool _pulse = false, pulseOn = false;
         readonly System.Windows.Forms.Timer pulseTimer;
@@ -446,7 +446,7 @@ namespace Gp
 
         public StatusBarCtl()
         {
-            Dock = DockStyle.Bottom; Height = 30;
+            Height = 30;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             pulseTimer = new System.Windows.Forms.Timer();
             pulseTimer.Interval = 650;
@@ -462,7 +462,7 @@ namespace Gp
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var b = new SolidBrush(Ui.Tint(Ui.Bg, Color.Black, 0.25))) g.FillRectangle(b, ClientRectangle);
+            using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
             using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, 0, Width, 0);
             float cy = Height / 2f, dx = Ui.S(30f);
             if (_pulse && pulseOn)
@@ -483,14 +483,17 @@ namespace Gp
     public class MainForm : Form
     {
         const int Pad = 28;
+        const int Side = 272;                 // the orange sidebar
+        const int X0 = Side + Pad;            // content left edge
+        const int CW = 820 - Pad * 2;         // content width
         readonly TitleBar titleBar;
         readonly DropZone zone;
         readonly AppCard appIdCard;
         readonly AppIdBox appIdBox;
         readonly AppCard optionsCard;
         readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup;
-        readonly GradientButton patchBtn;
-        readonly GradientButton batchBtn;
+        readonly FlatButton patchBtn;
+        readonly FlatButton batchBtn;
         readonly ProgressBarLite progress;
         readonly Banner banner;
         readonly AppCard logCard;
@@ -534,25 +537,26 @@ namespace Gp
             // Ui.Scale uses for the hand-positioned paint geometry.
             AutoScaleDimensions = new SizeF(96f, 96f);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(820, 780);
+            ClientSize = new Size(Side + 820, 780);
             BackColor = Ui.Bg;
-            Text = "Goldberg Patcher";
+            Text = BuildInfo.AppName;
+            try { using (var bmp = Shiba.Render(64, ShibaMood.Neutral)) Icon = Icon.FromHandle(bmp.GetHicon()); } catch { }
             KeyPreview = true;
             DoubleBuffered = true;
             MinimumSize = Size;
 
-            titleBar = new TitleBar();
+            titleBar = new TitleBar { ShowBrand = false, Bounds = new Rectangle(Side, 0, 820, 46), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
             Controls.Add(titleBar);
 
             zoneTip = new ToolTip();
             zone = new DropZone();
-            zone.Bounds = new Rectangle(Pad, 116, 820 - Pad * 2, 116);
+            zone.Bounds = new Rectangle(X0, 116, CW, 116);
             zone.FileChosen += OnGameSelected;
             zone.InvalidFile += OnInvalidDropped;
             Controls.Add(zone);
 
             appIdCard = new AppCard();
-            appIdCard.Bounds = new Rectangle(Pad, 244, 820 - Pad * 2, 86);
+            appIdCard.Bounds = new Rectangle(X0, 244, CW, 86);
             Controls.Add(appIdCard);
 
             appIdBox = new AppIdBox();
@@ -630,7 +634,7 @@ namespace Gp
             SetAppIdBusy(false);
 
             optionsCard = new AppCard();
-            optionsCard.Bounds = new Rectangle(Pad, 342, 820 - Pad * 2, 160);
+            optionsCard.Bounds = new Rectangle(X0, 342, CW, 160);
             Controls.Add(optionsCard);
 
             optionsCard.Paint += (s, e) =>
@@ -663,23 +667,23 @@ namespace Gp
 
             int rowW = 820 - Pad * 2;
             int batchW = 210, gap = 14;
-            patchBtn = new GradientButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(Pad, 514, rowW - batchW - gap, 52);
+            patchBtn = new FlatButton("Patch Game");
+            patchBtn.Bounds = new Rectangle(X0, 514, rowW - batchW - gap, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
-            batchBtn = new GradientButton("Batch Patch…");
-            batchBtn.Kind = GradientButton.BtnKind.Secondary;
-            batchBtn.Bounds = new Rectangle(Pad + rowW - batchW, 514, batchW, 52);
+            batchBtn = new FlatButton("Batch Patch…");
+            batchBtn.Kind = FlatButton.BtnKind.Secondary;
+            batchBtn.Bounds = new Rectangle(X0 + rowW - batchW, 514, batchW, 52);
             batchBtn.Click += delegate { OpenBatch(); };
             Controls.Add(batchBtn);
 
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(Pad, 576, 820 - Pad * 2, 4);
+            progress.Bounds = new Rectangle(X0, 576, CW, 4);
             Controls.Add(progress);
 
             banner = new Banner();
-            banner.Bounds = new Rectangle(Pad, 588, 820 - Pad * 2, 58);
+            banner.Bounds = new Rectangle(X0, 588, CW, 58);
             banner.ActionClicked += OnBannerAction;
             banner.PrimaryAction = "Play game";
             Controls.Add(banner);
@@ -698,8 +702,12 @@ namespace Gp
             logCard.Controls.Add(log);
 
             statusBar = new StatusBarCtl();
-            statusBar.RightText = "goldberg emu · steamless · offline";
+            statusBar.RightText = "shibaberg emu · shibaless · offline";
+            statusBar.Bounds = new Rectangle(Side, 780 - 30, 820, 30);
+            statusBar.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(statusBar);
+            appIdBox.Controls[0].TextChanged += delegate { InvalidateSidebar(); };
+            tOnlineFix.CheckedChanged += delegate { InvalidateSidebar(); };
 
             titleBar.CloseClicked += delegate { Close(); };
             titleBar.MinimizeClicked += delegate { WindowState = FormWindowState.Minimized; };
@@ -753,9 +761,9 @@ namespace Gp
         {
             // Scaled explicitly: WinForms' auto-scale sizes the controls once at load, but this runs again on
             // every resize and banner toggle, so the constants here have to be scaled by hand to match.
-            int pad = Ui.S(Pad);
+            int x = Ui.S(X0);
             int top = Ui.S(banner.Visible ? 654 : 596);
-            return new Rectangle(pad, top, ClientSize.Width - pad * 2, ClientSize.Height - top - Ui.S(40));
+            return new Rectangle(x, top, ClientSize.Width - x - Ui.S(Pad), ClientSize.Height - top - Ui.S(40));
         }
         void RecalcLog()
         {
@@ -779,7 +787,7 @@ namespace Gp
             {
                 int round = 2;   // DWMWCP_ROUND
                 DwmSetWindowAttribute(Handle, 33, ref round, 4);
-                int dark = 1;
+                int dark = 0;   // light theme
                 DwmSetWindowAttribute(Handle, 20, ref dark, 4);
                 DwmSetWindowAttribute(Handle, 19, ref dark, 4);
             }
@@ -794,7 +802,8 @@ namespace Gp
         void OnShownFirst(object s, EventArgs e)
         {
             if (closing || IsDisposed) return;
-            Log(LogLevel.Dim, "Goldberg Patcher ready. Drop a game .exe to begin.");
+            Log(LogLevel.Dim, "Shibaberg is ready – drop a game .exe to begin.");
+            SetMascot(ShibaMood.Neutral, "Woof! Drop a game's .exe and I'll fetch it.");
 
             Log(LogLevel.Dim, startup.Initialization);
 
@@ -875,6 +884,7 @@ namespace Gp
             lookupPending = false; // any in-flight detection from the previous game no longer matters
             appIdBox.Text = "";    // fresh AppID resolution on EVERY selection (folder cache → steam_appid.txt → online store)
             zoneTip.SetToolTip(zone, "Full path:\n" + path);
+            SetMascot(ShibaMood.Happy, "Ooh, " + Path.GetFileNameWithoutExtension(path) + "! Let me sniff around…");
             settings.LastExe = path;
             settings.Save();
 
@@ -1092,7 +1102,7 @@ namespace Gp
 
             running = true;
             cts = new CancellationTokenSource();
-            patchBtn.Kind = GradientButton.BtnKind.Cancel;
+            patchBtn.Kind = FlatButton.BtnKind.Cancel;
             patchBtn.Text = "Cancel";
             zone.Enabled = false;
             appIdBox.Enabled = false;
@@ -1102,6 +1112,7 @@ namespace Gp
             progress.SetValue(1);
             statusBar.Pulse = true;
             statusBar.Set("Patching… (Esc to cancel)", Ui.Accent);
+            SetMascot(ShibaMood.Neutral, "On it! Digging through the files…");
 
             runner = new PatchRunner();
             var patchLog = new BufferedRunLog(log, "");
@@ -1154,7 +1165,7 @@ namespace Gp
             running = false;
             statusBar.Pulse = false;
             lastResult = res;
-            patchBtn.Kind = GradientButton.BtnKind.Primary;
+            patchBtn.Kind = FlatButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
             patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = !closing;
             tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = !closing;
@@ -1172,12 +1183,14 @@ namespace Gp
                 {
                     banner.Show(Banner.BannerKind.Success, res.Summary, lastActions);
                     statusBar.Set("Done – game patched and verified", Ui.OkC);
+                    SetMascot(ShibaMood.Happy, "All done! Go have fun!");
                 }
                 else
                 {
                     banner.Show(Banner.BannerKind.Warn, "Patched, but the install check failed: " + failed.Title
                         + (failed.Detail.Length > 0 ? "\n" + failed.Detail : ""), lastActions);
                     statusBar.Set("Patched – install check failed (see the log)", Ui.WarnC);
+                    SetMascot(ShibaMood.Sad, "Patched… but something smells off. Peek at the log?");
                 }
                 ShowBannerLayout(true);
             }
@@ -1187,6 +1200,7 @@ namespace Gp
                 lastActions = new string[0];
                 banner.Show(Banner.BannerKind.Warn, res.Summary + "\nSee the log below for details.", new string[0]);
                 ShowBannerLayout(true);
+                SetMascot(ShibaMood.Sleepy, "Okay, stopped. Nap time.");
                 statusBar.Set(res.PartialChanges ? "Cancelled – partial changes remain"
                     : res.RolledBack ? "Cancelled – changes undone" : "Cancelled", Ui.WarnC);
             }
@@ -1200,6 +1214,7 @@ namespace Gp
                 banner.Show(Banner.BannerKind.Error, res.Summary + "\nSee the log below for details.", lastActions);
                 ShowBannerLayout(true);
                 statusBar.Set(res.RolledBack ? "Failed – changes undone" : "Failed", Ui.ErrC);
+                SetMascot(ShibaMood.Sad, "Oops… that didn't work. The log says why.");
             }
 
             if (startup.ExitWhenDone)
@@ -1407,47 +1422,6 @@ namespace Gp
             log.AppendLine(msg, lvl);
         }
 
-        static void AmbientGlow(Graphics g, Rectangle clipRect, float cx, float cy, float radius, Color c, int alpha)
-        {
-            using (var p = new GraphicsPath())
-            {
-                p.AddEllipse(new RectangleF(cx - radius, cy - radius, radius * 2, radius * 2));
-                using (var b = new PathGradientBrush(p))
-                {
-                    b.CenterColor = Color.FromArgb(alpha, c.R, c.G, c.B);
-                    b.SurroundColors = new[] { Color.Transparent };
-                    g.FillRectangle(b, clipRect);
-                }
-            }
-        }
-
-        Bitmap glowCache;
-        Size glowCacheSize;
-
-        /// <summary>Both ambient glows are whole-client-rectangle gradient rasterisations, and this form
-        /// repaints on every resize tick, so rendering them inline was two full-window gradient fills per
-        /// frame. Render them once per size into a bitmap and blit it.</summary>
-        void PaintAmbientGlow(Graphics g)
-        {
-            if (glowCache == null || glowCacheSize != ClientSize)
-            {
-                if (glowCache != null) { glowCache.Dispose(); glowCache = null; }
-                if (ClientSize.Width > 0 && ClientSize.Height > 0)
-                {
-                    var bmp = new Bitmap(ClientSize.Width, ClientSize.Height);
-                    using (var bg = Graphics.FromImage(bmp))
-                    {
-                        var full = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
-                        AmbientGlow(bg, full, Width * 0.62f, Ui.S(60f), Ui.S(460f), Ui.Accent, 22);
-                        AmbientGlow(bg, full, Ui.S(40f), Height - Ui.S(160f), Ui.S(380f), Ui.AccentLo, 12);
-                    }
-                    glowCache = bmp;
-                    glowCacheSize = ClientSize;
-                }
-            }
-            if (glowCache != null) g.DrawImageUnscaled(glowCache, 0, 0);
-        }
-
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -1456,12 +1430,93 @@ namespace Gp
                 StopAutoTimer();
                 StopExitTimer();
                 CancelSelectionWork();
-                if (glowCache != null) { glowCache.Dispose(); glowCache = null; }
                 if (notePulse != null) { notePulse.Dispose(); notePulse = null; }
                 if (zoneTip != null) { zoneTip.Dispose(); zoneTip = null; }
                 if (cts != null) { try { cts.Dispose(); } catch { } cts = null; }
             }
             base.Dispose(disposing);
+        }
+
+        // ---------------------------------------------------------- sidebar mascot
+
+        ShibaMood mascot = ShibaMood.Neutral;
+        string mascotSays = "Woof! Drop a game's .exe and I'll fetch it.";
+
+        void SetMascot(ShibaMood mood, string says)
+        {
+            mascot = mood; mascotSays = says ?? "";
+            InvalidateSidebar();
+        }
+
+        void InvalidateSidebar() { if (!IsDisposed) Invalidate(new Rectangle(0, 0, Ui.S(Side), ClientSize.Height)); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            // the sidebar is also the window's drag handle (the title bar only spans the content side)
+            if (e.Button == MouseButtons.Left && e.X < Ui.S(Side))
+            {
+                NativeMethods.ReleaseCapture();
+                NativeMethods.SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero);
+            }
+            base.OnMouseDown(e);
+        }
+
+        void PaintSidebar(Graphics g)
+        {
+            int w = Ui.S(Side);
+            using (var b = new SolidBrush(Ui.Accent)) g.FillRectangle(b, 0, 0, w, ClientSize.Height);
+            // a soft paw-print pattern in a slightly deeper fur tone
+            using (var paw = new SolidBrush(Ui.Alpha(Ui.FurDark, 90)))
+                foreach (var pt in new[] { new PointF(30, 640), new PointF(70, 600), new PointF(200, 700), new PointF(236, 655), new PointF(48, 30), new PointF(230, 120) })
+                {
+                    float x = Ui.S(pt.X), py = Ui.S(pt.Y), k = Ui.S(1f);
+                    g.FillEllipse(paw, x - 9 * k, py - 6 * k, 18 * k, 14 * k);
+                    g.FillEllipse(paw, x - 13 * k, py - 15 * k, 7 * k, 8 * k);
+                    g.FillEllipse(paw, x - 4 * k, py - 20 * k, 7 * k, 8 * k);
+                    g.FillEllipse(paw, x + 5 * k, py - 15 * k, 7 * k, 8 * k);
+                }
+
+            // the shiba sits on a cream disc - its fur is the sidebar colour and would vanish otherwise
+            float size = Ui.S(150f), disc = Ui.S(176f);
+            using (var b = new SolidBrush(Ui.CreamText)) g.FillEllipse(b, (w - disc) / 2, Ui.S(28f), disc, disc);
+            Shiba.Draw(g, new RectangleF((w - size) / 2, Ui.S(40f), size, size), mascot);
+
+            var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(g, BuildInfo.AppName, Ui.F(20f, true), new Rectangle(0, Ui.S(214), w, Ui.S(40)), Color.White, flags);
+
+            // speech bubble with a little tail pointing up at the shiba
+            var bubble = new Rectangle(Ui.S(22), Ui.S(268), w - Ui.S(44), Ui.S(64));
+            using (var tail = new GraphicsPath())
+            {
+                tail.AddPolygon(new[] { new Point(w / 2 - Ui.S(9), bubble.Y + 1), new Point(w / 2, bubble.Y - Ui.S(9)), new Point(w / 2 + Ui.S(9), bubble.Y + 1) });
+                using (var b = new SolidBrush(Color.White)) g.FillPath(b, tail);
+            }
+            Ui.FillRound(g, bubble, Ui.S(14), Color.White);
+            TextRenderer.DrawText(g, mascotSays, Ui.F(9f, true), Rectangle.Inflate(bubble, -Ui.S(12), -Ui.S(8)), Ui.TextC,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+            // three steps, ticked off as they are done
+            bool picked = !string.IsNullOrEmpty(zone.GamePath);
+            bool idOk = tOnlineFix.Checked || AppIdDetector.IsValid(AppIdDetector.Normalize(appIdBox.Text));
+            bool patched = lastResult != null && lastResult.Success;
+            var steps = new[] { new KeyValuePair<string, bool>("Pick the game's .exe", picked),
+                                new KeyValuePair<string, bool>("Check the Steam AppID", picked && idOk),
+                                new KeyValuePair<string, bool>("Press Patch", patched) };
+            int y = Ui.S(372);
+            for (int i = 0; i < steps.Length; i++)
+            {
+                var dot = new Rectangle(Ui.S(34), y, Ui.S(26), Ui.S(26));
+                bool done = steps[i].Value;
+                using (var b = new SolidBrush(done ? Color.White : Ui.FurDark)) g.FillEllipse(b, dot);
+                TextRenderer.DrawText(g, done ? "\u2713" : (i + 1).ToString(), Ui.F(9.5f, true), dot, done ? Ui.Accent2 : Ui.CreamText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, steps[i].Key, Ui.F(9.75f, done), new Rectangle(dot.Right + Ui.S(12), y, w - dot.Right - Ui.S(20), dot.Height),
+                    done ? Color.White : Ui.CreamText, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                y += Ui.S(42);
+            }
+
+            TextRenderer.DrawText(g, "v" + BuildInfo.Version + "  ·  made with paws", Ui.F(7.75f, false),
+                new Rectangle(0, ClientSize.Height - Ui.S(30), w, Ui.S(20)), Ui.CreamText, flags);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -1471,23 +1526,10 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
 
-            PaintAmbientGlow(g);
-
-            // hero title in the brand gradient
-            string title = "Patch a Steam game";
-            var tf = Ui.F(16f, true);
-            try
-            {
-                float tw = (float)g.MeasureString(title, tf).Width;
-                g.TextRenderingHint = TextRenderingHint.AntiAlias;
-                    using (var lg = new LinearGradientBrush(new PointF(Ui.S(Pad), 0), new PointF(Ui.S(Pad) + Math.Max(tw, 1f), 0), Ui.TextC, Ui.Accent2))
-                        g.DrawString(title, tf, lg, new PointF(Ui.S(Pad), Ui.S(56f)), StringFormat.GenericTypographic);
-            }
-            catch { TextRenderer.DrawText(g, title, tf, new Point(Ui.S(Pad), Ui.S(58)), Ui.TextC, TextFormatFlags.NoPadding); }
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            TextRenderer.DrawText(g, "Unpack SteamStub DRM  ·  install the Goldberg emulator  ·  configure the AppID, automatically",
-                Ui.F(8.75f, false), new Point(Ui.S(Pad), Ui.S(90)), Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Let's patch a game", Ui.F(17f, true), new Point(Ui.S(X0), Ui.S(52)), Ui.TextC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Pick the .exe, check the AppID, press Patch – DRM, emulator and AppID are handled for you.",
+                Ui.F(8.75f, false), new Point(Ui.S(X0), Ui.S(88)), Ui.MutedC, TextFormatFlags.NoPadding);
+            PaintSidebar(g);
         }
     }
 }

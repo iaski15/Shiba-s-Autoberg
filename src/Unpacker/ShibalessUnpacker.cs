@@ -39,7 +39,7 @@ namespace Shibaless
         public string SourceSha256 { get; internal set; }
     }
 
-    /// <summary>Runs Shibaless - our fork of the Steamless unpackers (third_party/shibaless) - in-process. The fork does the
+    /// <summary>Runs Shibaless - our fork of the Steamless unpackers (shibaless/) - in-process. The fork does the
     /// unpacking; this class only picks the unpacker, keeps the result in memory, and adds the guards that
     /// decide whether the result may replace the game's exe.</summary>
     public static class ShibalessUnpacker
@@ -74,7 +74,7 @@ namespace Shibaless
         /// CanProcessFile rejects the other bitness with the same Machine test, so skipping them up front
         /// changes nothing but the number of times the file is read.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]   // must not be JIT-compiled before the resolver above is registered
-        static List<ShibalessPlugin> Unpackers(bool is64)
+        internal static List<ShibalessPlugin> Unpackers(bool is64)
         {
             var all = is64
                 ? new ShibalessPlugin[] { new Shibaless.Unpacker.Variant30.x64.Main(), new Shibaless.Unpacker.Variant31.x64.Main() }
