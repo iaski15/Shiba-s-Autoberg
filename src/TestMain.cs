@@ -132,7 +132,7 @@ static class TestMain
         Recovery.JournalPathOverride = Path.Combine(undoDir, "journal.txt");
         Recovery.StateRootOverride = undoDir;
 
-        Console.WriteLine("== Goldberg Patcher self-test ==\n[PE analysis]");
+        Console.WriteLine("== Shibaberg self-test ==\n[PE analysis]");
         var root = AppDomain.CurrentDomain.BaseDirectory;
 
         var p64 = PeReader.Analyze(Path.Combine(root, @"shibaberg\bin\x64\steam_api64.dll"));

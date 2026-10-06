@@ -1,4 +1,4 @@
-# Goldberg Patcher
+# Shibaberg
 
 A one-click auto-patcher for [Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) (GSE). Drop a game executable, enter the AppID, and it takes care of everything: DRM unpacking, installing the emulator dlls, `steam_appid.txt`, interface generation, and setting up the `steam_settings` folder.
 
@@ -50,10 +50,10 @@ The game then attaches to your real Steam account as Spacewar and all traffic is
 The GUI executable is also headless-capable, which is how the live test drives it:
 
 ```text
-Goldberg Patcher.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
-Goldberg Patcher.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings]
-Goldberg Patcher.exe --check <game.exe> [--appid <id>] [--online-fix]
-Goldberg Patcher.exe --verify-payload
+Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
+Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings]
+Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]
+Shibaberg.exe --verify-payload
 ```
 
 - `--auto` is what actually starts a run; `--appid` on its own only pre-fills the box.
@@ -75,7 +75,7 @@ Requirements: Windows and Visual Studio Build Tools with the Roslyn C# compiler 
 The script compiles two binaries:
 
 - `_selftest.exe` — headless console self-test (PE analysis, recovery, payload, and regression coverage)
-- `Goldberg Patcher.exe` — the GUI app, with the entire toolchain embedded as resources
+- `Shibaberg.exe` — the GUI app, with the entire toolchain embedded as resources
 
 The payload file list lives in `build.ps1`. Adding or removing files there changes the embedded set; a file listed but missing from disk fails the build rather than producing a broken exe.
 
@@ -92,7 +92,7 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 
 ```
 src/                      C# sources (Core.cs = patch pipeline + PE reader, Ui.cs, MainForm.cs, Batch.cs)
-Goldberg Patcher.exe      built GUI app (self-contained) – build output, not tracked
+Shibaberg.exe      built GUI app (self-contained) – build output, not tracked
 _selftest.exe             built console self-test – build output, not tracked
 shibaless/                Shibaless: our fork of Steamless (API + 7 unpackers), compiled into the app; see VENDORED.md
 shibaberg/                Shibaberg: our fork of gbe_fork (the Goldberg emulator); see VENDORED.md

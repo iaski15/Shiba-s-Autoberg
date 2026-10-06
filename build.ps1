@@ -123,11 +123,8 @@ Write-Host "csc:   $csc"
 Write-Host "refs:  $refDir"
 
 # ---- icon ----
-$icon = Join-Path $root 'app.ico'
-if (-not (Test-Path $icon)) {
-    & (Join-Path $src 'make_icon.ps1')
-    Copy-Item (Join-Path $src 'app.ico') $icon
-}
+# src\app.ico is committed; regenerate it from the mascot with src\make_icon.ps1 (needs a built Shibaberg.exe).
+$icon = Join-Path $src 'app.ico'
 $iconArg = "/win32icon:`"$icon`""
 
 function Compile($sources, $out, $extra) {
@@ -207,7 +204,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Goldberg Patcher.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }

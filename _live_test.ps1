@@ -5,7 +5,7 @@ Set-Location $PSScriptRoot
 # compressed payload can repair itself.
 #
 # Notes on why this is written the way it is:
-#  * The patcher is a /target:winexe app, so `& ".\Goldberg Patcher.exe"` returns immediately and never
+#  * The patcher is a /target:winexe app, so `& ".\Shibaberg.exe"` returns immediately and never
 #    sets $LASTEXITCODE. Process.Start + WaitForExit is the only reliable way to get its exit code.
 #  * Process.Start is used rather than Start-Process, which rebuilds the environment into a
 #    case-insensitive dictionary and throws "Item has already been added" when the parent environment
@@ -15,7 +15,7 @@ Set-Location $PSScriptRoot
 #    --batch pins OnlineFix=false and always exercises the dll replacement path.
 #  * $env:APPDATA is not guaranteed to be set, so the state directory is resolved through the shell API.
 
-$patcher = Join-Path $PSScriptRoot 'Goldberg Patcher.exe'
+$patcher = Join-Path $PSScriptRoot 'Shibaberg.exe'
 $stateDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'GoldbergPatcher'
 $journal = Join-Path $stateDir 'last-patch\journal.txt'
 $failures = New-Object System.Collections.Generic.List[string]

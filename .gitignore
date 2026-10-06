@@ -10,6 +10,7 @@ plan.md
 .payload-ok.tmp
 
 # Build outputs - releases are built from a clean checkout of the tagged commit and attached on GitHub.
+/Shibaberg.exe
 /Goldberg Patcher.exe
 /_selftest.exe
 /dist/
@@ -22,8 +23,6 @@ plan.md
 !/shibaberg/**/*.md
 
 # Not needed to build or verify. Kept on disk, out of the repo.
-/src/make_icon.ps1
-/src/app.ico
 # Shibaless: files build.ps1 does not compile, and fork-maintenance tooling.
 /shibaless/**/*.csproj
 /shibaless/**/Properties/

@@ -55,6 +55,11 @@ namespace Gp
     /// was forgotten. Lives here, not in Ui.cs, so the self-test can assert it.</summary>
     public static class BuildInfo
     {
+        /// <summary>The product name shown to users. Internal names (the %APPDATA%\GoldbergPatcher state folder,
+        /// the payload folder, mutex names) deliberately keep the old name: renaming them would orphan existing
+        /// settings, AppID caches and undo records.</summary>
+        public const string AppName = "Shibaberg";
+
         static string version;
 
         public static string Version
@@ -3071,7 +3076,7 @@ namespace Gp
                 // is worth less than the delay costs.
                 req.Timeout = 4000;
                 req.ReadWriteTimeout = 4000;
-                req.UserAgent = "GoldbergPatcher/" + BuildInfo.Version;   // was a stale hardcoded "0.3"
+                req.UserAgent = "Shibaberg/" + BuildInfo.Version;   // was a stale hardcoded "0.3"
                 using (ct.Register(() => req.Abort()))
                 using (var resp = req.GetResponse())
                 using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))

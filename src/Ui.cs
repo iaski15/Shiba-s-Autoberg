@@ -16,35 +16,28 @@ namespace Gp
             return Color.FromArgb(Convert.ToInt32(h.Substring(0, 2), 16), Convert.ToInt32(h.Substring(2, 2), 16), Convert.ToInt32(h.Substring(4, 2), 16));
         }
 
-        // Neutrals carry a faint violet cast so the surfaces sit with the accent instead of against it.
-        public static readonly Color Bg = FromHex("#0E0C13");
-        public static readonly Color Surface = FromHex("#16131E");
-        public static readonly Color Surface2 = FromHex("#1F1B2A");
-        public static readonly Color Inset = FromHex("#110F18");
-        public static readonly Color BorderC = FromHex("#2A2537");
-        public static readonly Color TextC = FromHex("#EDEAF5");
-        public static readonly Color MutedC = FromHex("#958FA8");
-        public static readonly Color Accent = FromHex("#8B5CF6");      // brand violet
-        public static readonly Color Accent2 = FromHex("#B79CFF");     // lavender: links, highlights, info chips
-        public static readonly Color AccentHi = FromHex("#A07BFF");    // gradient top / hover
-        public static readonly Color AccentLo = FromHex("#6D3BEB");    // gradient bottom / pressed
-        public static readonly Color OkC = FromHex("#34D399");
-        public static readonly Color WarnC = FromHex("#FBBF24");
-        public static readonly Color ErrC = FromHex("#F87171");
+        // Shiba palette: cream background, white cards, fur orange as the one accent, dark-brown "ink" text.
+        public static readonly Color Bg = FromHex("#FFF6EA");          // cream
+        public static readonly Color Surface = FromHex("#FFFFFF");     // cards
+        public static readonly Color Surface2 = FromHex("#FBEBD8");    // inputs, secondary buttons, off toggles
+        public static readonly Color Inset = FromHex("#FFFBF5");       // text fields
+        public static readonly Color BorderC = FromHex("#EFD9BF");
+        public static readonly Color TextC = FromHex("#3A2418");       // the shiba's outline colour
+        public static readonly Color MutedC = FromHex("#9B7A60");
+        public static readonly Color Accent = FromHex("#E8924A");      // fur
+        public static readonly Color Accent2 = FromHex("#C4652A");     // deeper fur: links, accent text
+        public static readonly Color FurDark = FromHex("#D27A34");     // sidebar shading
+        public static readonly Color CreamText = FromHex("#FFF2DF");   // text on fur
+        public static readonly Color OkC = FromHex("#3F9A58");
+        public static readonly Color WarnC = FromHex("#D48A12");
+        public static readonly Color ErrC = FromHex("#CF4A3F");
 
-        // These were ad-hoc Ui.FromHex("#...") literals inside paint and log paths, where each call cost
-        // two Substring allocations and three Convert.ToInt32 parses - on every repaint, per control.
-        public static readonly Color DisabledC = FromHex("#5C566C");   // disabled label / toggle text
-        public static readonly Color KnobOffC = FromHex("#6F6982");    // disabled toggle knob
-        public static readonly Color CancelA = FromHex("#C24452");
-        public static readonly Color CancelB = FromHex("#9B3440");
-        public static readonly Color SuccessA = FromHex("#22A36B");
-        public static readonly Color SuccessB = FromHex("#178052");
-        public static readonly Color OkBorderC = FromHex("#1E5C44");
-        public static readonly Color ErrBorderC = FromHex("#6B2B31");
-        public static readonly Color WarnBorderC = FromHex("#6B5623");
-        public static readonly Color DimC = FromHex("#6A6479");        // dim log lines
-        public static readonly Color LogTextC = FromHex("#BDB7CC");    // normal log lines
+        public static readonly Color DisabledC = FromHex("#C8B39E");   // disabled label / toggle text
+        public static readonly Color KnobOffC = FromHex("#DCCBB8");    // disabled toggle knob
+        public static readonly Color CancelA = FromHex("#CF4A3F");
+        public static readonly Color SuccessA = FromHex("#3F9A58");
+        public static readonly Color DimC = FromHex("#B59A82");        // dim log lines
+        public static readonly Color LogTextC = FromHex("#5A3E2B");    // normal log lines
 
         public static Color Alpha(Color c, int a) { return Color.FromArgb(Math.Max(0, Math.Min(255, a)), c.R, c.G, c.B); }
 
@@ -213,6 +206,140 @@ namespace Gp
         }
     }
 
+    // ─────────────────────────────────────────────── shiba
+
+    public enum ShibaMood { Neutral, Happy, Sad, Sleepy }
+
+    /// <summary>The mascot: a chibi shiba head drawn as vectors in a 100x100 design space, so one drawing
+    /// serves the 16px title-bar logo, the drop zone and the app icon (make_icon.ps1 calls this too).</summary>
+    public static class Shiba
+    {
+        static readonly Color Fur = Ui.FromHex("#E8924A");
+        static readonly Color Cream = Ui.FromHex("#FFF2DF");
+        static readonly Color Line = Ui.FromHex("#3A2418");
+        static readonly Color Ink = Ui.FromHex("#2A1A12");
+        static readonly Color Blush = Color.FromArgb(150, 0xFF, 0x8F, 0xA3);
+        static readonly Color Tongue = Ui.FromHex("#FF7C8C");
+
+        public static void Draw(Graphics g, RectangleF box, ShibaMood mood)
+        {
+            var state = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float k = Math.Min(box.Width, box.Height) / 100f;
+            g.TranslateTransform(box.X + (box.Width - 100 * k) / 2, box.Y + (box.Height - 100 * k) / 2);
+            g.ScaleTransform(k, k);
+            float lw = 3.2f;   // outline width in design units; scales with the drawing
+            using (var line = new Pen(Line, lw) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var fur = new SolidBrush(Fur))
+            using (var cream = new SolidBrush(Cream))
+            using (var ink = new SolidBrush(Ink))
+            {
+                // ears (behind the head)
+                foreach (bool left in new[] { true, false })
+                {
+                    PointF[] ear = Mirror(left, new PointF(13, 44), new PointF(19, 9), new PointF(45, 27));
+                    PointF[] inner = Mirror(left, new PointF(20, 37), new PointF(23, 18), new PointF(36, 29));
+                    using (var p = new GraphicsPath()) { p.AddClosedCurve(ear, 0.25f); g.FillPath(fur, p); g.DrawPath(line, p); }
+                    using (var p = new GraphicsPath()) { p.AddClosedCurve(inner, 0.3f); g.FillPath(cream, p); }
+                }
+                // head: wide chibi oval
+                var head = new RectangleF(7, 22, 86, 70);
+                g.FillEllipse(fur, head);
+                // cream muzzle/cheeks and the two "eyebrow" spots shibas have
+                using (var clip = new GraphicsPath())
+                {
+                    clip.AddEllipse(head);
+                    var outer = g.Clip;
+                    g.SetClip(clip, CombineMode.Intersect);   // keep the caller's clip, add the head's
+                    g.FillEllipse(cream, 17, 54, 66, 37);
+                    g.Clip = outer;
+                }
+                g.FillEllipse(cream, 28, 41, 10, 6);
+                g.FillEllipse(cream, 62, 41, 10, 6);
+                g.DrawEllipse(line, head);
+
+                // blush
+                using (var b = new SolidBrush(Blush)) { g.FillEllipse(b, 16, 63, 13, 7); g.FillEllipse(b, 71, 63, 13, 7); }
+
+                // eyes
+                switch (mood)
+                {
+                    case ShibaMood.Happy:
+                        g.DrawArc(line, 27, 51, 12, 10, 200, 140);
+                        g.DrawArc(line, 61, 51, 12, 10, 200, 140);
+                        break;
+                    case ShibaMood.Sleepy:
+                        g.DrawArc(line, 27, 50, 12, 9, 20, 140);
+                        g.DrawArc(line, 61, 50, 12, 9, 20, 140);
+                        break;
+                    default:
+                        g.FillEllipse(ink, 29, 50, 9, 11);
+                        g.FillEllipse(ink, 62, 50, 9, 11);
+                        g.FillEllipse(Brushes.White, 31.5f, 52, 3.5f, 3.5f);
+                        g.FillEllipse(Brushes.White, 64.5f, 52, 3.5f, 3.5f);
+                        if (mood == ShibaMood.Sad)
+                        {
+                            g.DrawLine(line, 26, 45, 37, 42);   // worried brows
+                            g.DrawLine(line, 74, 45, 63, 42);
+                        }
+                        break;
+                }
+
+                // nose + mouth
+                using (var nose = new GraphicsPath())
+                {
+                    nose.AddClosedCurve(new[] { new PointF(45, 63), new PointF(55, 63), new PointF(50, 68.5f) }, 0.45f);
+                    g.FillPath(ink, nose);
+                }
+                if (mood == ShibaMood.Happy)
+                {
+                    using (var mouth = new GraphicsPath())
+                    {
+                        mouth.AddArc(42, 64, 16, 16, 0, 180);
+                        mouth.CloseFigure();
+                        using (var t = new SolidBrush(Tongue)) g.FillPath(t, mouth);
+                        g.DrawPath(line, mouth);
+                    }
+                }
+                else if (mood == ShibaMood.Sad)
+                {
+                    g.DrawArc(line, 43, 72, 14, 9, 200, 140);
+                }
+                else
+                {
+                    g.DrawArc(line, 41, 64, 9, 8, 0, 180);   // the little "w"
+                    g.DrawArc(line, 50, 64, 9, 8, 0, 180);
+                }
+                if (mood == ShibaMood.Sleepy)
+                    using (var f = new Font("Segoe UI", 15, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (var zb = new SolidBrush(Ui.Accent2))
+                        g.DrawString("z", f, zb, 82, 14);
+
+            }
+            g.Restore(state);
+        }
+
+        static PointF[] Mirror(bool left, params PointF[] pts)
+        {
+            if (left) return pts;
+            var m = new PointF[pts.Length];
+            for (int i = 0; i < pts.Length; i++) m[i] = new PointF(100 - pts[i].X, pts[i].Y);
+            return m;
+        }
+
+        /// <summary>Square transparent bitmap of the mascot - for the window icon and make_icon.ps1.</summary>
+        public static Bitmap Render(int size, ShibaMood mood)
+        {
+            var bmp = new Bitmap(size, size);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                Draw(g, new RectangleF(0, 0, size, size), mood);
+            }
+            return bmp;
+        }
+    }
+
     // ─────────────────────────────────────────────── animation
 
     /// <summary>A 0..1 value that eases toward a target and repaints its owner while it moves. Every
@@ -283,12 +410,7 @@ namespace Gp
             int rad = Ui.S(Radius);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
             Ui.FillRound(g, r, rad, Ui.Surface);
-            if (ShowBorder)
-            {
-                Ui.StrokeRound(g, r, rad, Ui.BorderC, 1f);
-                // A hairline of light along the top edge gives the card a little lift off the background.
-                using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
-            }
+            if (ShowBorder) Ui.StrokeRound(g, r, rad, Ui.BorderC, 1f);
             base.OnPaint(e);
         }
     }
@@ -337,6 +459,8 @@ namespace Gp
 
     public class TitleBar : Control
     {
+        /// <summary>Logo + name on the left. Off in the main window, whose sidebar carries the brand.</summary>
+        public bool ShowBrand = true;
         readonly WindowButton minimizeButton = new WindowButton(false);
         readonly WindowButton closeButton = new WindowButton(true);
         public TitleBar()
@@ -395,17 +519,14 @@ namespace Gp
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
 
-            // logo: rounded violet tile with a "G" monogram
-            var logoRect = new Rectangle(Ui.S(20), Ui.S(12), Ui.S(22), Ui.S(22));
-            using (var lg = new LinearGradientBrush(logoRect, Ui.AccentHi, Ui.AccentLo, 60f)) using (var p = Ui.RoundPath(logoRect, Ui.S(6))) g.FillPath(lg, p);
-            TextRenderer.DrawText(g, "G", Ui.F(9.5f, true), logoRect, Color.White,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (!ShowBrand) { using (var p = new Pen(Ui.BorderC, 1f)) g.DrawLine(p, 0, Height - 1, Width, Height - 1); return; }
+            Shiba.Draw(g, new RectangleF(Ui.S(16), Ui.S(9), Ui.S(28), Ui.S(28)), ShibaMood.Neutral);
 
             // title + version pill
-            var tf = Ui.F(9.25f, true);
-            var tsz = TextRenderer.MeasureText(g, "Goldberg Patcher", tf, Size.Empty, TextFormatFlags.NoPadding);
+            var tf = Ui.F(9.75f, true);
+            var tsz = TextRenderer.MeasureText(g, BuildInfo.AppName, tf, Size.Empty, TextFormatFlags.NoPadding);
             int tx = Ui.S(52), ty = Height / 2 - tsz.Height / 2;
-            TextRenderer.DrawText(g, "Goldberg Patcher", tf, new Point(tx, ty), Ui.TextC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, BuildInfo.AppName, tf, new Point(tx, ty), Ui.TextC, TextFormatFlags.NoPadding);
             string ver = "v" + BuildInfo.Version;
             var vf = Ui.F(7.25f, true);
             var vsz = TextRenderer.MeasureText(g, ver, vf, Size.Empty, TextFormatFlags.NoPadding);
@@ -432,8 +553,8 @@ namespace Gp
         /// looked like a rendering glitch. Silently a no-op on systems without the theme.</summary>
         internal static void UseDarkScrollbars(Control c)
         {
-            if (c.IsHandleCreated) try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { }
-            else c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } };
+            if (c.IsHandleCreated) try { SetWindowTheme(c.Handle, "Explorer", null); } catch { }
+            else c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "Explorer", null); } catch { } };
         }
     }
 
@@ -585,23 +706,11 @@ namespace Gp
                 var bc = Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.06), Ui.Accent, hot);
                 using (var pen = new Pen(bc, Ui.S(1.5f))) { pen.DashStyle = DashStyle.Dash; pen.DashPattern = new[] { 4f, 3f }; using (var p = Ui.RoundPath(Rectangle.Inflate(rect, -1, -1), rad - 1)) g.DrawPath(pen, p); }
 
-                // icon tile: soft halo + gradient tile + "drop into tray" arrow
-                int isz = Ui.S(40);
-                var iconR = new Rectangle(Width / 2 - isz / 2, Ui.S(16), isz, isz);
-                var glowR = Rectangle.Inflate(iconR, Ui.S(6), Ui.S(6));
-                Ui.FillRound(g, glowR, Ui.S(15), Ui.Alpha(Ui.Accent, (int)(22 + 40 * hot)));
-                using (var lg = new LinearGradientBrush(iconR, Ui.AccentHi, Ui.AccentLo, 70f)) using (var p = Ui.RoundPath(iconR, Ui.S(11))) g.FillPath(lg, p);
-                using (var pen = new Pen(Color.White, Ui.S(2f)))
-                {
-                    pen.StartCap = pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
-                    float cx = iconR.X + iconR.Width / 2f, top = iconR.Y + Ui.S(10f), tip = iconR.Y + Ui.S(23f) + Ui.S(3f) * dragAnim.Eased;
-                    g.DrawLine(pen, cx, top, cx, tip);
-                    g.DrawLines(pen, new[] { new PointF(cx - Ui.S(5f), tip - Ui.S(5f)), new PointF(cx, tip), new PointF(cx + Ui.S(5f), tip - Ui.S(5f)) });
-                    float ty = iconR.Bottom - Ui.S(10f), tx0 = iconR.X + Ui.S(11f), tx1 = iconR.Right - Ui.S(11f);
-                    g.DrawLines(pen, new[] { new PointF(tx0, ty - Ui.S(4f)), new PointF(tx0, ty), new PointF(tx1, ty), new PointF(tx1, ty - Ui.S(4f)) });
-                }
+                // the shiba perks up (and hops a little) while something is hovered or dragged over it
+                float isz = Ui.S(50f), hop = Ui.S(3f) * hot;
+                Shiba.Draw(g, new RectangleF(Width / 2f - isz / 2, Ui.S(10f) - hop, isz, isz), hot > 0.3f ? ShibaMood.Happy : ShibaMood.Neutral);
 
-                var l1 = dragOver ? "Release to select this game" : "Drop the game's .exe here";
+                var l1 = dragOver ? "Release to fetch this game!" : "Drop the game's .exe here";
                 var f1 = Ui.F(11f, true);
                 var sz1 = TextRenderer.MeasureText(g, l1, f1, Size.Empty, plain);
                 TextRenderer.DrawText(g, l1, f1, new Point(Width / 2 - sz1.Width / 2, Ui.S(64)), Ui.TextC, plain);
@@ -613,7 +722,6 @@ namespace Gp
             else
             {
                 Ui.StrokeRound(g, rect, rad, Ui.Lerp(Ui.BorderC, Ui.Accent, dragAnim.Eased), 1f);
-                using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
                 int pad = Ui.S(18);
                 var iconR = new Rectangle(pad, Ui.S(16), Ui.S(40), Ui.S(40));
                 if (fileIcon != null)
@@ -732,9 +840,9 @@ namespace Gp
             var pill = new Rectangle(0, Height / 2 - pillH / 2, pillW, pillH);
             float on = knob.Eased, hv = hoverAnim.Eased;
 
-            Color offFill = Ui.Lerp(Ui.Surface2, Ui.Tint(Ui.Surface2, Color.White, 0.06), hv);
-            Color offBorder = Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.05), Ui.Tint(Ui.BorderC, Ui.Accent, 0.45), hv);
-            Color onFill = Ui.Lerp(Ui.Accent, Ui.AccentHi, hv);
+            Color offFill = Ui.Lerp(Ui.Surface2, Ui.Tint(Ui.Surface2, Ui.Accent, 0.12), hv);
+            Color offBorder = Ui.Lerp(Ui.BorderC, Ui.Accent, 0.5f * hv);
+            Color onFill = Ui.Tint(Ui.Accent, Color.White, 0.12 * hv);
             Color trackFill = Ui.Lerp(offFill, onFill, on);
             Color trackBorder = Ui.Lerp(offBorder, onFill, on);
             if (!Enabled)
@@ -750,7 +858,8 @@ namespace Gp
             float kx = pill.X + Ui.S(3) + (pill.Width - knobD - Ui.S(6)) * on;
             var knobR = new RectangleF(kx, pill.Y + Ui.S(3), knobD, knobD);
             if (Enabled) using (var b = new SolidBrush(Color.FromArgb(50, 0, 0, 0))) g.FillEllipse(b, knobR.X, knobR.Y + 1, knobR.Width, knobR.Height);
-            using (var b = new SolidBrush(Enabled ? Ui.Lerp(Ui.Tint(Color.White, Ui.MutedC, 0.25), Color.White, on) : Ui.KnobOffC)) g.FillEllipse(b, knobR);
+            using (var b = new SolidBrush(Enabled ? Color.White : Ui.KnobOffC)) g.FillEllipse(b, knobR);
+            if (Enabled) using (var p = new Pen(Ui.Alpha(Ui.TextC, 40), 1f)) g.DrawEllipse(p, knobR);
 
             TextRenderer.DrawText(g, Text, Ui.F(8.75f, false), new Rectangle(pill.Right + Ui.S(12), 0, Math.Max(0, Width - pill.Right - Ui.S(12)), Height),
                 Enabled ? Ui.TextC : Ui.DisabledC, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
@@ -758,9 +867,9 @@ namespace Gp
         }
     }
 
-    // ─────────────────────────────────────────────── gradient button
+    // ─────────────────────────────────────────────── button
 
-    public class GradientButton : Button
+    public class FlatButton : Button
     {
         public enum BtnKind { Primary, Cancel, Success, Secondary }
         BtnKind kind = BtnKind.Primary;
@@ -769,7 +878,7 @@ namespace Gp
         public BtnKind Kind { get { return kind; } set { if (kind != value) { kind = value; Invalidate(); } } }
         bool press;
         readonly Anim hoverAnim;
-        public GradientButton(string text)
+        public FlatButton(string text)
         {
             hoverAnim = new Anim(this, 110f);
             Text = text;
@@ -793,32 +902,17 @@ namespace Gp
             var rect = new Rectangle(0, 0, Width - 1, Height - 1);
             int rad = Ui.S(CornerRadius);
             float hv = Enabled ? hoverAnim.Eased : 0f;
-            Color fill1, fill2, txt;
-            if (!Enabled) { fill1 = fill2 = Ui.Surface2; txt = Ui.DisabledC; }
-            else if (Kind == BtnKind.Cancel) { fill1 = Ui.CancelA; fill2 = Ui.CancelB; txt = Color.White; }
-            else if (Kind == BtnKind.Success) { fill1 = Ui.SuccessA; fill2 = Ui.SuccessB; txt = Color.White; }
-            else if (Kind == BtnKind.Secondary) { fill1 = fill2 = Ui.Lerp(Ui.Surface, Ui.Surface2, 0.6f + 0.4f * hv); txt = Ui.TextC; }
-            else { fill1 = Ui.AccentHi; fill2 = Ui.AccentLo; txt = Color.White; }
-
-            if (Enabled && Kind != BtnKind.Secondary)
-            {
-                // brighten on hover, deepen on press
-                fill1 = Ui.Tint(fill1, Color.White, 0.10 * hv);
-                fill2 = Ui.Tint(fill2, Color.White, 0.10 * hv);
-                if (press) { fill1 = Ui.Tint(fill1, Color.Black, 0.14); fill2 = Ui.Tint(fill2, Color.Black, 0.14); }
-            }
-            else if (Enabled && press) { fill1 = fill2 = Ui.Tint(fill1, Color.Black, 0.2); }
-
-            using (var lg = new LinearGradientBrush(new Rectangle(0, 0, Math.Max(1, Width), Math.Max(1, Height)), fill1, fill2, 90f)) using (var p = Ui.RoundPath(rect, rad)) g.FillPath(lg, p);
-
+            Color fill, txt;
+            if (!Enabled) { fill = Ui.Surface2; txt = Ui.DisabledC; }
+            else if (Kind == BtnKind.Cancel) { fill = Ui.CancelA; txt = Color.White; }
+            else if (Kind == BtnKind.Success) { fill = Ui.SuccessA; txt = Color.White; }
+            else if (Kind == BtnKind.Secondary) { fill = Ui.Lerp(Ui.Surface, Ui.Surface2, 0.6f + 0.4f * hv); txt = Ui.TextC; }
+            else { fill = Ui.Accent; txt = Color.White; }
+            if (Enabled && Kind != BtnKind.Secondary) fill = Ui.Tint(fill, Color.White, 0.10 * hv);   // lighten on hover
+            if (Enabled && press) fill = Ui.Tint(fill, Color.Black, 0.16);                             // deepen on press
+            Ui.FillRound(g, rect, rad, fill);
             if (Kind == BtnKind.Secondary || !Enabled)
-                Ui.StrokeRound(g, rect, rad, Enabled ? Ui.Lerp(Ui.Tint(Ui.BorderC, Color.White, 0.06), Ui.Alpha(Ui.Accent, 200), hv) : Ui.BorderC, 1f);
-            else
-            {
-                // glossy top edge + faint outline so the coloured fill reads as a raised surface
-                Ui.StrokeRound(g, rect, rad, Color.FromArgb(40, 255, 255, 255), 1f);
-                using (var p = new Pen(Color.FromArgb(70, 255, 255, 255))) g.DrawLine(p, rect.X + rad, rect.Y + 1, rect.Right - rad, rect.Y + 1);
-            }
+                Ui.StrokeRound(g, rect, rad, Enabled ? Ui.Lerp(Ui.BorderC, Ui.Accent, hv) : Ui.BorderC, 1f);
             if (Focused && Enabled && ShowFocusCues)
                 Ui.StrokeRound(g, Rectangle.Inflate(rect, -Ui.S(3), -Ui.S(3)), rad - Ui.S(3), Color.FromArgb(150, 255, 255, 255), 1.2f);
 
@@ -864,7 +958,7 @@ namespace Gp
             if (w > r.Height / 2 + 1)
             {
                 var fr = new Rectangle(r.X, r.Y, w, r.Height);
-                using (var lg = new LinearGradientBrush(new Rectangle(r.X, r.Y, Math.Max(1, r.Width), r.Height), Ui.AccentLo, Ui.Accent2, 0f)) using (var p = Ui.RoundPath(fr, r.Height / 2)) g.FillPath(lg, p);
+                Ui.FillRound(g, fr, r.Height / 2, Ui.Accent);
             }
         }
     }
@@ -878,7 +972,7 @@ namespace Gp
         string message = "";
         public string MessageText { get { return message; } }
         public event Action<int> ActionClicked;
-        readonly List<GradientButton> actionButtons = new List<GradientButton>();
+        readonly List<FlatButton> actionButtons = new List<FlatButton>();
         readonly ToolTip tip = new ToolTip { AutoPopDelay = 15000 };
 
         /// <summary>Action label to draw as the filled (primary) button, e.g. "Play game". Every other
@@ -899,9 +993,9 @@ namespace Gp
             foreach (var text in buttons ?? new string[0])
             {
                 int index = actionButtons.Count;
-                var button = new GradientButton(text ?? "");
+                var button = new FlatButton(text ?? "");
                 button.AccessibleName = text ?? "";
-                button.Kind = text == PrimaryAction ? GradientButton.BtnKind.Primary : GradientButton.BtnKind.Secondary;
+                button.Kind = text == PrimaryAction ? FlatButton.BtnKind.Primary : FlatButton.BtnKind.Secondary;
                 button.TextSize = 8.5f; button.CornerRadius = 8;
                 button.TabIndex = index;
                 button.Click += delegate { var h = ActionClicked; if (h != null) h(index); };
@@ -944,22 +1038,13 @@ namespace Gp
             // so a result reads as part of the window instead of a pasted-on coloured slab.
             Ui.FillRound(g, rect, rad, Ui.Surface);
             Ui.StrokeRound(g, rect, rad, Ui.BorderC, 1f);
-            using (var p = new Pen(Color.FromArgb(14, 255, 255, 255), 1f)) g.DrawLine(p, rad, 1, Width - rad - 1, 1);
             var stripe = new Rectangle(Ui.S(1), Ui.S(12), Ui.S(3), Math.Max(1, rect.Height - Ui.S(24)));
             Ui.FillRound(g, stripe, Ui.S(1), fg);
 
-            // status badge: tinted circle with a vector mark
-            int bdg = Ui.S(28);
-            var badge = new Rectangle(Ui.S(18), rect.Height / 2 - bdg / 2, bdg, bdg);
-            using (var b = new SolidBrush(Ui.Alpha(fg, 34))) g.FillEllipse(b, badge);
-            using (var pen = new Pen(fg, Ui.S(1.8f)))
-            {
-                pen.StartCap = pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
-                float cx = badge.X + bdg / 2f, cy = badge.Y + bdg / 2f, u = Ui.S(4.5f);
-                if (Kind == BannerKind.Success) g.DrawLines(pen, new[] { new PointF(cx - u, cy), new PointF(cx - u * 0.25f, cy + u * 0.8f), new PointF(cx + u, cy - u * 0.8f) });
-                else if (Kind == BannerKind.Error) { g.DrawLine(pen, cx - u * 0.8f, cy - u * 0.8f, cx + u * 0.8f, cy + u * 0.8f); g.DrawLine(pen, cx - u * 0.8f, cy + u * 0.8f, cx + u * 0.8f, cy - u * 0.8f); }
-                else { g.DrawLine(pen, cx, cy - u, cx, cy + u * 0.25f); using (var b = new SolidBrush(fg)) g.FillEllipse(b, cx - Ui.S(1.2f), cy + u * 0.75f, Ui.S(2.4f), Ui.S(2.4f)); }
-            }
+            // the shiba reports the result: happy, worried or just curious
+            int bdg = Ui.S(38);
+            var badge = new Rectangle(Ui.S(14), rect.Height / 2 - bdg / 2, bdg, bdg);
+            Shiba.Draw(g, badge, Kind == BannerKind.Success ? ShibaMood.Happy : Kind == BannerKind.Error ? ShibaMood.Sad : ShibaMood.Neutral);
 
             int textX = badge.Right + Ui.S(14);
             int textRight = actionButtons.Count > 0 ? actionButtons[0].Left - Ui.S(16) : Width - Ui.S(16);

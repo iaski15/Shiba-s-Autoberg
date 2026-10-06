@@ -348,7 +348,7 @@ namespace Gp
         readonly AppCard listCard;
         readonly Panel rowsPanel;
         readonly Label emptyHint;
-        readonly GradientButton addBtn, clearBtn, runBtn;
+        readonly FlatButton addBtn, clearBtn, runBtn;
         readonly CheckBox chkOnline;
         readonly ProgressBarLite progress;
         readonly Label sumLbl;
@@ -390,7 +390,7 @@ namespace Gp
             AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(800, 672);
             BackColor = Ui.Bg;
-            Text = "Goldberg Patcher – batch";
+            Text = BuildInfo.AppName + " – batch";
             KeyPreview = true;
             DoubleBuffered = true;
             MinimumSize = Size;
@@ -439,14 +439,14 @@ namespace Gp
             sumLbl.Bounds = new Rectangle(592, 437, 184, 20);
             Controls.Add(sumLbl);
 
-            addBtn = new GradientButton("Add games…");
-            addBtn.Kind = GradientButton.BtnKind.Secondary;
+            addBtn = new FlatButton("Add games…");
+            addBtn.Kind = FlatButton.BtnKind.Secondary;
             addBtn.Bounds = new Rectangle(Pad, 474, 150, 40);
             addBtn.Click += delegate { BrowseAdd(); };
             Controls.Add(addBtn);
 
-            clearBtn = new GradientButton("Clear");
-            clearBtn.Kind = GradientButton.BtnKind.Secondary;
+            clearBtn = new FlatButton("Clear");
+            clearBtn.Kind = FlatButton.BtnKind.Secondary;
             clearBtn.Bounds = new Rectangle(Pad + 158, 474, 90, 40);
             clearBtn.Click += delegate { if (!running) ClearAll(); };
             Controls.Add(clearBtn);
@@ -462,7 +462,7 @@ namespace Gp
             if (prefs.OnlineFix) chkOnline.Visible = false;
             Controls.Add(chkOnline);
 
-            runBtn = new GradientButton("Patch games");
+            runBtn = new FlatButton("Patch games");
             runBtn.Bounds = new Rectangle(776 - 210, 474, 210, 40);
             runBtn.Click += delegate { if (running) CancelBatch(); else StartBatch(); };
             Controls.Add(runBtn);
@@ -503,7 +503,7 @@ namespace Gp
             {
                 int round = 2;   // DWMWCP_ROUND
                 NativeMethods.DwmSetWindowAttribute(Handle, 33, ref round, 4);
-                int dark = 1;
+                int dark = 0;   // light theme
                 NativeMethods.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
                 NativeMethods.DwmSetWindowAttribute(Handle, 19, ref dark, 4);
             }
@@ -518,13 +518,7 @@ namespace Gp
 
             string title = "Patch several games";
             var tf = Ui.F(12.75f, true);
-            try
-            {
-                float tw = (float)g.MeasureString(title, tf).Width;
-                using (var lg = new LinearGradientBrush(new PointF(Pad, 0), new PointF(Pad + Math.Max(tw, 1f), 0), Ui.TextC, Ui.Accent2))
-                    g.DrawString(title, tf, lg, new PointF(Pad, 46f), StringFormat.GenericTypographic);
-            }
-            catch { TextRenderer.DrawText(g, title, tf, new Point(Pad, 50), Ui.TextC, TextFormatFlags.NoPadding); }
+            TextRenderer.DrawText(g, title, tf, new Point(Pad, 48), Ui.TextC, TextFormatFlags.NoPadding);
 
             var sub = Subtitle();
             int subMaxW = Width - Pad * 2;
@@ -723,7 +717,7 @@ namespace Gp
             string q = "Patch " + total + (total == 1 ? " game" : " games") + "?\n\nThe main window's OPTIONS apply to every game."
                 + (missing > 0 ? "\n\n" + missing + " have no AppID yet and will be SKIPPED." : "")
                 + (prefs.OnlineFix ? "\n\nONLINE-FIX is on – every game gets Spacewar (AppID 480)." : "");
-            if (MessageBox.Show(this, q, "Goldberg Patcher – batch", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            if (MessageBox.Show(this, q, BuildInfo.AppName + " – batch", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return;
 
             running = true;
@@ -734,7 +728,7 @@ namespace Gp
             TotalGames = total;
             settings.LookupAppId = chkOnline.Checked;
             cts = new CancellationTokenSource();
-            runBtn.Kind = GradientButton.BtnKind.Cancel;
+            runBtn.Kind = FlatButton.BtnKind.Cancel;
             runBtn.Text = "Cancel";
             addBtn.Enabled = false;
             clearBtn.Enabled = false;
@@ -782,7 +776,7 @@ namespace Gp
             {
                 running = false;
                 if (cts != null) { cts.Dispose(); cts = null; }
-                runBtn.Kind = GradientButton.BtnKind.Primary;
+                runBtn.Kind = FlatButton.BtnKind.Primary;
                 addBtn.Enabled = clearBtn.Enabled = !closing;
                 chkOnline.Enabled = !closing && !prefs.OnlineFix;
                 foreach (var row in rows) { row.Locked = closing; row.SetIdBoxEnabled(!closing && !prefs.OnlineFix); }
@@ -874,7 +868,7 @@ namespace Gp
             e.Cancel = true;
             if (closing) return;
             if (running && MessageBox.Show(this, "Cancel the batch and wait for a safe stopping point?",
-                "Goldberg Patcher", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                BuildInfo.AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             await ShutdownAsync();
             allowClose = true;
             Close();
