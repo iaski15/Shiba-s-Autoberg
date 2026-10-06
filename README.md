@@ -33,7 +33,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 `steam_interfaces.txt` generation is not a toggle — it runs against the original dll whenever one is available and the emulator dll is being installed.
 
-After patching, launch the game normally. If it does not work out of the box, read [release/README.release.md](release/README.release.md) — it documents every GSE configuration option (achievements, stats, controller bindings, leaderboards, etc.).
+After patching, launch the game normally. If it does not work out of the box, read [shibaberg/post_build/README.release.md](shibaberg/post_build/README.release.md) — it documents every emulator configuration option (achievements, stats, controller bindings, leaderboards, etc.).
 
 ### Online-fix mode
 
@@ -61,7 +61,7 @@ Goldberg Patcher.exe --verify-payload
 - `--check` verifies an already-patched install without changing anything: SteamStub removed, the Steamworks library the game actually loads is the emulator (or Valve's original for online-fix, inferred when every `steam_appid.txt` says 480 and no library is the emulator), architecture match, and the AppID. The same check runs automatically after every patch.
 - Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
 
-For development, `_selftest.exe --corpus <folder>` unpacks every SteamStub exe under a folder with Shibaless **and** with the official Steamless CLI (`tools\steamless\`), and compares the results byte for byte (it works on temp copies and never writes into the folder). `SAME*` means only the certificate-table pointer differs: we move it with the overlay, upstream leaves it stale.
+For development, `_selftest.exe --corpus <folder>` unpacks every SteamStub exe under a folder twice with Shibaless — through the in-memory path the patcher uses, and through the fork's untouched upstream path that writes `<exe>.unpacked.exe` exactly as Steamless.CLI does — and compares the results byte for byte (it works on temp copies and never writes into the folder). `SAME*` means only the certificate-table pointer differs: we move it with the overlay, upstream leaves it stale.
 
 ## Building from source
 
@@ -86,7 +86,7 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 .\_live_test.ps1       # patches a throwaway game under %TEMP% and asserts the artifacts
 ```
 
-`_live_test.ps1` exercises the real pipeline end to end: it patches a copy of a small .NET exe (the official Steamless CLI from `tools\steamless\`) standing in for a game exe, then asserts the exit code, `steam_appid.txt`, the dll replacement, the hash-verified backup, the absence of `.gp-recovery` litter, a rollback-ready journal, the retained recovery copy, and payload self-repair. It exits non-zero on failure, so it can gate a build.
+`_live_test.ps1` exercises the real pipeline end to end: it patches a throwaway game made of stock 32-bit Windows files (`cmd.exe` as the game exe, `version.dll` as its original `steam_api.dll`), then asserts the exit code, `steam_appid.txt`, the dll replacement, the hash-verified backup, the absence of `.gp-recovery` litter, a rollback-ready journal, the retained recovery copy, and payload self-repair. It exits non-zero on failure, so it can gate a build.
 
 ## Repository layout
 
@@ -94,12 +94,11 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 src/                      C# sources (Core.cs = patch pipeline + PE reader, Ui.cs, MainForm.cs, Batch.cs)
 Goldberg Patcher.exe      built GUI app (self-contained) – build output, not tracked
 _selftest.exe             built console self-test – build output, not tracked
-third_party/shibaless/    Shibaless: our fork of the Steamless source (API + 7 unpackers), compiled into the app; see VENDORED.md
-tools/steamless/          official Steamless binaries – only for --corpus and as a test fixture, not shipped
-release/regular/          Goldberg emulator steam_api.dll / steam_api64.dll
-release/experimental/     experimental GSE builds (CPY dll crack support, overlay)
-release/tools/            GSE command-line helpers (generate_interfaces, lobby_connect)
-release/steam_settings.EXAMPLE   example config tree used when scaffolding settings
+shibaless/                Shibaless: our fork of Steamless (API + 7 unpackers), compiled into the app; see VENDORED.md
+shibaberg/                Shibaberg: our fork of gbe_fork (the Goldberg emulator); see VENDORED.md
+shibaberg/bin/            the shipped steam_api.dll / steam_api64.dll, built from shibaberg/, + BUILD.txt (commit, SHA-256s)
+shibaberg/post_build/steam_settings.EXAMPLE   example config tree used when scaffolding settings
+tools/build-shibaberg.ps1 rebuilds shibaberg/bin from shibaberg/ (not part of build.ps1)
 build.ps1                 build script
 ```
 
@@ -107,9 +106,10 @@ The review notes (`optimizations.md`, `plan.md`), `AGENTS.md` and the local agen
 
 ## Credits
 
-- [Mr. Goldberg — Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — the emulator itself; see [release/CREDITS.md](release/CREDITS.md) for its third-party licenses
-- [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers; our fork of them, Shibaless, lives in `third_party/shibaless/` (renamed throughout, plus one small patch) (see its `VENDORED.md`)
+- [Mr. Goldberg — Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — the original emulator (discontinued)
+- [Detanup01 — gbe_fork](https://github.com/Detanup01/gbe_fork) — its maintained continuation; our fork of it, Shibaberg, lives in `shibaberg/` (see its `VENDORED.md`, and `CREDITS.md` for its third-party licenses)
+- [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers; our fork of them, Shibaless, lives in `shibaless/` (renamed throughout, plus one small patch) (see its `VENDORED.md`)
 
 ## License
 
-This repository bundles third-party binaries (GSE, Steamless and their dependencies) under their respective licenses; see [release/CREDITS.md](release/CREDITS.md).
+This repository bundles third-party code and binaries (gbe_fork as Shibaberg, Steamless as Shibaless, and their dependencies) under their respective licenses; see [shibaberg/CREDITS.md](shibaberg/CREDITS.md) and each fork's `LICENSE`.

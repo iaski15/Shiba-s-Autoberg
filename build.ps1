@@ -140,10 +140,10 @@ function Compile($sources, $out, $extra) {
     Write-Host "built: $out"
 }
 
-# ---- Shibaless: our fork of Steamless (third_party\shibaless, see VENDORED.md) ----
+# ---- Shibaless: our fork of Steamless (shibaless\, see VENDORED.md) ----
 # Compiled straight into both exes; the unpackers run in-process (src\Unpacker\ShibalessUnpacker.cs).
 # Left out: AssemblyInfo (it would clash with ours) and the two WPF-only view-model files no unpacker uses.
-$shibalessDir = Join-Path $root 'third_party\shibaless'
+$shibalessDir = Join-Path $root 'shibaless'
 $shibalessSrc = @(Get-ChildItem -LiteralPath $shibalessDir -Recurse -File |
     Where-Object { $_.Extension -eq '.cs' -and $_.Directory.Name -ne 'Properties' -and $_.Name -ne 'ViewModelBase.cs' -and $_.Name -ne 'NavigatedEventArgs.cs' } |
     Sort-Object FullName | ForEach-Object { "`"$($_.FullName)`"" })
@@ -158,11 +158,11 @@ $shibalessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDi
 Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
-# Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (third_party\shibaless).
-# tools\steamless\ holds the official binaries only for the self-test's --corpus comparison.
-$pay = @('release\regular\x86\steam_api.dll', 'release\regular\x64\steam_api64.dll')
+# Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (shibaless\).
+# The emulator dlls are Shibaberg builds (shibaberg\bin, rebuilt from shibaberg\ by tools\build-shibaberg.ps1).
+$pay = @('shibaberg\bin\x86\steam_api.dll', 'shibaberg\bin\x64\steam_api64.dll')
 # generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
-Get-ChildItem (Join-Path $root 'release\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
+Get-ChildItem (Join-Path $root 'shibaberg\post_build\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
 $payRes = @()
 $payTemp = @()

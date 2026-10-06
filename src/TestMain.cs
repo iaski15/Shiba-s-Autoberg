@@ -23,19 +23,17 @@ static class TestMain
         return SelfTest();
     }
 
-    /// <summary>Differential check of Shibaless, our in-process Steamless fork (third_party/shibaless), against the official
-    /// Steamless.CLI binary on real games: proves our patch to the fork changed nothing but where the output
-    /// goes. Every exe under the folder that carries a .bind section is COPIED to a temp folder first - the
-    /// CLI writes its output beside its input, and nothing may be written into a game install - then unpacked
-    /// both ways and compared byte for byte. Exit 0 = every comparable exe identical.</summary>
+    /// <summary>Differential check of Shibaless's two output paths on real games: the in-memory path the
+    /// patcher uses (our patch) against the fork's untouched upstream path, which writes &lt;file&gt;.unpacked.exe
+    /// exactly as Steamless.CLI does. Proves our patch changed nothing but where the output goes. Every exe
+    /// under the folder that carries a .bind section is COPIED to a temp folder first - the upstream path
+    /// writes beside its input, and nothing may be written into a game install. Exit 0 = all identical.</summary>
     static int Corpus(string dir)
     {
-        string root = AppDomain.CurrentDomain.BaseDirectory;
-        string cli = Path.Combine(root, @"tools\steamless\Steamless.CLI.exe");
-        if (!Directory.Exists(dir) || !File.Exists(cli)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>  (needs tools\\steamless\\ - the official binaries - beside it)"); return 2; }
+        if (!Directory.Exists(dir)) { Console.WriteLine("usage: _selftest.exe --corpus <folder>"); return 2; }
         string work = Path.Combine(Path.GetTempPath(), "gp_corpus_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         Directory.CreateDirectory(work);
-        int same = 0, differ = 0, nativeOnlyFail = 0, cliFail = 0, total = 0;
+        int same = 0, differ = 0, nativeOnlyFail = 0, fileFail = 0, total = 0;
         try
         {
             IEnumerable<string> files;
@@ -47,65 +45,68 @@ static class TestMain
                 total++;
                 string copy = Path.Combine(work, total + "_" + Path.GetFileName(exe));
                 File.Copy(exe, copy);
-                var native = ShibalessUnpacker.UnpackToMemory(copy);   // in-process fork
-                var psi = new System.Diagnostics.ProcessStartInfo(cli, "\"" + copy + "\"")
-                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli) };
-                string cliOut;
-                using (var p = System.Diagnostics.Process.Start(psi)) { cliOut = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd(); p.WaitForExit(); }
-                string cliPath = copy + ".unpacked.exe";
-                byte[] cliBytes = File.Exists(cliPath) ? File.ReadAllBytes(cliPath) : null;
-                string variant = native.Unpacker != null ? native.Unpacker
-                    : (cliOut.Split('\n').Select(l => { int k = l.IndexOf("packed with ", StringComparison.OrdinalIgnoreCase); return k < 0 ? null : l.Substring(k + 12).Trim().TrimEnd('!'); })
-                        .FirstOrDefault(l => l != null) ?? "?") + " (via CLI)";
-                string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
-                if (cliBytes == null)
+                var native = ShibalessUnpacker.UnpackToMemory(copy);   // the patcher's path
+                // Upstream path: first unpacker that claims the file and succeeds, default options, file output.
+                string fileVariant = null;
+                foreach (var u in ShibalessUnpacker.Unpackers(PeReader.Analyze(copy).Arch == ExeArch.X64))
                 {
-                    cliFail++;
-                    Console.WriteLine("  CLI-FAIL  " + label + "  [" + variant + "]  native: " + (native.Success ? "ok" : native.Error));
+                    u.Initialize(new Shibaless.API.Services.LoggingService());
+                    if (!u.CanProcessFile(copy)) continue;
+                    fileVariant = u.Name;
+                    try { if (u.ProcessFile(copy, new Shibaless.API.Model.ShibalessOptions())) break; } catch { }
+                }
+                string filePath = copy + ".unpacked.exe";
+                byte[] fileBytes = File.Exists(filePath) ? File.ReadAllBytes(filePath) : null;
+                string variant = native.Unpacker ?? (fileVariant ?? "?") + " (file path)";
+                string label = exe.Length > 90 ? "…" + exe.Substring(exe.Length - 89) : exe;
+                if (fileBytes == null)
+                {
+                    fileFail++;
+                    Console.WriteLine("  FILE-FAIL " + label + "  [" + variant + "]  native: " + (native.Success ? "ok" : native.Error));
                 }
                 else if (!native.Success)
                 {
                     nativeOnlyFail++;
                     Console.WriteLine("  NATIVE-FAIL " + label + "  [" + variant + "]  " + native.ErrorCode + ": " + native.Error);
                 }
-                else if (native.Output.SequenceEqual(cliBytes))
+                else if (native.Output.SequenceEqual(fileBytes))
                 {
                     same++;
-                    Console.WriteLine("  SAME      " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0") + " bytes");
+                    Console.WriteLine("  SAME      " + label + "  [" + variant + "]  " + fileBytes.Length.ToString("N0") + " bytes");
                 }
-                else if (OnlyCertificatePointerDiffers(native.Output, cliBytes))
+                else if (OnlyCertificatePointerDiffers(native.Output, fileBytes))
                 {
-                    // Deliberate: we move the certificate-table pointer along with the overlay when .bind is
-                    // dropped; upstream Steamless leaves it pointing at the old offset.
+                    // Deliberate: the in-memory path moves the certificate-table pointer along with the overlay
+                    // when .bind is dropped; the upstream path leaves it pointing at the old offset.
                     same++;
-                    Console.WriteLine("  SAME*     " + label + "  [" + variant + "]  " + cliBytes.Length.ToString("N0")
+                    Console.WriteLine("  SAME*     " + label + "  [" + variant + "]  " + fileBytes.Length.ToString("N0")
                         + " bytes (*except the certificate pointer, which only we relocate)");
                 }
                 else
                 {
                     differ++;
-                    int n = Math.Min(native.Output.Length, cliBytes.Length), at = 0;
-                    while (at < n && native.Output[at] == cliBytes[at]) at++;
-                    int diffs = 0; for (int i = 0; i < n; i++) if (native.Output[i] != cliBytes[i]) diffs++;
+                    int n = Math.Min(native.Output.Length, fileBytes.Length), at = 0;
+                    while (at < n && native.Output[at] == fileBytes[at]) at++;
+                    int diffs = 0; for (int i = 0; i < n; i++) if (native.Output[i] != fileBytes[i]) diffs++;
                     Console.WriteLine("  DIFFER    " + label + "  [" + variant + "]  native " + native.Output.Length.ToString("N0")
-                        + " vs cli " + cliBytes.Length.ToString("N0") + " bytes; first diff at 0x" + at.ToString("X") + ", " + diffs.ToString("N0") + " differing bytes");
+                        + " vs file " + fileBytes.Length.ToString("N0") + " bytes; first diff at 0x" + at.ToString("X") + ", " + diffs.ToString("N0") + " differing bytes");
                     // contiguous differing ranges, with both sides' bytes
                     int shown = 0;
                     for (int i = 0; i < n && shown < 6; i++)
                     {
-                        if (native.Output[i] == cliBytes[i]) continue;
-                        int j = i; while (j < n && j - i < 32 && native.Output[j] != cliBytes[j]) j++;
+                        if (native.Output[i] == fileBytes[i]) continue;
+                        int j = i; while (j < n && j - i < 32 && native.Output[j] != fileBytes[j]) j++;
                         Console.WriteLine("            @0x" + i.ToString("X") + " len " + (j - i) + "  native " + BitConverter.ToString(native.Output, i, j - i)
-                            + "  cli " + BitConverter.ToString(cliBytes, i, j - i));
+                            + "  file " + BitConverter.ToString(fileBytes, i, j - i));
                         shown++; i = j;
                     }
                 }
-                try { File.Delete(copy); File.Delete(cliPath); } catch { }
+                try { File.Delete(copy); File.Delete(filePath); } catch { }
             }
         }
         finally { try { Directory.Delete(work, true); } catch { } }
-        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} in-process-only failures (CLI handled them), {4} the CLI could not unpack.",
-            total, same, differ, nativeOnlyFail, cliFail));
+        Console.WriteLine(string.Format("\n{0} SteamStub exe(s): {1} identical, {2} different, {3} in-memory-only failures (file path handled them), {4} the file path could not unpack.",
+            total, same, differ, nativeOnlyFail, fileFail));
         return differ == 0 ? 0 : 1;
     }
 
@@ -134,29 +135,26 @@ static class TestMain
         Console.WriteLine("== Goldberg Patcher self-test ==\n[PE analysis]");
         var root = AppDomain.CurrentDomain.BaseDirectory;
 
-        var p64 = PeReader.Analyze(Path.Combine(root, @"release\regular\x64\steam_api64.dll"));
+        var p64 = PeReader.Analyze(Path.Combine(root, @"shibaberg\bin\x64\steam_api64.dll"));
         Check(p64.Machine == 0x8664, "x64 dll machine=AMD64", "0x" + p64.Machine.ToString("X"));
         Check(p64.Arch == ExeArch.X64, "x64 dll arch resolved", p64.MachineText);
 
-        var p86 = PeReader.Analyze(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
+        var p86 = PeReader.Analyze(Path.Combine(root, @"shibaberg\bin\x86\steam_api.dll"));
         Check(p86.Machine == 0x14c, "x86 dll machine=I386", "0x" + p86.Machine.ToString("X"));
         Check(p86.Arch == ExeArch.X86, "x86 dll arch resolved", p86.MachineText);
 
-        var cli = PeReader.Analyze(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
-        Check(cli.Managed, "Steamless CLI detected as .NET", cli.MachineText);
         var expectedAnyCpu = Environment.Is64BitOperatingSystem ? ExeArch.X64 : ExeArch.X86;
-        Check(cli.Arch == ExeArch.X86 && !cli.AnyCpu, "Steamless CLI 32-bit execution flags", cli.MachineText);
         var selfPe = PeReader.Analyze(typeof(TestMain).Assembly.Location);
         Check(selfPe.AnyCpu && selfPe.Arch == expectedAnyCpu, "compiler-produced AnyCPU resolution", selfPe.MachineText);
 
         Console.WriteLine("\n[import table]");
         // The import table decides which name the emulator must be installed under, so it has to be read
         // correctly from real binaries - not just synthetic fixtures.
-        var cliImports = PeReader.ImportedDlls(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"));
-        Check(cliImports.Any(n => string.Equals(n, "mscoree.dll", StringComparison.OrdinalIgnoreCase)),
-              "managed exe reports its mscoree.dll import", string.Join(", ", cliImports.ToArray()));
+        var selfImports = PeReader.ImportedDlls(typeof(TestMain).Assembly.Location);
+        Check(selfImports.Any(n => string.Equals(n, "mscoree.dll", StringComparison.OrdinalIgnoreCase)),
+              "managed exe reports its mscoree.dll import", string.Join(", ", selfImports.ToArray()));
 
-        var api64Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x64\steam_api64.dll"));
+        var api64Imports = PeReader.ImportedDlls(Path.Combine(root, @"shibaberg\bin\x64\steam_api64.dll"));
         Check(api64Imports.Any(n => string.Equals(n, "KERNEL32.dll", StringComparison.OrdinalIgnoreCase)),
               "native dll import names are parsed", string.Join(", ", api64Imports.ToArray()));
         Check(api64Imports.Count >= 5, "the whole descriptor array is walked, not just the first entry",
@@ -165,10 +163,10 @@ static class TestMain
         Check(api64Imports.All(n => n.Length >= 4 && n.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)),
               "import names look like dll names, not decoded garbage", string.Join(", ", api64Imports.ToArray()));
 
-        var api86Imports = PeReader.ImportedDlls(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
+        var api86Imports = PeReader.ImportedDlls(Path.Combine(root, @"shibaberg\bin\x86\steam_api.dll"));
         Check(api86Imports.Count > 0, "32-bit dll import table is parsed too", api86Imports.Count.ToString());
 
-        Check(PatchRunner.ImportedSteamApiName(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe")) == null,
+        Check(PatchRunner.ImportedSteamApiName(typeof(TestMain).Assembly.Location) == null,
               "an exe importing no Steamworks dll reports null rather than guessing", null);
         Check(PatchRunner.IsSteamApiName("steam_api.dll") && PatchRunner.IsSteamApiName("STEAM_API64.DLL")
               && !PatchRunner.IsSteamApiName("steam_api_extra.dll") && !PatchRunner.IsSteamApiName("mscoree.dll"),
@@ -318,10 +316,17 @@ static class TestMain
         string icWork = Path.Combine(Path.GetTempPath(), "gp_selftest_check_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         try
         {
-            string gse64 = Path.Combine(root, @"release\regular\x64\steam_api64.dll");
-            string gse86 = Path.Combine(root, @"release\regular\x86\steam_api.dll");
+            string gse64 = Path.Combine(root, @"shibaberg\bin\x64\steam_api64.dll");
+            string gse86 = Path.Combine(root, @"shibaberg\bin\x86\steam_api.dll");
             Check(InstallCheck.IsEmulatorDll(gse64) && InstallCheck.IsEmulatorDll(gse86),
                   "bundled GSE dlls are recognised as the emulator", null);
+            byte[] marker = Encoding.Unicode.GetBytes("Shibaberg Client API");
+            Check(new[] { gse64, gse86 }.All(p => InstallCheck.IndexOf(File.ReadAllBytes(p), marker) >= 0),
+                  "bundled dlls are Shibaberg builds (version resource)", null);
+            string buildTxt = File.ReadAllText(Path.Combine(root, @"shibaberg\bin\BUILD.txt"));
+            Check(buildTxt.Contains("x86/steam_api.dll: " + SafePersistence.Hash(gse86))
+                  && buildTxt.Contains("x64/steam_api64.dll: " + SafePersistence.Hash(gse64)),
+                  "shibaberg\\bin\\BUILD.txt hashes match the bundled dlls", null);
             Func<string, string, List<InstallCheckItem>> setup = (name, dll) =>
             {
                 string d = Directory.CreateDirectory(Path.Combine(icWork, name)).FullName;
@@ -576,7 +581,7 @@ static class TestMain
             var gameDir = Path.Combine(work, "MyGame");
             Directory.CreateDirectory(gameDir);
             var dummyExe = Path.Combine(gameDir, "MyGame.exe");
-            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), dummyExe);
+            WriteAnyCpuDotNetPe(dummyExe, 0x3);   // a managed 32-bit exe importing no Steamworks dll
             var exeHash = SafePersistence.Hash(dummyExe);
             var stalePaths = new[] { dummyExe + ".unpacked.exe", Path.Combine(gameDir, "MyGame.unpacked.exe"), Path.Combine(gameDir, "unrelated.unpacked.exe") };
             foreach (var stale in stalePaths)
@@ -625,7 +630,7 @@ static class TestMain
                   "unpack gracefully skipped for non-packed exe");
 
             var newDll = File.ReadAllBytes(Path.Combine(gameDir, "steam_api.dll"));
-            var goldberg86 = File.ReadAllBytes(Path.Combine(root, @"release\regular\x86\steam_api.dll"));
+            var goldberg86 = File.ReadAllBytes(Path.Combine(root, @"shibaberg\bin\x86\steam_api.dll"));
             Check(!newDll.SequenceEqual(origDllBytes), "existing steam_api.dll was replaced");
             Check(newDll.SequenceEqual(goldberg86), "replaced dll matches bundled goldberg x86");
 
@@ -706,7 +711,7 @@ static class TestMain
         {
             var gameDir2 = Directory.CreateDirectory(Path.Combine(work2, "OFGame")).FullName;
             var exe2 = Path.Combine(gameDir2, "OFGame.exe");
-            File.Copy(Path.Combine(root, @"tools\steamless\Steamless.CLI.exe"), exe2);
+            WriteAnyCpuDotNetPe(exe2, 0x3);
 
             var opts2 = new PatchOptions
             {
@@ -741,7 +746,7 @@ static class TestMain
             var origBytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42 };
             Directory.CreateDirectory(Path.Combine(gameDir3, "goldberg_backup"));
             File.WriteAllBytes(Path.Combine(gameDir3, "goldberg_backup", "steam_api64.dll"), origBytes);
-            File.Copy(Path.Combine(root, @"release\regular\x64\steam_api64.dll"), Path.Combine(gameDir3, "steam_api64.dll"));
+            File.Copy(Path.Combine(root, @"shibaberg\bin\x64\steam_api64.dll"), Path.Combine(gameDir3, "steam_api64.dll"));
 
             var opts3 = new PatchOptions
             {

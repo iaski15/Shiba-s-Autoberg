@@ -20,14 +20,14 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
         BLOCK "040904b0" // language code = U.S. English, character-set identifier = Unicode
         {
             VALUE "LegalCopyright", "Copyright (C) 2007"
-            VALUE "InternalName", "GSE Client API (win32)"
+            VALUE "InternalName", "Shibaberg Client API (win32)"
             VALUE "FileVersion", "08.33.09.23"
-            VALUE "CompanyName", "GSE"
+            VALUE "CompanyName", "Shibaberg"
             VALUE "ProductVersion", "01.00.00.01"
-            VALUE "FileDescription", "GSE Client API"
+            VALUE "FileDescription", "Shibaberg Client API"
             VALUE "Source Control ID", "8330923"
             VALUE "OriginalFilename", "steam_api.dll"
-            VALUE "ProductName", "GSE Client API"
+            VALUE "ProductName", "Shibaberg Client API"
         }
     }
 
@@ -65,13 +65,13 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
     {
         BLOCK "040904b0" // language code = U.S. English, character-set identifier = Unicode
         {
-            VALUE "CompanyName", "GSE"
-            VALUE "FileDescription", "GSE Client API"
+            VALUE "CompanyName", "Shibaberg"
+            VALUE "FileDescription", "Shibaberg Client API"
             VALUE "FileVersion", "1, 0, 0, 1"
-            VALUE "InternalName", "GSE Client API"
+            VALUE "InternalName", "Shibaberg Client API"
             VALUE "LegalCopyright", "Copyright (C) 2007"
             VALUE "OriginalFilename", "steam_api.dll"
-            VALUE "ProductName", "GSE Client API"
+            VALUE "ProductName", "Shibaberg Client API"
             VALUE "ProductVersion", "1, 0, 0, 1"
         }
     }

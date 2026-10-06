@@ -41,9 +41,11 @@ function Invoke-Patcher([string]$arguments) {
 $live = Join-Path $env:TEMP 'gp_live'
 if (Test-Path -LiteralPath $live) { Remove-Item -LiteralPath $live -Recurse -Force }
 $game = (New-Item -ItemType Directory -Path (Join-Path $live 'Half-Life 2')).FullName
-Copy-Item -LiteralPath '.\tools\steamless\Steamless.CLI.exe' -Destination (Join-Path $game 'hl2.exe')
-# A pre-existing Steamworks dll makes the run exercise backup + replacement, not just file creation.
-Copy-Item -LiteralPath '.\tools\steamless\Plugins\Steamless.Unpacker.Variant31.x86.dll' -Destination (Join-Path $game 'steam_api.dll')
+# Stock 32-bit Windows binaries stand in for the game: an x86 exe, and an x86 dll whose only job is to be a
+# pre-existing "original" steam_api.dll, so the run exercises backup + replacement, not just file creation.
+$sysX86 = [Environment]::GetFolderPath('SystemX86')
+Copy-Item -LiteralPath (Join-Path $sysX86 'cmd.exe') -Destination (Join-Path $game 'hl2.exe')
+Copy-Item -LiteralPath (Join-Path $sysX86 'version.dll') -Destination (Join-Path $game 'steam_api.dll')
 $originalHash = (Get-FileHash -LiteralPath (Join-Path $game 'steam_api.dll') -Algorithm SHA256).Hash
 
 $exe = Join-Path $game 'hl2.exe'
@@ -89,7 +91,7 @@ Test-Artifact 'recovery copy retained for undo' ($previous.Count -ge 1) ("found 
 $payloadBase = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'GoldbergPatcher\payload'
 $payloadDir = Get-ChildItem -LiteralPath $payloadBase -Directory -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$payloadFile = if ($payloadDir) { Join-Path $payloadDir.FullName 'release\regular\x86\steam_api.dll' } else { '' }
+$payloadFile = if ($payloadDir) { Join-Path $payloadDir.FullName 'shibaberg\bin\x86\steam_api.dll' } else { '' }
 $payloadPresent = ($payloadFile.Length -gt 0) -and (Test-Path -LiteralPath $payloadFile)
 Test-Artifact 'the payload was extracted under %LOCALAPPDATA%' $payloadPresent $payloadFile
 

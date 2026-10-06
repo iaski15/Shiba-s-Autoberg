@@ -17,14 +17,14 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
         BLOCK "040904b0" // language code = U.S. English, character-set identifier = Unicode
         {
             VALUE "LegalCopyright",    "Copyright (C) 2021 GSE"
-            VALUE "InternalName",      "GSE (win64)"
+            VALUE "InternalName",      "Shibaberg (win64)"
             VALUE "FileVersion",       "08.56.38.63"
-            VALUE "CompanyName",       "GSE"
+            VALUE "CompanyName",       "Shibaberg"
             VALUE "ProductVersion",    "01.00.00.02"
-            VALUE "FileDescription",   "GSE"
+            VALUE "FileDescription",   "Shibaberg"
             VALUE "Source Control ID", "8563863"
             VALUE "OriginalFilename",  "steam.exe"
-            VALUE "ProductName",       "GSE"
+            VALUE "ProductName",       "Shibaberg"
         }
     }
 
@@ -52,13 +52,13 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
     {
         BLOCK "040904b0" // language code = U.S. English, character-set identifier = Unicode
         {
-            VALUE "CompanyName",       "GSE"
-            VALUE "FileDescription",   "GSE"
+            VALUE "CompanyName",       "Shibaberg"
+            VALUE "FileDescription",   "Shibaberg"
             VALUE "FileVersion",       "1, 0, 0, 2"
-            VALUE "InternalName",      "GSE"
+            VALUE "InternalName",      "Shibaberg"
             VALUE "LegalCopyright",    "Copyright (C) 2021 GSE"
             VALUE "OriginalFilename",  "steam.exe"
-            VALUE "ProductName",       "GSE"
+            VALUE "ProductName",       "Shibaberg"
             VALUE "ProductVersion",    "1, 0, 0, 2"
         }
     }

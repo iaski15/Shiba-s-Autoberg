@@ -1,11 +1,9 @@
 # Local working documents - kept in the working copy, not published with the repo.
-# The review and the plan describe in-progress work and internal decisions; the agent
-# state folder is scratch. All three stay on disk and out of history.
+# The review and the plan describe in-progress work and internal decisions.
+# They stay on disk and out of history.
 AGENTS.md
 optimizations.md
 plan.md
-plan-shibaberg.md
-.workbuddy-ai/
 
 # Payload verification cache, written next to the exe at runtime.
 .payload-ok
@@ -16,27 +14,19 @@ plan-shibaberg.md
 /_selftest.exe
 /dist/
 
-# Markdown is local-only, except the repo front page and the .md files build.ps1 embeds
-# (everything under release/steam_settings.EXAMPLE is payload).
+# Markdown is local-only, except the repo front page and Shibaberg (whose tree includes the
+# steam_settings.EXAMPLE .md files build.ps1 embeds as payload).
 *.md
 !/README.md
-!/release/steam_settings.EXAMPLE/**/*.md
+# Shibaberg is a whole upstream tree (gbe_fork); keep it complete so rebases diff cleanly.
+!/shibaberg/**/*.md
 
 # Not needed to build or verify. Kept on disk, out of the repo.
-/release/experimental/
-/release/steamclient_experimental/
-/release/tools/
-/release/steam_old_lib/
 /src/make_icon.ps1
 /src/app.ico
-# Official Steamless: only the CLI + unpacker plugins are used (self-test fixture, --corpus, _live_test.ps1).
-/tools/steamless/Steamless.exe
-/tools/steamless/Steamless.exe.config
-/tools/steamless/ExamplePlugin.zip
-/tools/steamless/Plugins/ExamplePlugin.dll
 # Shibaless: files build.ps1 does not compile, and fork-maintenance tooling.
-/third_party/shibaless/**/*.csproj
-/third_party/shibaless/**/Properties/
-/third_party/shibaless/Shibaless.API/Model/ViewModelBase.cs
-/third_party/shibaless/Shibaless.API/Model/NavigatedEventArgs.cs
-/third_party/shibaless/Rename-FromUpstream.ps1
+/shibaless/**/*.csproj
+/shibaless/**/Properties/
+/shibaless/Shibaless.API/Model/ViewModelBase.cs
+/shibaless/Shibaless.API/Model/NavigatedEventArgs.cs
+/shibaless/Rename-FromUpstream.ps1

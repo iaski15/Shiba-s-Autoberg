@@ -19,12 +19,12 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
             VALUE "LegalCopyright",    "Copyright (C) 2007"
             VALUE "InternalName",      "GameOverlayRenderer (win32)"
             VALUE "FileVersion",       "08.74.80.95"
-            VALUE "CompanyName",       "GSE"
+            VALUE "CompanyName",       "Shibaberg"
             VALUE "ProductVersion",    "01.00.00.01"
-            VALUE "FileDescription",   "GSE Overlay Renderer"
+            VALUE "FileDescription",   "Shibaberg Overlay Renderer"
             VALUE "Source Control ID", "8748095"
             VALUE "OriginalFilename",  "GameOverlayRenderer.dll"
-            VALUE "ProductName",       "GSE Overlay Renderer"
+            VALUE "ProductName",       "Shibaberg Overlay Renderer"
         }
     }
 
@@ -52,13 +52,13 @@ FILESUBTYPE    0x0L // VFT2_UNKNOWN
     {
         BLOCK "040904b0" // language code = U.S. English, character-set identifier = Unicode
         {
-            VALUE "CompanyName",       "GSE"
-            VALUE "FileDescription",   "GSE Overlay Renderer"
+            VALUE "CompanyName",       "Shibaberg"
+            VALUE "FileDescription",   "Shibaberg Overlay Renderer"
             VALUE "FileVersion",       "1, 0, 0, 1"
             VALUE "InternalName",      "GameOverlayRenderer"
             VALUE "LegalCopyright",    "Copyright (C) 2007"
             VALUE "OriginalFilename",  "GameOverlayRenderer.dll"
-            VALUE "ProductName",       "GSE Overlay Renderer"
+            VALUE "ProductName",       "Shibaberg Overlay Renderer"
             VALUE "ProductVersion",    "1, 0, 0, 1"
         }
     }

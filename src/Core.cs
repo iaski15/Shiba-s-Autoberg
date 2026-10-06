@@ -1284,15 +1284,15 @@ namespace Gp
         /// <summary>Root of the extracted payload. Everything below hangs off this, so pointing it at
         /// %LOCALAPPDATA% is what lets the app run from a read-only application directory.</summary>
         public static string BaseDir { get { return Payload.Root; } }
-        public static string ApiDll86 { get { return Path.Combine(BaseDir, @"release\regular\x86\steam_api.dll"); } }
-        public static string ApiDll64 { get { return Path.Combine(BaseDir, @"release\regular\x64\steam_api64.dll"); } }
-        public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"release\steam_settings.EXAMPLE"); } }
+        public static string ApiDll86 { get { return Path.Combine(BaseDir, @"shibaberg\bin\x86\steam_api.dll"); } }
+        public static string ApiDll64 { get { return Path.Combine(BaseDir, @"shibaberg\bin\x64\steam_api64.dll"); } }
+        public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"shibaberg\post_build\steam_settings.EXAMPLE"); } }
 
         public static List<string> Missing()
         {
             var missing = new List<string>();
-            if (!File.Exists(ApiDll86)) missing.Add("release\\regular\\x86\\steam_api.dll");
-            if (!File.Exists(ApiDll64)) missing.Add("release\\regular\\x64\\steam_api64.dll");
+            if (!File.Exists(ApiDll86)) missing.Add("shibaberg\\bin\\x86\\steam_api.dll");
+            if (!File.Exists(ApiDll64)) missing.Add("shibaberg\\bin\\x64\\steam_api64.dll");
             return missing;
         }
     }
@@ -2067,8 +2067,24 @@ namespace Gp
                 }
                 catch { }
             }
+            // Dlls earlier patcher releases installed, so games patched by them are still recognised after
+            // the bundled build changes. Only add hashes of dlls we actually shipped.
+            try
+            {
+                long len = new FileInfo(dllPath).Length;
+                if (len == 9189288 || len == 11429288)
+                    return PreviousBundledDlls.Contains(SafePersistence.Hash(dllPath));
+            }
+            catch { }
             return false;
         }
+
+        static readonly HashSet<string> PreviousBundledDlls = new HashSet<string>
+        {
+            // gbe_fork release-2026_07_19, emu-win-release.7z regular\ (shipped before Shibaberg)
+            "8e804d38cde295b1f08a6c41ecc8978fde69e53e2a6e22652017371a49cba1be", // x86\steam_api.dll
+            "8b1bd0bea955aaeccd6de92d2a8c6208757dde038fd3c074113f0c2609e04de1", // x64\steam_api64.dll
+        };
 
         static bool FilesEqual(string p1, string p2)
         {
@@ -2134,9 +2150,8 @@ namespace Gp
                     if (LooksLikeBundledGoldberg(probe))
                     {
                         string original = OriginalBackups.Find(Path.Combine(installDir, "goldberg_backup"), probe);
-                        probe = File.Exists(original) ? original : null;
-                        if (probe == null && FilesEqual(otherPath, Tools.ApiDll86)) otherArch = ExeArch.X86;
-                        else if (probe == null && FilesEqual(otherPath, Tools.ApiDll64)) otherArch = ExeArch.X64;
+                        // No original: the emulator dll's own header still names its architecture.
+                        probe = File.Exists(original) ? original : otherPath;
                     }
                     if (probe != null)
                     {
@@ -2479,7 +2494,7 @@ namespace Gp
                 && IndexOf(data, Encoding.ASCII.GetBytes("steamclient")) < 0;
         }
 
-        static int IndexOf(byte[] haystack, byte[] needle)
+        internal static int IndexOf(byte[] haystack, byte[] needle)
         {
             byte first = needle[0];
             int last = haystack.Length - needle.Length;
