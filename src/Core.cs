@@ -1162,6 +1162,8 @@ namespace Gp
         public bool CreateSettings = false;
         public bool GenerateInterfaces = true;
         public bool OnlineFix = false;
+        /// <summary>Install the overlay build and achievements.json so unlocks pop up in game.</summary>
+        public bool Achievements = false;
 
         /// <summary>AppID actually written when online-fix mode forces Spacewar.</summary>
         public string EffectiveAppId { get { return OnlineFix ? "480" : AppIdDetector.Normalize(AppId); } }
@@ -1283,6 +1285,201 @@ namespace Gp
         }
     }
 
+    /// <summary>Turns the achievement schema the Steam client caches for every game it has run
+    /// (Steam\appcache\stats\UserGameStatsSchema_&lt;appid&gt;.bin, binary KeyValues) into the emulator's
+    /// steam_settings\achievements.json + stats.json. No web API, no login. The schema only names the icons;
+    /// they come from Steam's public image CDN, best-effort.</summary>
+    public static class AchievementSchema
+    {
+        public sealed class Result
+        {
+            public string AchievementsJson = "";
+            public string StatsJson = "";
+            public int Achievements;
+            public int Stats;
+            public List<string> Icons = new List<string>();
+        }
+
+        /// <summary>The cached schema for this AppID, or null when Steam never ran the game on this PC.</summary>
+        public static string LocalSchemaPath(string appId)
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+                {
+                    string steam = k == null ? null : k.GetValue("SteamPath") as string;
+                    if (string.IsNullOrEmpty(steam)) return null;
+                    string p = Path.Combine(steam.Replace('/', '\\'), "appcache", "stats", "UserGameStatsSchema_" + appId + ".bin");
+                    return File.Exists(p) ? p : null;
+                }
+            }
+            catch { return null; }
+        }
+
+        public static Result Build(byte[] schema)
+        {
+            var res = new Result();
+            var root = ParseKv(schema);
+            // root = { "<appid>": { "stats": { "<n>": { type, name, default, bits: { "<n>": achievement } } } } }
+            var app = root.Count > 0 ? root[0].Value as Kv : null;
+            var stats = Get(app, "stats") as Kv;
+            if (stats == null) throw new InvalidDataException("Schema has no stats section.");
+
+            var achJson = new StringBuilder("[");
+            var statJson = new StringBuilder("[");
+            foreach (var stat in stats)
+            {
+                var s = stat.Value as Kv;
+                if (s == null) continue;
+                var bits = Get(s, "bits") as Kv;
+                if (bits != null)
+                {
+                    foreach (var bit in bits)
+                    {
+                        var b = bit.Value as Kv;
+                        string name = Get(b, "name") as string;
+                        if (string.IsNullOrEmpty(name)) continue;
+                        var display = Get(b, "display") as Kv;
+                        var entry = new Kv();
+                        entry.Add(Pair("name", name));
+                        entry.Add(Pair("displayName", Localized(Get(display, "name"))));
+                        entry.Add(Pair("description", Localized(Get(display, "desc"))));
+                        entry.Add(Pair("hidden", (Get(display, "hidden") as string) == "1" ? "1" : "0"));
+                        foreach (var key in new[] { "icon", "icon_gray" })
+                        {
+                            string icon = Get(display, key) as string;
+                            // the file name ends up in a path: accept plain names only
+                            if (string.IsNullOrEmpty(icon) || !Regex.IsMatch(icon, @"^[A-Za-z0-9_\-]+\.(jpg|jpeg|png)$")) continue;
+                            entry.Add(Pair(key, "images/" + icon));
+                            if (!res.Icons.Contains(icon)) res.Icons.Add(icon);
+                        }
+                        var progress = Get(b, "progress") as Kv;
+                        if (progress != null) entry.Add(Pair("progress", progress));
+                        if (res.Achievements++ > 0) achJson.Append(',');
+                        WriteJson(achJson, entry, 1);
+                    }
+                    continue;
+                }
+                string type;
+                switch (Get(s, "type") as string)
+                {
+                    case "1": case "INT": type = "int"; break;
+                    case "2": case "FLOAT": type = "float"; break;
+                    case "3": case "AVGRATE": type = "avgrate"; break;
+                    default: continue;
+                }
+                string statName = Get(s, "name") as string;
+                if (string.IsNullOrEmpty(statName)) continue;
+                var st = new Kv { Pair("name", statName), Pair("type", type), Pair("default", (Get(s, "default") as string) ?? "0"), Pair("global", "0") };
+                if (res.Stats++ > 0) statJson.Append(',');
+                WriteJson(statJson, st, 1);
+            }
+            res.AchievementsJson = achJson.Append("\n]\n").ToString();
+            res.StatsJson = statJson.Append("\n]\n").ToString();
+            return res;
+        }
+
+        public static string IconUrl(string appId, string icon)
+        {
+            return "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/" + appId + "/" + icon;
+        }
+
+        // ---- binary KeyValues ------------------------------------------------------------------------
+        // Ordered list rather than a dictionary: the achievement order is the order the overlay lists them in.
+        internal sealed class Kv : List<KeyValuePair<string, object>> { }
+
+        static KeyValuePair<string, object> Pair(string k, object v) { return new KeyValuePair<string, object>(k, v); }
+
+        static object Get(Kv kv, string key)
+        {
+            if (kv == null) return null;
+            foreach (var p in kv) if (string.Equals(p.Key, key, StringComparison.OrdinalIgnoreCase)) return p.Value;
+            return null;
+        }
+
+        /// <summary>{"english": "...", "german": "..."} without Valve's "token" entry; the emulator picks the
+        /// game's language from it. A plain string stays a string.</summary>
+        static object Localized(object v)
+        {
+            var kv = v as Kv;
+            if (kv == null) return v as string ?? "";
+            var o = new Kv();
+            o.AddRange(kv.Where(p => p.Value is string && !string.Equals(p.Key, "token", StringComparison.OrdinalIgnoreCase)));
+            return o;
+        }
+
+        // Valve binary KeyValues: type byte, NUL-terminated UTF-8 key, value. 0 = nested section, 8 = end.
+        internal static Kv ParseKv(byte[] b)
+        {
+            int i = 0;
+            return ReadSection(b, ref i);
+        }
+
+        static Kv ReadSection(byte[] b, ref int i)
+        {
+            var kv = new Kv();
+            while (i < b.Length)
+            {
+                byte t = b[i++];
+                if (t == 8 || t == 11) break;
+                string key = ReadZ(b, ref i);
+                object v;
+                switch (t)
+                {
+                    case 0: v = ReadSection(b, ref i); break;
+                    case 1: v = ReadZ(b, ref i); break;
+                    case 2: case 4: case 6: Need(b, i, 4); v = BitConverter.ToInt32(b, i).ToString(CultureInfo.InvariantCulture); i += 4; break;
+                    case 3: Need(b, i, 4); v = BitConverter.ToSingle(b, i).ToString("R", CultureInfo.InvariantCulture); i += 4; break;
+                    case 7: Need(b, i, 8); v = BitConverter.ToUInt64(b, i).ToString(CultureInfo.InvariantCulture); i += 8; break;
+                    case 10: Need(b, i, 8); v = BitConverter.ToInt64(b, i).ToString(CultureInfo.InvariantCulture); i += 8; break;
+                    default: throw new InvalidDataException("Unknown KeyValues type " + t + " at offset " + (i - 1) + ".");
+                }
+                kv.Add(Pair(key, v));
+            }
+            return kv;
+        }
+
+        static void Need(byte[] b, int i, int n)
+        {
+            if (i + n > b.Length) throw new InvalidDataException("Truncated KeyValues.");
+        }
+
+        static string ReadZ(byte[] b, ref int i)
+        {
+            int start = i;
+            while (i < b.Length && b[i] != 0) i++;
+            if (i >= b.Length) throw new InvalidDataException("Truncated KeyValues.");
+            return Encoding.UTF8.GetString(b, start, i++ - start);
+        }
+
+        static void WriteJson(StringBuilder sb, object v, int depth)
+        {
+            var kv = v as Kv;
+            if (kv == null) { sb.Append('"').Append(JsonEscape((string)v)).Append('"'); return; }
+            string pad = "\n" + new string(' ', depth * 2);
+            sb.Append(pad).Append('{');
+            for (int n = 0; n < kv.Count; n++)
+            {
+                sb.Append(n > 0 ? "," : "").Append(pad).Append("  \"").Append(JsonEscape(kv[n].Key)).Append("\": ");
+                if (kv[n].Value is Kv) WriteJson(sb, kv[n].Value, depth + 1);
+                else WriteJson(sb, kv[n].Value, 0);
+            }
+            sb.Append(pad).Append('}');
+        }
+
+        static string JsonEscape(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s)
+            {
+                if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+                else if (c < 0x20) sb.AppendFormat("\\u{0:x4}", (int)c);
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+    }
+
     /// <summary>Resolves bundled tool paths relative to this app's folder.</summary>
     public static class Tools
     {
@@ -1291,6 +1488,9 @@ namespace Gp
         public static string BaseDir { get { return Payload.Root; } }
         public static string ApiDll86 { get { return Path.Combine(BaseDir, @"shibaberg\bin\x86\steam_api.dll"); } }
         public static string ApiDll64 { get { return Path.Combine(BaseDir, @"shibaberg\bin\x64\steam_api64.dll"); } }
+        // The experimental build: same emulator plus the in-game overlay with the shiba achievement toast.
+        public static string OverlayDll86 { get { return Path.Combine(BaseDir, @"shibaberg\bin\overlay\x86\steam_api.dll"); } }
+        public static string OverlayDll64 { get { return Path.Combine(BaseDir, @"shibaberg\bin\overlay\x64\steam_api64.dll"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"shibaberg\post_build\steam_settings.EXAMPLE"); } }
 
         public static List<string> Missing()
@@ -1777,7 +1977,7 @@ namespace Gp
                 if (o.OnlineFix)
                     PrepareOnlineFixMode(installDir, res);
                 else
-                    InstallGoldbergDlls(installDir, pe.Arch, foundApi, backup, res);
+                    InstallGoldbergDlls(installDir, pe.Arch, foundApi, backup, res, o.Achievements);
 
                 // ---- steam_appid.txt ---------------------------------------------
                 Pct(82);
@@ -1822,6 +2022,13 @@ namespace Gp
                     var legacy = Path.Combine(installDir, "steam_interfaces.txt");
                     WriteIfChanged(legacy, interfacesTxt, res);
                     Log(LogLevel.Ok, "steam_interfaces.txt written (move into steam_settings later if you create one).");
+                }
+
+                // ---- achievements ------------------------------------------------------
+                if (o.Achievements && !o.OnlineFix)
+                {
+                    Pct(93);
+                    InstallAchievements(installDir, o.EffectiveAppId, res, ct);
                 }
 
                 // ---- verify the install as a whole ---------------------------------
@@ -2062,7 +2269,7 @@ namespace Gp
 
         internal static bool LooksLikeBundledGoldberg(string dllPath)
         {
-            foreach (var src in new[] { Tools.ApiDll86, Tools.ApiDll64 })
+            foreach (var src in new[] { Tools.ApiDll86, Tools.ApiDll64, Tools.OverlayDll86, Tools.OverlayDll64 })
             {
                 try
                 {
@@ -2125,7 +2332,7 @@ namespace Gp
             return total;
         }
 
-        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, BackupTaker backup, PatchResult res)
+        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, BackupTaker backup, PatchResult res, bool overlay)
         {
             // The *name* comes from the import table; the *architecture* comes from the PE header. Deriving
             // the name from the architecture is the worst failure mode in the app: a correctly-architected
@@ -2175,7 +2382,9 @@ namespace Gp
                 ExeArch dllArch = entry.Value;
                 // Chosen by architecture, never by the destination name: a 64-bit game can legitimately
                 // import steam_api.dll, and installing the 32-bit library there would be silent breakage.
-                string src = dllArch == ExeArch.X64 ? Tools.ApiDll64 : Tools.ApiDll86;
+                string src = overlay
+                    ? (dllArch == ExeArch.X64 ? Tools.OverlayDll64 : Tools.OverlayDll86)
+                    : (dllArch == ExeArch.X64 ? Tools.ApiDll64 : Tools.ApiDll86);
                 if (!File.Exists(src)) { Log(LogLevel.Error, "Missing bundled emulator dll: " + src); continue; }
                 string dst = Path.Combine(installDir, dllName);
                 if (File.Exists(dst))
@@ -2194,7 +2403,7 @@ namespace Gp
                 });
                 res.ReplacedFiles.Add(dllName);
                 installed++;
-                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (dllArch == ExeArch.X64 ? "x64" : "x86") + ")");
+                Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (dllArch == ExeArch.X64 ? "x64" : "x86") + (overlay ? ", with in-game overlay" : "") + ")");
             }
 
             if (installed == 0)
@@ -2206,6 +2415,88 @@ namespace Gp
             if (imported != null && !File.Exists(Path.Combine(installDir, imported)))
                 throw new Exception("The emulator was installed, but the executable imports " + imported
                     + " and no such file exists in " + installDir + " – the game would still fail to start.");
+        }
+
+        /// <summary>Turns the overlay on and gives the emulator the game's achievement list, from the schema the
+        /// local Steam client cached. Existing achievements.json / stats.json are kept: they may be hand-made.</summary>
+        private void InstallAchievements(string installDir, string appId, PatchResult res, CancellationToken ct)
+        {
+            string dir = Path.Combine(installDir, "steam_settings");
+            string ini = Path.Combine(dir, "configs.overlay.ini");
+            // Flip the switch in an existing config so the user's other overlay settings survive.
+            string text = File.Exists(ini) ? File.ReadAllText(ini) : "";
+            var sw = new Regex(@"(?m)^([ \t]*enable_experimental_overlay[ \t]*=)[^\r\n]*");
+            text = sw.IsMatch(text) ? sw.Replace(text, "${1}1") : "[overlay::general]\r\nenable_experimental_overlay=1\r\n" + text;
+            WriteIfChanged(ini, text, res);
+            Log(LogLevel.Ok, "In-game overlay enabled (steam_settings\\configs.overlay.ini).");
+
+            // The overlay's Cloud saves panel runs this exe (--cloud-*) for Google sign-in and syncing.
+            var entry = System.Reflection.Assembly.GetEntryAssembly();
+            if (entry != null && entry.Location.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                WriteIfChanged(Path.Combine(dir, "shibaberg_cloud.txt"), entry.Location + "\r\n", res);
+
+            string achPath = Path.Combine(dir, "achievements.json");
+            if (File.Exists(achPath))
+            {
+                Log(LogLevel.Dim, "steam_settings\\achievements.json already exists – kept as is.");
+                return;
+            }
+            string schemaPath = AchievementSchema.LocalSchemaPath(appId);
+            if (schemaPath == null)
+            {
+                Log(LogLevel.Warn, "No achievement data for AppID " + appId + " on this PC – Steam only caches it for games it has launched. "
+                    + "Launch the game once from Steam, then patch again; until then nothing will pop up.");
+                return;
+            }
+            AchievementSchema.Result schema;
+            try { schema = AchievementSchema.Build(File.ReadAllBytes(schemaPath)); }
+            catch (Exception ex)
+            {
+                Log(LogLevel.Warn, "Could not read Steam's achievement cache (" + ex.Message + ") – no achievements installed.");
+                return;
+            }
+            if (schema.Achievements == 0)
+            {
+                Log(LogLevel.Dim, "This game has no achievements.");
+                return;
+            }
+            WriteIfChanged(achPath, schema.AchievementsJson, res);
+            string statsPath = Path.Combine(dir, "stats.json");
+            if (schema.Stats > 0 && !File.Exists(statsPath)) WriteIfChanged(statsPath, schema.StatsJson, res);
+            Log(LogLevel.Ok, string.Format("{0} achievements and {1} stats from Steam's local cache → steam_settings.", schema.Achievements, schema.Stats));
+
+            // Icons: only the overlay's achievement list (Shift+Tab) shows them, so a failed download costs nothing.
+            string imgDir = Path.Combine(dir, "images");
+            string tmp = Path.Combine(Path.GetTempPath(), "shibaberg_icons_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tmp);
+            try
+            {
+                var todo = schema.Icons.Where(n => !File.Exists(Path.Combine(imgDir, n))).ToList();
+                var got = new System.Collections.Concurrent.ConcurrentBag<string>();
+                Parallel.ForEach(todo, new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct }, icon =>
+                {
+                    try
+                    {
+                        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                        var req = (HttpWebRequest)WebRequest.Create(AchievementSchema.IconUrl(appId, icon));
+                        req.Timeout = req.ReadWriteTimeout = 8000;
+                        req.UserAgent = "Shibaberg/" + BuildInfo.Version;
+                        using (ct.Register(() => req.Abort()))
+                        using (var resp = req.GetResponse())
+                        using (var f = File.Create(Path.Combine(tmp, icon)))
+                            resp.GetResponseStream().CopyTo(f);
+                        got.Add(icon);
+                    }
+                    catch { }
+                });
+                foreach (var icon in got)
+                    SafePersistence.Copy(Path.Combine(tmp, icon), Path.Combine(imgDir, icon), res.Writes);
+                if (todo.Count > 0)
+                    Log(got.Count == todo.Count ? LogLevel.Ok : LogLevel.Warn,
+                        string.Format("Achievement icons: {0}/{1} downloaded{2}.", got.Count, todo.Count,
+                            got.Count == todo.Count ? "" : " (offline? the popups work without them)"));
+            }
+            finally { try { Directory.Delete(tmp, true); } catch { } }
         }
 
         /// <summary>True for the two names Steamworks libraries are shipped under.</summary>
@@ -2804,6 +3095,7 @@ namespace Gp
         public bool WriteAppIdTxt = true;
         public bool CreateSettings = false;
         public bool OnlineFix = false;   // force Spacewar 480 for every game, AppIDs are ignored
+        public bool Achievements = false;
     }
 
     /// <summary>Patches several games sequentially. AppIDs must be resolved by the caller (see AppIdDetector).</summary>
@@ -2864,6 +3156,7 @@ namespace Gp
                             Backup = prefs.Backup,
                             WriteAppIdTxt = prefs.WriteAppIdTxt,
                             CreateSettings = prefs.CreateSettings,
+                            Achievements = prefs.Achievements,
                             OnlineFix = ofix,
                         };
                         o.AppIdUsed = opts.EffectiveAppId;
@@ -3112,7 +3405,10 @@ namespace Gp
         public bool CreateSettings = false;
         public bool OnlineFix = false;
         public bool LookupAppId = true;
+        public bool Achievements = false;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Cloud saves: save folders the user added per AppID, beyond the detected ones.</summary>
+        public Dictionary<string, List<string>> SaveDirs = new Dictionary<string, List<string>>();
 
         static string Dir { get { return AppPaths.StateDir; } }
         static string File0 { get { return Path.Combine(Dir, "settings.ini"); } }
@@ -3139,9 +3435,12 @@ namespace Gp
                         case "settings": s.CreateSettings = v == "1"; break;
                         case "onlinefix": s.OnlineFix = v == "1"; break;
                         case "lookup": s.LookupAppId = v == "1"; break;
+                        case "achievements": s.Achievements = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
                                 s.AppIdsByFolder[UnescKey(k.Substring(7))] = v;
+                            else if (k.StartsWith("savedirs:"))
+                                s.SaveDirs[k.Substring(9)] = v.Split('|').Where(x => x.Length > 0).ToList();
                             break;
                     }
                 }
@@ -3165,8 +3464,11 @@ namespace Gp
                 sb.AppendLine("settings=" + (CreateSettings ? "1" : "0"));
                 sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
+                sb.AppendLine("achievements=" + (Achievements ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + EscKey(kv.Key) + "=" + kv.Value);
+                foreach (var kv in SaveDirs)
+                    if (kv.Value.Count > 0) sb.AppendLine("savedirs:" + kv.Key + "=" + string.Join("|", kv.Value));
                 var record = SafePersistence.WriteText(File0, sb.ToString());
                 // settings.ini is tiny and fully regenerable, so it needs no undo record. Without this
                 // the staging area (and a copy of the previous settings) leaks on every save – which

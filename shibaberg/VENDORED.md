@@ -35,6 +35,17 @@ Protobuf's cmake also downloads Abseil from GitHub during the dependency build (
    "Shibaberg Client API"). An explicit list on purpose: gbe_fork's other names are behaviour and stay —
    `steam_settings`, the `GSE Saves` folder (renaming hides existing saves), the `GseExeDir`/`GseAppPath`
    env vars, exports, interface version strings, `steam_api(64).dll`. Mechanical; re-run it, never hand-edit.
+2. **shiba toast** — `overlay_experimental\steam_overlay.cpp` (+ one declaration in `overlay\steam_overlay.h`):
+   unlocked-achievement notifications are drawn by `draw_shiba_toast` (Xbox-style pill in the Shibaberg
+   palette) with `draw_shiba` (ImGui port of `Shiba.Draw` in `src\Ui.cs`) instead of upstream's window.
+   Hand-made; re-apply by hand on rebase. Only the overlay build (`-Variant experimental`) contains it.
+3. **deps release flags** — `premake5-deps.lua`: the generated CMake toolchain set
+   `CMAKE_<LANG>_FLAGS_RELEASE` to `${...} /MT /D_MT`, but that variable is still empty inside a toolchain
+   file, so every dependency was built without `/O2` and `NDEBUG`. That leaves ImGui's asserts live in
+   `ingame_overlay` — upstream's own release-2026_07_19 experimental dll has them too — and an ImGui assert
+   (e.g. "ImDrawCmd is referring to ImTextureData that wasn't uploaded", hit on Shift+Tab in Airport CEO)
+   becomes a crash dialog in game. Now spelled out in full. Rebuild deps after changing (delete `build\deps`).
+4. **overlay theme + cloud saves** — `overlay_experimental\steam_overlay.cpp` / `overlay\steam_overlay.h`, `dll\dll\settings.h`, example `configs.overlay.ini`: the Shibaberg ImGui theme (`apply_shibaberg_theme`), our header/backdrop/achievement cards in the Shift+Tab window, upstream colour defaults set to -1 (= theme), and the Cloud saves window + session sync (`shibaberg_cloud_session_start` in `SetupOverlay`) that runs the patcher's `Shibaberg.exe --cloud-*` (path from `steam_settings\shibaberg_cloud.txt`). Windows only; hand-made, re-apply by hand on rebase.
 
 ## How it is built
 

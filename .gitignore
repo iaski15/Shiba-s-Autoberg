@@ -29,3 +29,6 @@ plan.md
 /shibaless/Shibaless.API/Model/ViewModelBase.cs
 /shibaless/Shibaless.API/Model/NavigatedEventArgs.cs
 /shibaless/Rename-FromUpstream.ps1
+
+# Google OAuth client for cloud saves (build.ps1 compiles it in); never committed.
+/google_client.json

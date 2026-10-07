@@ -1,7 +1,9 @@
 param(
     [string]$CompilerPath = '',
     [string]$ReferencePath = '',
-    [switch]$Verify
+    [switch]$Verify,
+    # Also write dist\Shibaberg-<version>.zip: the exe (everything it runs on is embedded) + docs + licenses.
+    [switch]$Package
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,12 +98,23 @@ if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe no
 # One place to bump it. The assembly attribute is what the UI renders, so the number on
 # screen cannot drift from the build that produced it.
 $version = '0.5'
+# Google sign-in for cloud saves: the OAuth "Desktop app" client from google_client.json (the file Google
+# Cloud Console downloads; gitignored). Google treats an installed app's secret as public, but it stays out
+# of the repo anyway. Without the file the build still works and cloud saves say sign-in isn't set up.
+$gcId = ''; $gcSecret = ''
+$gcFile = Join-Path $root 'google_client.json'
+if (Test-Path -LiteralPath $gcFile) {
+    $gc = (Get-Content -LiteralPath $gcFile -Raw | ConvertFrom-Json).installed
+    $gcId = $gc.client_id; $gcSecret = $gc.client_secret
+    if ($gcId -notmatch '^[\w.-]+$' -or $gcSecret -notmatch '^[\w.-]+$') { throw 'google_client.json: unexpected client_id/client_secret format' }
+}
 $verFile = Join-Path $env:TEMP ('gp_version_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.cs')
 [IO.File]::WriteAllText($verFile, @"
 using System.Reflection;
 [assembly: AssemblyVersion("$version.0.0")]
 [assembly: AssemblyFileVersion("$version.0.0")]
 [assembly: AssemblyInformationalVersion("$version")]
+namespace Gp { static class GoogleClient { public const string Id = "$gcId"; public const string Secret = "$gcSecret"; } }
 "@, (New-Object System.Text.UTF8Encoding($false)))
 
 # ---- reference assemblies (.NET Framework 4.8) ----
@@ -113,7 +126,7 @@ if (-not $refDir) {
         Write-Warning "4.8 targeting pack unavailable; using installed Framework assemblies. Pin -ReferencePath for reproducible references."
     }
 }
-$refs = @('mscorlib.dll','System.dll','System.Core.dll','Microsoft.CSharp.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Runtime.Serialization.dll','System.Xml.dll','System.Xml.Linq.dll') |
+$refs = @('mscorlib.dll','System.dll','System.Core.dll','Microsoft.CSharp.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Runtime.Serialization.dll','System.Xml.dll','System.Xml.Linq.dll','System.IO.Compression.dll','System.Security.dll') |
     ForEach-Object {
         if (-not (Test-Path -LiteralPath (Join-Path $refDir $_))) { throw "Required reference missing: $refDir\$_" }
         "/r:`"$refDir\$_`""
@@ -152,12 +165,14 @@ Compress-File $sharpDisasm $sharpDisasmDeflated
 $shibalessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDisasm.dll.deflate")
 
 # ---- self test host (console) ----
-Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
+Compile (@("`"$src\Core.cs`"", "`"$src\Cloud.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
 # Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (shibaless\).
 # The emulator dlls are Shibaberg builds (shibaberg\bin, rebuilt from shibaberg\ by tools\build-shibaberg.ps1).
 $pay = @('shibaberg\bin\x86\steam_api.dll', 'shibaberg\bin\x64\steam_api64.dll')
+# The overlay build (in-game achievement toast), installed instead when achievements are switched on.
+$pay += @('shibaberg\bin\overlay\x86\steam_api.dll', 'shibaberg\bin\overlay\x64\steam_api64.dll')
 # generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
 Get-ChildItem (Join-Path $root 'shibaberg\post_build\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
@@ -204,7 +219,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$src\Cloud.cs`"", "`"$src\CloudForm.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
@@ -218,6 +233,24 @@ if ($Verify) {
     & (Join-Path $root '_selftest.exe')
     if ($LASTEXITCODE -ne 0) { throw "self-test failed with exit code $LASTEXITCODE" }
     Write-Host "verify: OK"
+}
+
+if ($Package) {
+    # The exe is self-contained; only what must stay readable as files ships beside it.
+    $dist = Join-Path $root 'dist'
+    $stage = Join-Path $dist "Shibaberg-$version"
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    $lic = New-Item -ItemType Directory -Force (Join-Path $stage 'licenses')
+    Copy-Item -LiteralPath (Join-Path $root 'Shibaberg.exe') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $root 'shibaberg\post_build\README.release.md') -Destination (Join-Path $stage 'Emulator settings.md')
+    Copy-Item -LiteralPath (Join-Path $root 'shibaberg\LICENSE') -Destination (Join-Path $lic 'Shibaberg (gbe_fork) - LGPL-3.0.txt')
+    Copy-Item -LiteralPath (Join-Path $root 'shibaberg\CREDITS.md') -Destination (Join-Path $lic 'Shibaberg (gbe_fork) - third-party credits.md')
+    Copy-Item -LiteralPath (Join-Path $root 'shibaless\LICENSE') -Destination (Join-Path $lic 'Shibaless (Steamless) - CC BY-NC-ND 4.0.txt')
+    $zip = Join-Path $dist "Shibaberg-$version.zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    Compress-Archive -Path $stage -DestinationPath $zip
+    Write-Host ("package: {0}  ({1:N1} MB)" -f $zip, ((Get-Item -LiteralPath $zip).Length / 1MB))
 }
 
 Write-Host "`nDone."

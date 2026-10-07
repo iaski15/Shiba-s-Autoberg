@@ -13,6 +13,8 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 - **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
 - **Undo** — every write is journalled, so a patch that fails or is cancelled part-way can be rolled back; "Undo last patch" also works after a restart
+- **In-game achievement popups** — an Xbox-style toast with the shiba, plus a restyled Shift+Tab overlay; the achievement list comes from the Steam client's local cache (`appcache\stats`), no web API
+- **Cloud saves** — your saves keep going to the game's own folders and a copy is synced with **your own Google Drive**: pulled when the game starts, uploaded when it exits, last 10 backups per game kept; sign in from the Shift+Tab overlay or the Cloud saves window
 - **Self-contained binary** — all tools and payload files are embedded in the exe, compressed, and extracted to `%LOCALAPPDATA%\GoldbergPatcher\payload\<build>\` on first run; one file is all you need
 
 ## Quick start
@@ -30,6 +32,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 | Create steam_settings folder | off | Creates a settings folder from GSE's examples, ready for custom configs |
 | Auto-detect Steam AppID online | on | Looks the game up on the Steam Store when no local AppID is found |
 | Generic online-fix | off | Keeps the original dll and presents the game as Spacewar (AppID 480) |
+| In-game overlay: achievements + cloud saves | off | Installs the overlay build of the emulator, the game's achievement list, and cloud-save syncing (Shibaberg.exe must stay where it was when patching) |
 
 `steam_interfaces.txt` generation is not a toggle — it runs against the original dll whenever one is available and the emulator dll is being installed.
 
@@ -51,7 +54,7 @@ The GUI executable is also headless-capable, which is how the live test drives i
 
 ```text
 Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
-Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings]
+Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings] [--achievements]
 Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]
 Shibaberg.exe --verify-payload
 ```
@@ -91,18 +94,29 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 ## Repository layout
 
 ```
-src/                      C# sources (Core.cs = patch pipeline + PE reader, Ui.cs, MainForm.cs, Batch.cs)
+src/                      C# sources (Core.cs = patch pipeline + PE reader, Cloud.cs = cloud saves, Ui.cs, MainForm.cs, Batch.cs, CloudForm.cs)
 Shibaberg.exe      built GUI app (self-contained) – build output, not tracked
 _selftest.exe             built console self-test – build output, not tracked
 shibaless/                Shibaless: our fork of Steamless (API + 7 unpackers), compiled into the app; see VENDORED.md
 shibaberg/                Shibaberg: our fork of gbe_fork (the Goldberg emulator); see VENDORED.md
 shibaberg/bin/            the shipped steam_api.dll / steam_api64.dll, built from shibaberg/, + BUILD.txt (commit, SHA-256s)
+shibaberg/bin/overlay/    the overlay build (achievement toast, Shift+Tab overlay, cloud saves) + its own BUILD.txt
 shibaberg/post_build/steam_settings.EXAMPLE   example config tree used when scaffolding settings
 tools/build-shibaberg.ps1 rebuilds shibaberg/bin from shibaberg/ (not part of build.ps1)
 build.ps1                 build script
 ```
 
 The review notes (`optimizations.md`, `plan.md`), `AGENTS.md` and the local agent state folder are kept in the working copy but not published — they document in-progress work and internal decisions.
+
+## Privacy
+
+Shibaberg has no servers and collects nothing. Cloud saves are optional and only talk to Google:
+
+- Your saves are uploaded to **your own Google Drive** (folder `Shibaberg Saves`). Shibaberg asks only for the `drive.file` permission, so it can see and change **only the files it created there** — nothing else in your Drive.
+- Your Google sign-in is kept on your PC, encrypted for your Windows user (`%APPDATA%\GoldbergPatcher\google.dat`). Signing out revokes it.
+- Nothing is shared with the developers or anyone else. To remove everything: sign out, then delete the `Shibaberg Saves` folder from your Drive.
+
+Use of information received from Google APIs adheres to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including the Limited Use requirements.
 
 ## Credits
 

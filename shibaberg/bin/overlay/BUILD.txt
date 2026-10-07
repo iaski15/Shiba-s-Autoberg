@@ -1,0 +1,6 @@
+Shibaberg (fork of gbe_fork) - experimental build by tools\build-shibaberg.ps1
+upstream commit: 64bd1fcfef82d397cd4bdba49adc08f0c49da31c
+msbuild: 18.9.1.35102
+built: 2026-10-07 18:13 UTC
+sha256 x64/steam_api64.dll: 3bcc11cdf6f01b6cc909e125232b7ad6eda35b2499bd07bc5259c29581c57803
+sha256 x86/steam_api.dll: cbd1ab9bc8d5eaa3148f0bf11b0be52438450ef1dba7b9f7faf8fa70673de8ed

@@ -29,6 +29,7 @@ namespace Gp
         public bool BatchOnlineFix;
         public bool BatchNoUnpack;
         public bool BatchSettings;
+        public bool BatchAchievements;
 
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
@@ -36,7 +37,7 @@ namespace Gp
         /// <summary>--check: verify an already-patched install and exit, changing nothing.</summary>
         public string Check = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings] [--achievements]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -66,11 +67,12 @@ namespace Gp
                 else if (s == "--online-fix") r.BatchOnlineFix = true;
                 else if (s == "--no-unpack") r.BatchNoUnpack = true;
                 else if (s == "--settings") r.BatchSettings = true;
+                else if (s == "--achievements") r.BatchAchievements = true;
                 else throw new ArgumentException("Unknown argument: " + s);
             }
             if (r.Check.Length > 0)
             {
-                if (r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchNoUnpack || r.BatchSettings)
+                if (r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements)
                     throw new ArgumentException("--check only combines with --appid and --online-fix.");
                 if (!File.Exists(r.Check) || !r.Check.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                     throw new ArgumentException("--check must name an existing .exe file.");
@@ -78,8 +80,8 @@ namespace Gp
             }
             if (r.Batch.Length > 0 && (r.Exe.Length > 0 || r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("--batch cannot be combined with single-game flags.");
-            if (r.Batch.Length == 0 && r.Check.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings))
-                throw new ArgumentException("--online-fix, --no-unpack and --settings require --batch.");
+            if (r.Batch.Length == 0 && r.Check.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements))
+                throw new ArgumentException("--online-fix, --no-unpack, --settings and --achievements require --batch.");
             if (r.Batch.Length == 0 && r.Exe.Length == 0 && (r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("Single-game flags require --exe.");
             if (r.Exe.Length > 0 && (!File.Exists(r.Exe) || !r.Exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
@@ -142,6 +144,13 @@ namespace Gp
         [STAThread]
         static void Main(string[] args)
         {
+            // The overlay build of the emulator runs these in the background around a play session; no window.
+            if (CloudCli.Handles(args))
+            {
+                AttachParentConsole();
+                Environment.ExitCode = CloudCli.Run(args);
+                return;
+            }
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
             Ui.InitializeScale();
@@ -314,6 +323,7 @@ namespace Gp
                 Backup = true,
                 WriteAppIdTxt = true,
                 CreateSettings = sa.BatchSettings,
+                Achievements = sa.BatchAchievements,
                 OnlineFix = sa.BatchOnlineFix,
             };
             var patcher = new BatchPatcher();
@@ -491,9 +501,9 @@ namespace Gp
         readonly AppCard appIdCard;
         readonly AppIdBox appIdBox;
         readonly AppCard optionsCard;
-        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup;
+        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements;
         readonly FlatButton patchBtn;
-        readonly FlatButton batchBtn;
+        readonly FlatButton batchBtn, cloudBtn;
         readonly ProgressBarLite progress;
         readonly Banner banner;
         readonly AppCard logCard;
@@ -537,7 +547,7 @@ namespace Gp
             // Ui.Scale uses for the hand-positioned paint geometry.
             AutoScaleDimensions = new SizeF(96f, 96f);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(Side + 820, 780);
+            ClientSize = new Size(Side + 820, 818);
             BackColor = Ui.Bg;
             Text = BuildInfo.AppName;
             try { using (var bmp = Shiba.Render(64, ShibaMood.Neutral)) Icon = Icon.FromHandle(bmp.GetHicon()); } catch { }
@@ -634,7 +644,7 @@ namespace Gp
             SetAppIdBusy(false);
 
             optionsCard = new AppCard();
-            optionsCard.Bounds = new Rectangle(X0, 342, CW, 160);
+            optionsCard.Bounds = new Rectangle(X0, 342, CW, 198);
             Controls.Add(optionsCard);
 
             optionsCard.Paint += (s, e) =>
@@ -651,6 +661,7 @@ namespace Gp
             tSettings = new Toggle("Create steam_settings folder", settings.CreateSettings);
             tOnlineFix = new Toggle("Generic online-fix (show game as Spacewar on Steam)", settings.OnlineFix);
             tLookup = new Toggle("Auto-detect Steam AppID online", settings.LookupAppId);
+            tAchievements = new Toggle("In-game overlay: achievements + cloud saves", settings.Achievements);
             tOnlineFix.CheckedChanged += delegate
             {
                 appIdBox.Enabled = !closing && !running && !tOnlineFix.Checked;
@@ -662,28 +673,35 @@ namespace Gp
             tSettings.Bounds = new Rectangle(408, 80, 340, 26);
             tOnlineFix.Bounds = new Rectangle(22, 118, 370, 26);
             tLookup.Bounds = new Rectangle(408, 118, 340, 26);
-            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup }) optionsCard.Controls.Add(c);
+            tAchievements.Bounds = new Rectangle(22, 156, 370, 26);
+            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements }) optionsCard.Controls.Add(c);
             appIdBox.Enabled = !tOnlineFix.Checked; // the handler above only runs on change, not for the saved state
 
             int rowW = 820 - Pad * 2;
-            int batchW = 210, gap = 14;
+            int batchW = 170, gap = 14;
             patchBtn = new FlatButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(X0, 514, rowW - batchW - gap, 52);
+            patchBtn.Bounds = new Rectangle(X0, 552, rowW - (batchW + gap) * 2, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
             batchBtn = new FlatButton("Batch Patch…");
             batchBtn.Kind = FlatButton.BtnKind.Secondary;
-            batchBtn.Bounds = new Rectangle(X0 + rowW - batchW, 514, batchW, 52);
+            batchBtn.Bounds = new Rectangle(X0 + rowW - batchW * 2 - gap, 552, batchW, 52);
             batchBtn.Click += delegate { OpenBatch(); };
             Controls.Add(batchBtn);
 
+            cloudBtn = new FlatButton("Cloud saves…");
+            cloudBtn.Kind = FlatButton.BtnKind.Secondary;
+            cloudBtn.Bounds = new Rectangle(X0 + rowW - batchW, 552, batchW, 52);
+            cloudBtn.Click += delegate { OpenCloud(); };
+            Controls.Add(cloudBtn);
+
             progress = new ProgressBarLite();
-            progress.Bounds = new Rectangle(X0, 576, CW, 4);
+            progress.Bounds = new Rectangle(X0, 614, CW, 4);
             Controls.Add(progress);
 
             banner = new Banner();
-            banner.Bounds = new Rectangle(X0, 588, CW, 58);
+            banner.Bounds = new Rectangle(X0, 626, CW, 58);
             banner.ActionClicked += OnBannerAction;
             banner.PrimaryAction = "Play game";
             Controls.Add(banner);
@@ -703,7 +721,7 @@ namespace Gp
 
             statusBar = new StatusBarCtl();
             statusBar.RightText = "shibaberg emu · shibaless · offline";
-            statusBar.Bounds = new Rectangle(Side, 780 - 30, 820, 30);
+            statusBar.Bounds = new Rectangle(Side, 818 - 30, 820, 30);
             statusBar.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(statusBar);
             appIdBox.Controls[0].TextChanged += delegate { InvalidateSidebar(); };
@@ -727,8 +745,8 @@ namespace Gp
             closing = true;
             StopAutoTimer();
             StopExitTimer();
-            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
+            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
             CancelSelectionWork();
             SetAppIdBusy(false);
             CancelPatch();
@@ -762,7 +780,7 @@ namespace Gp
             // Scaled explicitly: WinForms' auto-scale sizes the controls once at load, but this runs again on
             // every resize and banner toggle, so the constants here have to be scaled by hand to match.
             int x = Ui.S(X0);
-            int top = Ui.S(banner.Visible ? 654 : 596);
+            int top = Ui.S(banner.Visible ? 692 : 634);
             return new Rectangle(x, top, ClientSize.Width - x - Ui.S(Pad), ClientSize.Height - top - Ui.S(40));
         }
         void RecalcLog()
@@ -1088,6 +1106,7 @@ namespace Gp
                 WriteAppIdTxt = tAppid.Checked,
                 CreateSettings = tSettings.Checked,
                 OnlineFix = ofix,
+                Achievements = tAchievements.Checked,
             };
             settings.LastAppId = id;
             settings.UnpackDrm = tUnpack.Checked;
@@ -1096,6 +1115,7 @@ namespace Gp
             settings.CreateSettings = tSettings.Checked;
             settings.OnlineFix = ofix;
             settings.LookupAppId = tLookup.Checked;
+            settings.Achievements = tAchievements.Checked;
             if (id.Length > 0) settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id; // don't cache empty ids
             string saveError;
             if (!settings.Save(out saveError)) Log(LogLevel.Error, saveError);
@@ -1106,7 +1126,7 @@ namespace Gp
             patchBtn.Text = "Cancel";
             zone.Enabled = false;
             appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
             banner.HideBanner();
             ShowBannerLayout(false);
             progress.SetValue(1);
@@ -1167,8 +1187,8 @@ namespace Gp
             lastResult = res;
             patchBtn.Kind = FlatButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
-            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = !closing;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = !closing;
+            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = !closing;
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
 
             if (res.Success)
@@ -1293,8 +1313,8 @@ namespace Gp
             running = true;
             banner.HideBanner();
             ShowBannerLayout(false);
-            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = false;
+            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
             progress.SetValue(10);
             statusBar.Pulse = true;
             statusBar.Set("Undoing the last patch…", Ui.WarnC);
@@ -1339,8 +1359,8 @@ namespace Gp
             running = false;
             statusBar.Pulse = false;
             progress.SetValue(0);
-            patchBtn.Enabled = batchBtn.Enabled = zone.Enabled = !closing;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = !closing;
+            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
+            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = !closing;
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
             lastActions = new string[0];
 
@@ -1365,6 +1385,14 @@ namespace Gp
 
         // ---------------------------------------------------------- batch patching
 
+        void OpenCloud()
+        {
+            if (running || closing) return;
+            cloudBtn.Enabled = false;
+            var f = new CloudForm(settings);
+            try { f.ShowDialog(this); } finally { f.Dispose(); cloudBtn.Enabled = true; }
+        }
+
         void OpenBatch()
         {
             if (running || closing) return;
@@ -1376,6 +1404,7 @@ namespace Gp
                 WriteAppIdTxt = tAppid.Checked,
                 CreateSettings = tSettings.Checked,
                 OnlineFix = tOnlineFix.Checked,
+                Achievements = tAchievements.Checked,
             };
 
             batchBtn.Enabled = false;

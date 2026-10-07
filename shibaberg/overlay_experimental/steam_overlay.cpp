@@ -582,6 +582,82 @@ void Steam_Overlay::load_achievements_data()
 }
 
 // called initially and when window size is updated
+// Shibaberg: the overlay's look - Shibaberg.exe's palette (src\Ui.cs) turned dark so it reads over any game:
+// ink-brown panels, fur-orange buttons and accents, cream text, rounded everything. Colours set in
+// configs.overlay.ini (Background_*, Element_*...) are still pushed on top by apply_global_style_color().
+static void apply_shibaberg_theme(ImGuiStyle &style)
+{
+    auto hex = [](unsigned rgb, float a = 1.0f) {
+        return ImVec4(((rgb >> 16) & 0xFF) / 255.0f, ((rgb >> 8) & 0xFF) / 255.0f, (rgb & 0xFF) / 255.0f, a);
+    };
+    style.WindowRounding = 14.0f;
+    style.ChildRounding = 10.0f;
+    style.PopupRounding = 10.0f;
+    style.FrameRounding = 8.0f;
+    style.GrabRounding = 8.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.TabRounding = 8.0f;
+    style.WindowPadding = ImVec2(18.0f, 16.0f);
+    style.FramePadding = ImVec2(14.0f, 7.0f);
+    style.ItemSpacing = ImVec2(10.0f, 9.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    style.ScrollbarSize = 12.0f;
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 0.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+    style.SeparatorTextBorderSize = 2.0f;
+
+    ImVec4 *c = style.Colors;
+    const ImVec4 ink = hex(0x2A1A12), line = hex(0x3A2418), bark = hex(0x4A3020), bark2 = hex(0x5A3E2B);
+    const ImVec4 fur = hex(0xE8924A), fur_deep = hex(0xC4652A), fur_dark = hex(0xD27A34), cream = hex(0xFFF2DF);
+    c[ImGuiCol_Text] = cream;
+    c[ImGuiCol_TextDisabled] = hex(0xB59A82);
+    c[ImGuiCol_WindowBg] = hex(0x2A1A12, 0.97f);
+    c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg] = hex(0x2A1A12, 0.98f);
+    c[ImGuiCol_Border] = hex(0x5A3E2B, 0.8f);
+    c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_FrameBg] = line;
+    c[ImGuiCol_FrameBgHovered] = bark;
+    c[ImGuiCol_FrameBgActive] = bark2;
+    c[ImGuiCol_TitleBg] = ink;
+    c[ImGuiCol_TitleBgActive] = line;
+    c[ImGuiCol_TitleBgCollapsed] = ink;
+    c[ImGuiCol_MenuBarBg] = ink;
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = bark;
+    c[ImGuiCol_ScrollbarGrabHovered] = bark2;
+    c[ImGuiCol_ScrollbarGrabActive] = fur_deep;
+    c[ImGuiCol_CheckMark] = fur;
+    c[ImGuiCol_SliderGrab] = fur;
+    c[ImGuiCol_SliderGrabActive] = fur_dark;
+    c[ImGuiCol_Button] = fur_deep;
+    c[ImGuiCol_ButtonHovered] = fur;
+    c[ImGuiCol_ButtonActive] = fur_dark;
+    c[ImGuiCol_Header] = line;
+    c[ImGuiCol_HeaderHovered] = bark;
+    c[ImGuiCol_HeaderActive] = bark2;
+    c[ImGuiCol_Separator] = hex(0x5A3E2B, 0.9f);
+    c[ImGuiCol_SeparatorHovered] = fur_deep;
+    c[ImGuiCol_SeparatorActive] = fur;
+    c[ImGuiCol_ResizeGrip] = hex(0xE8924A, 0.25f);
+    c[ImGuiCol_ResizeGripHovered] = hex(0xE8924A, 0.6f);
+    c[ImGuiCol_ResizeGripActive] = fur;
+    c[ImGuiCol_Tab] = line;
+    c[ImGuiCol_TabHovered] = fur;
+    c[ImGuiCol_TabSelected] = fur_deep;
+    c[ImGuiCol_PlotHistogram] = fur;
+    c[ImGuiCol_PlotHistogramHovered] = fur_dark;
+    c[ImGuiCol_TableHeaderBg] = line;
+    c[ImGuiCol_TableBorderStrong] = bark2;
+    c[ImGuiCol_TableBorderLight] = bark;
+    c[ImGuiCol_TextSelectedBg] = hex(0xE8924A, 0.35f);
+    c[ImGuiCol_NavCursor] = fur;
+    c[ImGuiCol_ModalWindowDimBg] = hex(0x120B07, 0.6f);
+}
+
 void Steam_Overlay::overlay_state_hook(bool ready)
 {
     PRINT_DEBUG("%i", (int)ready);
@@ -606,9 +682,7 @@ void Steam_Overlay::overlay_state_hook(bool ready)
             // disable loading the default ini file
             io.IniFilename = NULL;
 
-            ImGuiStyle &style = ImGui::GetStyle();
-            // Disable round window
-            style.WindowRounding = 0.0;
+            apply_shibaberg_theme(ImGui::GetStyle());
         }
     }
 }
@@ -1234,6 +1308,106 @@ ImVec4 Steam_Overlay::get_notification_bg_rgba_safe()
     );
 }
 
+// Shibaberg: the mascot from Shibaberg.exe (src\Ui.cs, Shiba.Draw, happy mood) in the same 100x100 design
+// space, so the toast badge and the app icon are one drawing. Keep the two in sync.
+static void draw_shiba(ImDrawList *dl, ImVec2 c, float size, float alpha)
+{
+    const float k = size / 100.0f;
+    auto P = [&](float x, float y) { return ImVec2(c.x + (x - 50.0f) * k, c.y + (y - 50.0f) * k); };
+    auto col = [&](int r, int g, int b, int a) { return IM_COL32(r, g, b, (int)(a * alpha)); };
+    const ImU32 fur = col(0xE8, 0x92, 0x4A, 255), cream = col(0xFF, 0xF2, 0xDF, 255);
+    const ImU32 line = col(0x3A, 0x24, 0x18, 255), ink = col(0x2A, 0x1A, 0x12, 255);
+    const float lw = 3.2f * k;
+    const float pi = 3.14159265f;
+
+    // ears (behind the head); the mirrored one is wound the other way round, ImGui wants clockwise
+    dl->AddTriangleFilled(P(13, 44), P(19, 9), P(45, 27), fur);
+    dl->AddTriangle(P(13, 44), P(19, 9), P(45, 27), line, lw);
+    dl->AddTriangleFilled(P(20, 37), P(23, 18), P(36, 29), cream);
+    dl->AddTriangleFilled(P(87, 44), P(55, 27), P(81, 9), fur);
+    dl->AddTriangle(P(87, 44), P(55, 27), P(81, 9), line, lw);
+    dl->AddTriangleFilled(P(80, 37), P(64, 29), P(77, 18), cream);
+
+    // head, muzzle, eyebrow spots, outline, blush
+    dl->AddEllipseFilled(P(50, 57), ImVec2(43 * k, 35 * k), fur);
+    dl->AddEllipseFilled(P(50, 72.5f), ImVec2(33 * k, 18.5f * k), cream);
+    dl->AddEllipseFilled(P(33, 44), ImVec2(5 * k, 3 * k), cream);
+    dl->AddEllipseFilled(P(67, 44), ImVec2(5 * k, 3 * k), cream);
+    dl->AddEllipse(P(50, 57), ImVec2(43 * k, 35 * k), line, 0.0f, 0, lw);
+    dl->AddEllipseFilled(P(22.5f, 66.5f), ImVec2(6.5f * k, 3.5f * k), col(0xFF, 0x8F, 0xA3, 150));
+    dl->AddEllipseFilled(P(77.5f, 66.5f), ImVec2(6.5f * k, 3.5f * k), col(0xFF, 0x8F, 0xA3, 150));
+
+    // happy closed eyes ^ ^
+    const float a0 = 200.0f * pi / 180.0f, a1 = 340.0f * pi / 180.0f;
+    dl->PathEllipticalArcTo(P(33, 56), ImVec2(6 * k, 5 * k), 0.0f, a0, a1);
+    dl->PathStroke(line, 0, lw);
+    dl->PathEllipticalArcTo(P(67, 56), ImVec2(6 * k, 5 * k), 0.0f, a0, a1);
+    dl->PathStroke(line, 0, lw);
+
+    // nose + open mouth with tongue
+    dl->AddTriangleFilled(P(45, 63), P(55, 63), P(50, 68.5f), ink);
+    dl->PathArcTo(P(50, 72), 8 * k, 0.0f, pi);
+    dl->PathFillConvex(col(0xFF, 0x7C, 0x8C, 255));
+    dl->PathArcTo(P(50, 72), 8 * k, 0.0f, pi);
+    dl->PathStroke(line, ImDrawFlags_Closed, lw);
+}
+
+// Shibaberg: Xbox-style toast in the Shibaberg colours. A round fur badge with the shiba (where the console has
+// its trophy) pops in at the bottom centre, a deep-fur pill slides open out of it reading "Achievement
+// unlocked", which then fades over to the achievement's name; on the way out the same in reverse. Drawn
+// straight onto the foreground list, no ImGui window. Colours are Shibaberg.exe's (src\Ui.cs): Accent2 pill,
+// Accent badge, CreamText text.
+void Steam_Overlay::draw_shiba_toast(const Notification &noti, float elapsed_ms, float total_ms, float scrn_width, float scrn_height, NotificationsCoords &coords)
+{
+    const auto &ach = noti.ach.value();
+    const bool rare = ach.unlock_percentage >= 0.0f && ach.unlock_percentage <= 10.0f;
+    float alpha = settings->overlay_appearance.notification_a;
+    if (alpha < 0.0f || alpha > 1.0f) alpha = 1.0f;
+
+    auto clamp01 = [](float t) { return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t); };
+    auto ease = [&](float t) { t = clamp01(t); return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t); };
+    const float phase = (std::min)(elapsed_ms, total_ms - elapsed_ms);   // symmetric in and out
+    const float pop = ease(phase / 220.0f);
+    const float open = ease((phase - 220.0f) / 380.0f);
+    const float swap = clamp01((elapsed_ms - 2200.0f) / 250.0f);          // header -> achievement name
+
+    const char *header = rare ? "Rare achievement unlocked" : "Achievement unlocked";
+    ImGui::PushFont(font_ach_title);
+    const float text_h = ImGui::GetFontSize();
+    const float text_w = (std::max)(ImGui::CalcTextSize(header).x, ImGui::CalcTextSize(ach.title.c_str()).x);
+
+    const float h = (std::max)(settings->overlay_appearance.icon_size, text_h * 3.0f);
+    const float r = h * 0.5f;
+    const float full_w = (std::min)(scrn_width * 0.6f, h + r * 0.5f + text_w + r);
+    const float w = h + (full_w - h) * open;
+
+    // stacks upwards from just above the bottom edge, like the console
+    const float bottom = (std::max)(coords.bot_center.second, scrn_height * 0.08f);
+    const float x = (scrn_width - w) * 0.5f;
+    const float y = scrn_height - bottom - h;
+    coords.bot_center.second = scrn_height - y + settings->overlay_appearance.notification_margin_y;
+
+    auto rgba = [&](int r_, int g_, int b_, float a) { return IM_COL32(r_, g_, b_, (int)(255.0f * alpha * a)); };
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (open > 0.0f) {
+        dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), rgba(0xC4, 0x65, 0x2A, 1.0f), r);
+        const float tx = x + h + r * 0.5f;
+        const float ty = y + (h - text_h) * 0.5f;
+        dl->PushClipRect(ImVec2(x + h, y), ImVec2(x + w - r * 0.5f, y + h), true);
+        dl->AddText(ImVec2(tx, ty), rare ? rgba(255, 215, 90, open * (1.0f - swap)) : rgba(0xFF, 0xF2, 0xDF, open * (1.0f - swap)), header);
+        if (swap > 0.0f) dl->AddText(ImVec2(tx, ty), rgba(0xFF, 0xF2, 0xDF, open * swap), ach.title.c_str());
+        dl->PopClipRect();
+    }
+    ImGui::PopFont();
+
+    const ImVec2 c(x + r, y + r);
+    const float rb = r * pop;
+    if (rb > 0.5f) {
+        dl->AddCircleFilled(c, rb, rgba(0xE8, 0x92, 0x4A, 1.0f));
+        if (rare) dl->AddCircle(c, rb - h * 0.025f, rgba(255, 200, 60, 1.0f), 0, h * 0.05f);
+        draw_shiba(dl, ImVec2(c.x, c.y + rb * 0.03f), rb * 1.45f, alpha);
+    }
+}
 void Steam_Overlay::build_notifications(float width, float height)
 {
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
@@ -1256,6 +1430,11 @@ void Steam_Overlay::build_notifications(float width, float height)
         auto elapsed_notif = now - it->start_time;
         if (elapsed_notif > total_allowed_duration) {
             it->expired = true;
+            continue;
+        }
+
+        if ((notification_type)it->type == notification_type::achievement && it->ach.has_value()) {
+            draw_shiba_toast(*it, (float)elapsed_notif.count(), (float)total_allowed_duration.count(), width, height, coords);
             continue;
         }
 
@@ -1912,23 +2091,60 @@ void Steam_Overlay::render_main_window()
 {
     char tmp[TRANSLATION_BUFFER_SIZE]{};
     snprintf(tmp, sizeof(tmp), translationRenderer[current_language], (_renderer == nullptr ? "Unknown" : _renderer->GetLibraryName()));
-    std::string windowTitle{};
+    std::string credits{};
     // Note: don't translate this, project and author names are nouns, they must be kept intact for proper referral
     // think of it as translating "Protobuf - Google"
-    windowTitle.append("Ingame Overlay project - Nemirtingas (").append(tmp).append(")");
+    // Shibaberg: was the window title; now a footer line under our own header
+    credits.append("Ingame Overlay project - Nemirtingas (").append(tmp).append(")");
 
     bool show = true;
 
     ImGuiIO &io = ImGui::GetIO();
 
     ImGui::PushFont(font_default);
-    uint32 style_color_stack = apply_global_style_color();
+    // Shibaberg: a see-through warm backdrop over the game instead of a solid full-screen panel
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0x12 / 255.0f, 0x0B / 255.0f, 0x07 / 255.0f, 0.72f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(io.DisplaySize.x * 0.04f, io.DisplaySize.y * 0.05f));
 
     ImGui::SetNextWindowPos({ 0, 0 });
     ImGui::SetNextWindowSize({ io.DisplaySize.x, io.DisplaySize.y });
-    if (ImGui::Begin(windowTitle.c_str(), &show,
+    const bool main_open = ImGui::Begin("##shibaberg_overlay", &show,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    // pushed for the backdrop only; the windows opened from it use the theme
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
+    uint32 style_color_stack = apply_global_style_color();
+    if (main_open) {
+        // ---- header: shiba badge, name, who is playing what, close ----
+        {
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            const float badge = ImGui::GetFontSize() * 3.4f;
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const ImVec2 c(p.x + badge * 0.5f, p.y + badge * 0.5f);
+            dl->AddCircleFilled(c, badge * 0.5f, IM_COL32(0xE8, 0x92, 0x4A, 255));
+            draw_shiba(dl, ImVec2(c.x, c.y + badge * 0.015f), badge * 0.72f, 1.0f);
+
+            ImGui::SetCursorScreenPos(ImVec2(p.x + badge + 16.0f, p.y + badge * 0.5f - ImGui::GetFontSize() * 1.25f));
+            ImGui::BeginGroup();
+            ImGui::PushFont(font_ach_title);
+            ImGui::TextColored(ImVec4(0xFF / 255.0f, 0xF2 / 255.0f, 0xDF / 255.0f, 1.0f), "Shibaberg");
+            ImGui::PopFont();
+            ImGui::TextDisabled("%s  -  AppID %u", settings->get_local_name(), settings->get_local_game_id().AppID());
+            ImGui::EndGroup();
+
+            const char *close_label = translationClose[current_language];
+            const float close_w = ImGui::CalcTextSize(close_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            ImGui::SetCursorScreenPos(ImVec2(p.x + ImGui::GetContentRegionAvail().x - close_w, p.y + (badge - ImGui::GetFrameHeight()) * 0.5f));
+            if (ImGui::Button(close_label)) show = false;
+
+            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + badge + 12.0f));
+            ImGui::Separator();
+            ImGui::Spacing();
+        }
+
         if (show_user_info) {
             ImGui::LabelText("##playinglabel", translationUserPlaying[current_language],
                 settings->get_local_name(),
@@ -2011,6 +2227,12 @@ void Steam_Overlay::render_main_window()
             if (ImGui::Button(translationSettings[current_language])) {
                 show_settings = !show_settings;
             }
+        }
+
+        // Shibaberg: cloud saves
+        ImGui::SameLine();
+        if (ImGui::Button("Cloud saves")) {
+            show_cloud = !show_cloud;
         }
         
         ImGui::Spacing();
@@ -2151,7 +2373,21 @@ void Steam_Overlay::render_main_window()
             ImGui::SetNextWindowBgAlpha(1.0f);
             ImGui::SetNextWindowPos(ImVec2(ImGui::GetFontSize() * 4, std::max(ImGui::GetFontSize() * 10, io.DisplaySize.y * 0.15f)), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(translationAchievementWindow[current_language], &show_achievements)) {
-                ImGui::Text("%s", translationListOfAchievements[current_language]);
+                // Shibaberg: "12 / 40" with a fur progress bar instead of a bare caption
+                {
+                    const size_t got = std::count_if(achievements.begin(), achievements.end(), [](const Overlay_Achievement &a) { return a.achieved; });
+                    char count_buf[64]{};
+                    snprintf(count_buf, sizeof(count_buf), "%zu / %zu", got, achievements.size());
+                    ImGui::PushFont(font_ach_title);
+                    ImGui::Text("%s", count_buf);
+                    ImGui::PopFont();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", translationUnlocked[current_language]);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    ImGui::ProgressBar((float)got / (float)achievements.size(), ImVec2(-1.0f, ImGui::GetFontSize() * 0.45f), "");
+                    ImGui::PopStyleVar();
+                    ImGui::Spacing();
+                }
                 ImGui::BeginChild(translationAchievements[current_language]);
 
                 // Build sorted index lists: unlocked by time desc, locked in API order
@@ -2192,7 +2428,13 @@ void Steam_Overlay::render_main_window()
                     // The other variant is loaded by the background pagination or on state change.
                     try_load_ach_icon(x, achieved, settings->paginated_achievements_icons == 0);
 
-                    ImGui::Separator();
+                    // Shibaberg: each achievement is a rounded card; locked ones sit back a little
+                    ImGui::PushID(&x);
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, achieved
+                        ? ImVec4(0x3A / 255.0f, 0x24 / 255.0f, 0x18 / 255.0f, 1.0f)
+                        : ImVec4(0x33 / 255.0f, 0x21 / 255.0f, 0x17 / 255.0f, 0.7f));
+                    ImGui::BeginChild("##ach_card", ImVec2(0, 0),
+                        ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
 
                     bool could_create_ach_table_entry = false;
                     if (x.icon->GetResourceId() != 0 || x.icon_gray->GetResourceId() != 0) {
@@ -2251,7 +2493,10 @@ void Steam_Overlay::render_main_window()
                         }
                     }
 
-                    ImGui::Text("%s", x.title.c_str());
+                    ImGui::PushFont(font_ach_title);
+                    if (achieved) ImGui::Text("%s", x.title.c_str());
+                    else ImGui::TextDisabled("%s", x.title.c_str());
+                    ImGui::PopFont();
                     if (x.unlock_percentage >= 0.0f) {
                         float display_pct = x.unlock_percentage;
                         if (display_pct < 0.1f) {
@@ -2297,16 +2542,18 @@ void Steam_Overlay::render_main_window()
                             std::strftime(buffer, sizeof(buffer), "%Y/%m/%d - %H:%M:%S", &unlock_tm);
                         }
 
-                        ImGui::TextColored(ImVec4(0, 255, 0, 255), translationAchievedOn[current_language], buffer);
+                        ImGui::TextColored(ImVec4(0xE8 / 255.0f, 0x92 / 255.0f, 0x4A / 255.0f, 1.0f), translationAchievedOn[current_language], buffer);
                     } else {
-                        ImGui::TextColored(ImVec4(255, 0, 0, 255), "%s", translationNotAchieved[current_language]);
+                        ImGui::TextDisabled("%s", translationNotAchieved[current_language]);
                     }
 
                     add_ach_progressbar(x);
 
                     if (could_create_ach_table_entry) ImGui::EndTable();
 
-                    ImGui::Separator();
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
                 };
 
                 // --- Unlocked section ---
@@ -2367,6 +2614,10 @@ void Steam_Overlay::render_main_window()
             ImGui::End();
         }
 
+        if (show_cloud) {
+            render_cloud_window();
+        }
+
         // we have a url to open/display
         if (show_url.size()) {
             std::string url = show_url;
@@ -2422,6 +2673,10 @@ void Steam_Overlay::render_main_window()
                 warn_bad_appid = false;
             }
         }
+
+        // credits footer (was the window title)
+        ImGui::SetCursorPosY(ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight());
+        ImGui::TextDisabled("%s", credits.c_str());
     }
 
     ImGui::End();
@@ -2468,6 +2723,130 @@ void Steam_Overlay::load_next_ach_icon()
 
 }
 
+// ---- Shibaberg cloud saves ---------------------------------------------------------------------------
+// Saves keep going to the game's own folders; a copy is synced with the user's Google Drive by running
+// Shibaberg.exe hidden in the background (src\Cloud.cs in the patcher repo): --cloud-pull before the game
+// reads its saves, --cloud-watch to upload once the game process exits, --cloud-push / --cloud-signin from the
+// overlay. The patcher leaves its own path in steam_settings\shibaberg_cloud.txt; results come back through
+// small text files in %APPDATA%\GoldbergPatcher\cloud\ (account.txt, <appid>.status).
+#ifdef __WINDOWS__
+static std::filesystem::path shibaberg_cloud_dir()
+{
+    wchar_t *appdata = nullptr;
+    size_t len = 0;
+    if (_wdupenv_s(&appdata, &len, L"APPDATA") != 0 || appdata == nullptr) return {};
+    std::filesystem::path dir = std::filesystem::path(appdata) / L"GoldbergPatcher" / L"cloud";
+    free(appdata);
+    return dir;
+}
+
+static std::string shibaberg_read_line(const std::filesystem::path &file)
+{
+    std::ifstream f(file);
+    std::string line{};
+    if (f) std::getline(f, line);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    return line;
+}
+
+// Runs Shibaberg.exe hidden. wait_ms = 0: fire and forget (the watcher has to outlive the game).
+static bool shibaberg_cloud_run(const std::wstring &exe, const std::wstring &args, DWORD wait_ms)
+{
+    std::wstring cmd = L"\"" + exe + L"\" " + args;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // break away from a kill-on-close job if the launcher allows it, so the exit upload still runs
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi) &&
+        !CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        PRINT_DEBUG("failed to start Shibaberg cloud helper, error %lu", GetLastError());
+        return false;
+    }
+    if (wait_ms) WaitForSingleObject(pi.hProcess, wait_ms);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+static std::wstring shibaberg_cloud_args(uint32 appid)
+{
+    wchar_t exe_path[MAX_PATH * 4]{};
+    GetModuleFileNameW(nullptr, exe_path, (DWORD)(sizeof(exe_path) / sizeof(exe_path[0])));
+    return std::to_wstring(appid)
+        + L" \"" + std::filesystem::path(exe_path).parent_path().wstring() + L"\"";
+}
+#endif
+
+// Session start: pull the newest cloud save (the game waits, bounded, like Steam's "Syncing cloud"), then
+// leave a watcher that uploads when the game exits. Only when Shibaberg is there and the user signed in.
+void Steam_Overlay::shibaberg_cloud_session_start()
+{
+#ifdef __WINDOWS__
+    std::string exe = shibaberg_read_line(std::filesystem::u8path(Local_Storage::get_game_settings_path() + "shibaberg_cloud.txt"));
+    if (exe.empty() || !std::filesystem::exists(std::filesystem::u8path(exe))) return;
+    cloud_exe = std::filesystem::u8path(exe).wstring();
+    if (!std::filesystem::exists(shibaberg_cloud_dir() / L"account.txt")) return;
+
+    const std::wstring args = shibaberg_cloud_args(settings->get_local_game_id().AppID());
+    PRINT_DEBUG("Shibaberg cloud: pulling");
+    shibaberg_cloud_run(cloud_exe, L"--cloud-pull " + args, 20000);
+    shibaberg_cloud_run(cloud_exe, L"--cloud-watch " + args + L" " + std::to_wstring(GetCurrentProcessId()), 0);
+#endif
+}
+
+void Steam_Overlay::render_cloud_window()
+{
+#ifdef __WINDOWS__
+    // the helper reports through files; re-read them about once a second while the window is open
+    auto now = std::chrono::steady_clock::now();
+    if (now - cloud_refreshed > std::chrono::seconds(1)) {
+        cloud_refreshed = now;
+        const auto dir = shibaberg_cloud_dir();
+        cloud_account = shibaberg_read_line(dir / L"account.txt");
+        cloud_status = shibaberg_read_line(dir / (std::to_wstring(settings->get_local_game_id().AppID()) + L".status"));
+        if (!cloud_account.empty()) cloud_signing_in = false;
+    }
+
+    ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 26, 0), ImVec2(ImGui::GetFontSize() * 40, 8192));
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    if (ImGui::Begin("Cloud saves", &show_cloud, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36);
+        if (cloud_exe.empty()) {
+            ImGui::TextWrapped("Cloud saves run through Shibaberg, and it wasn't found where this game was patched from. "
+                "Patch the game again with Shibaberg (In-game overlay option on).");
+        } else if (cloud_account.empty()) {
+            ImGui::TextWrapped("Keep a copy of your saves in your own Google Drive. The game still saves here as usual; "
+                "the copy goes up when you quit, and the newest one comes back when you start the game - on any PC.");
+            ImGui::Spacing();
+            if (cloud_signing_in) {
+                ImGui::TextDisabled("Finish signing in in your browser (Alt+Tab), then come back.");
+            } else if (ImGui::Button("Sign in with Google")) {
+                cloud_signing_in = true;
+                const std::wstring args = shibaberg_cloud_args(settings->get_local_game_id().AppID());
+                shibaberg_cloud_run(cloud_exe, L"--cloud-signin", 0);
+                // this session wasn't being watched (not signed in at start): upload at exit from now on
+                shibaberg_cloud_run(cloud_exe, L"--cloud-watch " + args + L" " + std::to_wstring(GetCurrentProcessId()), 0);
+            }
+        } else {
+            ImGui::Text("Signed in as %s", cloud_account.c_str());
+            if (!cloud_status.empty()) ImGui::TextDisabled("%s", cloud_status.c_str());
+            ImGui::Spacing();
+            if (ImGui::Button("Back up now")) {
+                shibaberg_cloud_run(cloud_exe, L"--cloud-push " + shibaberg_cloud_args(settings->get_local_game_id().AppID()), 0);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Sign out")) {
+                shibaberg_cloud_run(cloud_exe, L"--cloud-signout", 0);
+            }
+            ImGui::Spacing();
+            ImGui::TextDisabled("Saves upload when you quit. Older backups: Shibaberg > Cloud saves.");
+        }
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::End();
+#endif
+}
+
 void Steam_Overlay::SetupOverlay()
 {
     if (settings->disable_overlay) return;
@@ -2477,6 +2856,8 @@ void Steam_Overlay::SetupOverlay()
 
     bool not_called_yet = false;
     if (setup_overlay_called.compare_exchange_weak(not_called_yet, true)) {
+        shibaberg_cloud_session_start();
+
         if (settings->overlay_hook_delay_sec > 0) {
             PRINT_DEBUG("waiting %i seconds", settings->overlay_hook_delay_sec);
             renderer_detector_delay_thread.start();

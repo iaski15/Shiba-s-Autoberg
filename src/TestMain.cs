@@ -312,6 +312,161 @@ static class TestMain
         }
         finally { try { Directory.Delete(packedWork, true); } catch { } }
 
+        Console.WriteLine("\n[achievements]");
+        {
+            // A schema in Steam's binary KeyValues layout (UserGameStatsSchema_<appid>.bin).
+            var kv = new List<byte>();
+            Action<string> z = s => { kv.AddRange(Encoding.UTF8.GetBytes(s)); kv.Add(0); };
+            Action<string> open = k => { kv.Add(0); z(k); };
+            Action<string, string> str = (k, v) => { kv.Add(1); z(k); z(v); };
+            Action<string, int> i32 = (k, v) => { kv.Add(2); z(k); kv.AddRange(BitConverter.GetBytes(v)); };
+            Action end = () => kv.Add(8);
+            open("480"); open("stats");
+            open("1"); i32("type", 4); open("bits");
+            open("0"); str("name", "ACH_WIN"); open("display");
+            open("name"); str("english", "First \"Win\""); str("german", "Erster Sieg"); str("token", "NEW_ACHIEVEMENT_1_0_NAME"); end();
+            open("desc"); str("english", "Win once"); end();
+            i32("hidden", 1); str("icon", "abc123.jpg"); str("icon_gray", "..\\evil.jpg");
+            end(); end();   // display, bit 0
+            end(); end();   // bits, stat 1
+            open("2"); i32("type", 1); str("name", "wins"); str("default", "3"); end();
+            open("3"); i32("type", 2); str("name", "dist"); end();
+            end(); end(); end();   // stats, app, root
+            var r = AchievementSchema.Build(kv.ToArray());
+            Func<string, bool> validJson = j =>
+            {
+                try { System.Xml.Linq.XDocument.Load(System.Runtime.Serialization.Json.JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(j), System.Xml.XmlDictionaryReaderQuotas.Max)); return true; }
+                catch { return false; }
+            };
+            string a = r.AchievementsJson;
+            Check(r.Achievements == 1 && r.Stats == 2 && validJson(a) && validJson(r.StatsJson),
+                  "schema → 1 achievement + 2 stats, both files valid JSON", a);
+            Check(a.Contains("\"name\": \"ACH_WIN\"") && a.Contains("First \\\"Win\\\"") && a.Contains("\"german\": \"Erster Sieg\"")
+                  && !a.Contains("token") && a.Contains("\"hidden\": \"1\"") && a.Contains("\"description\""),
+                  "names, all languages, hidden flag carried over; Valve tokens dropped", a);
+            Check(a.Contains("\"icon\": \"images/abc123.jpg\"") && !a.Contains("evil") && r.Icons.Count == 1,
+                  "icon file names that could escape the folder are refused", a);
+            Check(r.StatsJson.Contains("\"type\": \"int\"") && r.StatsJson.Contains("\"default\": \"3\"") && r.StatsJson.Contains("\"type\": \"float\""),
+                  "stat types and defaults mapped", r.StatsJson);
+
+            // Every schema the local Steam client has cached, when there is one: real-world coverage.
+            string any = null;
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+                    if (k != null && k.GetValue("SteamPath") is string sp) any = Path.Combine(sp.Replace('/', '\\'), "appcache", "stats");
+            }
+            catch { }
+            var cached = any != null && Directory.Exists(any) ? Directory.GetFiles(any, "UserGameStatsSchema_*.bin") : new string[0];
+            if (cached.Length == 0) Console.WriteLine("  (no local Steam schema cache – real-schema pass skipped)");
+            else
+            {
+                int ok = 0, empty = 0, total = 0;
+                var bad = new List<string>();
+                foreach (var f in cached)
+                {
+                    try
+                    {
+                        var res = AchievementSchema.Build(File.ReadAllBytes(f));
+                        if (res.Achievements == 0) empty++;
+                        else { total += res.Achievements; if (validJson(res.AchievementsJson) && validJson(res.StatsJson)) ok++; else bad.Add(Path.GetFileName(f)); }
+                    }
+                    catch (Exception ex) { bad.Add(Path.GetFileName(f) + ": " + ex.Message); }
+                }
+                Check(bad.Count == 0, string.Format("all {0} cached Steam schemas convert ({1} with {2} achievements, {3} without)", cached.Length, ok, total, empty),
+                      string.Join("; ", bad.Take(5)));
+            }
+        }
+
+        Console.WriteLine("\n[cloud saves]");
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            Check(SaveLocator.Tokenize(Path.Combine(SaveLocator.LocalLow, "Co", "Game")) == @"%LOCALLOW%\Co\Game"
+                  && SaveLocator.Tokenize(Path.Combine(appData, "GSE Saves", "480")) == @"%APPDATA%\GSE Saves\480"
+                  && SaveLocator.Expand(@"%LOCALLOW%\Co\Game") == Path.Combine(SaveLocator.LocalLow, "Co", "Game")
+                  && SaveLocator.Tokenize(@"D:\Games\X\saves") == @"D:\Games\X\saves",
+                  "save paths tokenise to %LOCALLOW%/%APPDATA% and expand back; other drives stay absolute", null);
+            Check(!SaveLocator.IsSafeRoot(appData) && !SaveLocator.IsSafeRoot(SaveLocator.LocalLow) && !SaveLocator.IsSafeRoot(@"C:\")
+                  && !SaveLocator.IsSafeRoot(@"D:\Games") && !SaveLocator.IsSafeRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
+                  && !SaveLocator.IsSafeRoot(@"%APPDATA%\x") && !SaveLocator.IsSafeRoot(Path.Combine(appData, "..", "x"))
+                  && SaveLocator.IsSafeRoot(Path.Combine(appData, "GSE Saves", "480")) && SaveLocator.IsSafeRoot(@"D:\Games\X\saves"),
+                  "restore only ever replaces a game's own folder, never a drive, profile or AppData root", null);
+
+            string cwork = Path.Combine(Path.GetTempPath(), "gp_selftest_cloud_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+            string tag = "ShibabergSelftest" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            string unitySaves = Path.Combine(SaveLocator.LocalLow, tag, "Game");
+            string unrealSaves = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), tag, "Saved", "SaveGames");
+            try
+            {
+                // detection: a Unity game (app.info) and an Unreal game (<Project>\Binaries beside Engine)
+                string unity = Directory.CreateDirectory(Path.Combine(cwork, "UnityGame", "Game_Data")).Parent.FullName;
+                File.WriteAllLines(Path.Combine(unity, "Game_Data", "app.info"), new[] { tag, "Game" });
+                string unreal = Path.Combine(cwork, "UnrealGame");
+                Directory.CreateDirectory(Path.Combine(unreal, "Engine"));
+                Directory.CreateDirectory(Path.Combine(unreal, tag, "Binaries", "Win64"));
+                Directory.CreateDirectory(unitySaves);
+                Directory.CreateDirectory(unrealSaves);
+                string extra = Directory.CreateDirectory(Path.Combine(cwork, "extra")).FullName;
+                var u = SaveLocator.Detect(unity, "4000000001", null);
+                var r = SaveLocator.Detect(SaveLocator.GameDir(Path.Combine(unreal, tag, "Binaries", "Win64")), "4000000001", new[] { extra, extra, appData });
+                Check(u.Count == 1 && u[0] == unitySaves && r.Count == 2 && r[0] == unrealSaves && r[1] == extra,
+                      "Unity LocalLow and Unreal SaveGames folders detected; extra folders deduped, unsafe ones dropped", string.Join(" ; ", u.Concat(r)));
+
+                // round trip: pack, change the saves, restore -> exactly the packed state, previous state kept aside
+                string a = Directory.CreateDirectory(Path.Combine(cwork, "saveA")).FullName;
+                Directory.CreateDirectory(Path.Combine(a, "slot1"));
+                File.WriteAllText(Path.Combine(a, "slot1", "save.dat"), "v1");
+                File.WriteAllText(Path.Combine(a, "settings.ini"), "x=1");
+                string zip = Path.Combine(cwork, "backup.zip"), safety = Path.Combine(cwork, "safety", "before.zip");
+                int packed = SaveArchive.Pack(new[] { a, unitySaves }, zip);
+                File.WriteAllText(Path.Combine(a, "slot1", "save.dat"), "v2");
+                File.WriteAllText(Path.Combine(a, "newer.dat"), "stray");
+                File.Delete(Path.Combine(a, "settings.ini"));
+                int restored = SaveArchive.Restore(zip, safety);
+                Check(packed == 2 && restored == 2 && File.ReadAllText(Path.Combine(a, "slot1", "save.dat")) == "v1"
+                      && File.ReadAllText(Path.Combine(a, "settings.ini")) == "x=1" && !File.Exists(Path.Combine(a, "newer.dat")),
+                      "restore puts back exactly the backed-up files (changed, deleted and stray files)", null);
+                bool safetyOk;
+                using (var sz = new System.IO.Compression.ZipArchive(File.OpenRead(safety), System.IO.Compression.ZipArchiveMode.Read))
+                    safetyOk = sz.Entries.Any(e => e.FullName == "0/newer.dat");
+                Check(safetyOk, "the saves a restore replaces are zipped aside first", safety);
+                string fp1 = CloudSaves.Fingerprint(new[] { a });
+                string fp2 = CloudSaves.Fingerprint(new[] { a });
+                File.WriteAllText(Path.Combine(a, "slot1", "save.dat"), "v3");
+                File.SetLastWriteTimeUtc(Path.Combine(a, "slot1", "save.dat"), DateTime.UtcNow.AddMinutes(5));
+                string fp3 = CloudSaves.Fingerprint(new[] { a });
+                Check(fp1.Length == 64 && fp1 == fp2 && fp3 != fp1 && CloudSaves.Fingerprint(new[] { Path.Combine(cwork, "missing") }) == "",
+                      "save fingerprint is stable, changes when a save is rewritten, empty without saves", null);
+                File.WriteAllText(Path.Combine(a, "slot1", "save.dat"), "v1");   // the hostile-backup checks below expect it
+
+                // hostile backups are refused before anything on disk changes
+                Func<string, string, bool> refused = (manifestRoot, entry) =>
+                {
+                    string bad = Path.Combine(cwork, "bad.zip");
+                    File.Delete(bad);
+                    using (var z = new System.IO.Compression.ZipArchive(File.Create(bad), System.IO.Compression.ZipArchiveMode.Create))
+                    {
+                        using (var w = new StreamWriter(z.CreateEntry("shibaberg-saves.txt").Open())) w.Write("shibaberg-saves 1\n0|" + manifestRoot + "\n");
+                        using (var w = new StreamWriter(z.CreateEntry(entry).Open())) w.Write("evil");
+                    }
+                    try { SaveArchive.Restore(bad, Path.Combine(cwork, "safety", "bad.zip")); return false; }
+                    catch (InvalidDataException) { return File.ReadAllText(Path.Combine(a, "slot1", "save.dat")) == "v1"; }
+                };
+                Check(refused(SaveLocator.Tokenize(a), "0/../escaped.txt") && !File.Exists(Path.Combine(cwork, "escaped.txt"))
+                      && refused(SaveLocator.Tokenize(a), "1/other.txt") && refused("%APPDATA%", "0/x.txt") && refused(@"C:\", "0/x.txt"),
+                      "backups escaping their folder or naming a broad folder are refused, nothing touched", null);
+            }
+            finally
+            {
+                foreach (var d in new[] { cwork, Path.Combine(SaveLocator.LocalLow, tag), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), tag) })
+                    try { Directory.Delete(d, true); } catch { }
+            }
+
+            var json = GoogleDrive.ParseJson("{\"files\":[{\"id\":\"a1\",\"name\":\"2026 - PC.zip\",\"size\":\"42\"}],\"error\":{\"message\":\"m\"}}");
+            Check(json.Element("files").Elements().First().Element("id").Value == "a1" && GoogleDrive.Js("a\"b\\c\n") == "\"a\\\"b\\\\c\\u000a\"",
+                  "Drive JSON parsing and escaping", json.ToString());
+        }
+
         Console.WriteLine("\n[install check]");
         string icWork = Path.Combine(Path.GetTempPath(), "gp_selftest_check_" + Guid.NewGuid().ToString("N").Substring(0, 6));
         try
@@ -327,6 +482,15 @@ static class TestMain
             Check(buildTxt.Contains("x86/steam_api.dll: " + SafePersistence.Hash(gse86))
                   && buildTxt.Contains("x64/steam_api64.dll: " + SafePersistence.Hash(gse64)),
                   "shibaberg\\bin\\BUILD.txt hashes match the bundled dlls", null);
+            string ov64 = Path.Combine(root, @"shibaberg\bin\overlay\x64\steam_api64.dll");
+            string ov86 = Path.Combine(root, @"shibaberg\bin\overlay\x86\steam_api.dll");
+            string ovTxt = File.ReadAllText(Path.Combine(root, @"shibaberg\bin\overlay\BUILD.txt"));
+            Check(ovTxt.Contains("x86/steam_api.dll: " + SafePersistence.Hash(ov86))
+                  && ovTxt.Contains("x64/steam_api64.dll: " + SafePersistence.Hash(ov64))
+                  && new[] { ov64, ov86 }.All(p => InstallCheck.IsEmulatorDll(p) && InstallCheck.IndexOf(File.ReadAllBytes(p), marker) >= 0),
+                  "overlay dlls are Shibaberg builds matching shibaberg\\bin\\overlay\\BUILD.txt", null);
+            Check(new[] { ov64, ov86 }.All(p => InstallCheck.IndexOf(File.ReadAllBytes(p), Encoding.ASCII.GetBytes("Achievement unlocked")) >= 0),
+                  "overlay dlls carry the shiba achievement toast", null);
             Func<string, string, List<InstallCheckItem>> setup = (name, dll) =>
             {
                 string d = Directory.CreateDirectory(Path.Combine(icWork, name)).FullName;

@@ -361,8 +361,11 @@ local function cmake_build(dep_folder, is_32, extra_cmd_defs, c_flags_init, cxx_
         toolchain_file_content = toolchain_file_content .. 'set(CMAKE_CXX_FLAGS_INIT "' .. cxxflags_init_str .. '" )\n'
     end
     if string.match(_ACTION, 'vs.+') then -- because libssq doesn't care about CMAKE_C/XX_FLAGS_INIT
-        toolchain_file_content = toolchain_file_content .. 'set(CMAKE_C_FLAGS_RELEASE  "${CMAKE_C_FLAGS_RELEASE} /MT /D_MT" ) \n'
-        toolchain_file_content = toolchain_file_content .. 'set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT /D_MT" ) \n'
+        -- Shibaberg: spelled out in full. CMAKE_<LANG>_FLAGS_RELEASE is still empty while the toolchain file
+        -- runs, so appending to it dropped MSVC's release defaults: every dependency was built unoptimized
+        -- and without NDEBUG, which left ImGui's asserts live in the overlay (a crash dialog in game).
+        toolchain_file_content = toolchain_file_content .. 'set(CMAKE_C_FLAGS_RELEASE  "/O2 /Ob2 /DNDEBUG /MT /D_MT" ) \n'
+        toolchain_file_content = toolchain_file_content .. 'set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /MT /D_MT" ) \n'
     end
     
     if #toolchain_file_content > 0 then

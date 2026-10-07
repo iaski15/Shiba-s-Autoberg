@@ -165,20 +165,22 @@ struct Overlay_Appearance {
     bool locked_expanded = false;
     bool show_playtime_in_user_info = false;
     
-    float background_r = 0.12f;
-    float background_g = 0.11f;
-    float background_b = 0.11f;
-    float background_a = 0.55f;
+    // Shibaberg: -1 = use the Shibaberg overlay theme (set in steam_overlay.cpp); values from
+    // configs.overlay.ini still win. Upstream's grey-blue defaults used to override any theme.
+    float background_r = -1.0f;
+    float background_g = -1.0f;
+    float background_b = -1.0f;
+    float background_a = -1.0f;
 
-    float element_r = 0.30f;
-    float element_g = 0.32f;
-    float element_b = 0.40f;
-    float element_a = 1.0f;
+    float element_r = -1.0f;
+    float element_g = -1.0f;
+    float element_b = -1.0f;
+    float element_a = -1.0f;
 
-    float element_hovered_r = 0.278f;
-    float element_hovered_g = 0.393f;
-    float element_hovered_b = 0.602f;
-    float element_hovered_a = 1.0f;
+    float element_hovered_r = -1.0f;
+    float element_hovered_g = -1.0f;
+    float element_hovered_b = -1.0f;
+    float element_hovered_a = -1.0f;
 
     float element_active_r = -1.0f;
     float element_active_g = -1.0f;

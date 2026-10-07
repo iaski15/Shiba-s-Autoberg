@@ -142,6 +142,12 @@ class Steam_Overlay
     bool show_user_info = false;
     bool show_achievements = false;
     bool show_settings = false;
+    // Shibaberg cloud saves (Shibaberg.exe --cloud-*; see steam_overlay.cpp)
+    bool show_cloud = false;
+    bool cloud_signing_in = false;
+    std::wstring cloud_exe{};
+    std::string cloud_account{}, cloud_status{};
+    std::chrono::steady_clock::time_point cloud_refreshed{};
 
     // warn when using local save
     bool warn_local_save = false;
@@ -356,6 +362,8 @@ class Steam_Overlay
     // factor controlling the amount of sliding during the animation, 0 means disabled
     float animate_factor(std::chrono::milliseconds elapsed, std::chrono::milliseconds duration);
     void add_ach_progressbar(const Overlay_Achievement &ach);
+    // Shibaberg: Xbox One style "achievement unlocked" toast with the shiba badge
+    void draw_shiba_toast(const Notification &noti, float elapsed_ms, float total_ms, float scrn_width, float scrn_height, struct NotificationsCoords &coords);
     ImVec4 get_notification_bg_rgba_safe();
     void build_notifications(float width, float height);
     
@@ -387,6 +395,8 @@ class Steam_Overlay
     void load_next_ach_icon();
     uint32 apply_global_style_color();
     void render_main_window();
+    void shibaberg_cloud_session_start();
+    void render_cloud_window();
 
 
     void steam_run_callback_update_my_lobby();

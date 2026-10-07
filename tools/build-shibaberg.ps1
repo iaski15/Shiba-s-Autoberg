@@ -2,7 +2,11 @@ param(
     # Short path on purpose: the dependency builds nest deep enough to hit MAX_PATH.
     [string]$Work = "$env:SystemDrive\shibaberg-build",
     # Build into $Work only; don't replace shibaberg\bin\*.
-    [switch]$NoInstall
+    [switch]$NoInstall,
+    # regular = the plain emulator (shibaberg\bin\x86|x64); experimental = the in-game overlay build with the
+    # shiba achievement toast (shibaberg\bin\overlay\x86|x64). Each keeps its own BUILD.txt.
+    [ValidateSet('regular', 'experimental')]
+    [string]$Variant = 'regular'
 )
 # Builds the two dlls the patcher ships (shibaberg\bin\x86\steam_api.dll, x64\steam_api64.dll) from
 # shibaberg\ with the same commands gbe_fork's own CI uses, then writes shibaberg\bin\BUILD.txt.
@@ -62,23 +66,24 @@ try {
     $msbuild = Join-Path (& $vswhere '-products' '*' '-requires' 'Microsoft.Component.MSBuild' '-prerelease' '-latest' '-nologo' '-property' installationPath) 'MSBuild\Current\Bin\MSBuild.exe'
     Run $premake '--file=premake5.lua' '--genproto' "--emubuild=shibaberg-$commit" '--dosstub' '--winrsrc' '--winsign' '--os=windows' vs2026
     foreach ($platform in 'Win32', 'x64') {
-        Run $msbuild /nologo /m:1 "-p:CL_MPCount=$([Environment]::ProcessorCount)" /v:m "/p:Configuration=release,Platform=$platform" /target:api_regular 'build\project\vs2026\win\gbe.slnx'
+        Run $msbuild /nologo /m:1 "-p:CL_MPCount=$([Environment]::ProcessorCount)" /v:m "/p:Configuration=release,Platform=$platform" /target:api_$Variant 'build\project\vs2026\win\gbe.slnx'
     }
 } finally { Pop-Location }
 
-$out = Join-Path $Work 'build\win\vs2026\release\regular'
+$out = Join-Path $Work "build\win\vs2026\release\$Variant"
 $built = @{ 'x86\steam_api.dll' = (Join-Path $out 'x86\steam_api.dll'); 'x64\steam_api64.dll' = (Join-Path $out 'x64\steam_api64.dll') }
 foreach ($f in $built.Values) { if (-not (Test-Path -LiteralPath $f)) { throw "build output missing: $f" } }
 if ($NoInstall) { "built in $out"; return }
 
-$dest = Join-Path $src 'bin'
+$dest = if ($Variant -eq 'regular') { Join-Path $src 'bin' } else { Join-Path $src 'bin\overlay' }
 $lines = @(
-    'Shibaberg (fork of gbe_fork) - built by tools\build-shibaberg.ps1',
+    "Shibaberg (fork of gbe_fork) - $Variant build by tools\build-shibaberg.ps1",
     "upstream commit: $commit",
     "msbuild: $((& $msbuild '-nologo' '-version' | Select-Object -Last 1))",
     "built: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC"
 )
 foreach ($k in $built.Keys | Sort-Object) {
+    New-Item -ItemType Directory -Force (Split-Path (Join-Path $dest $k)) | Out-Null
     Copy-Item -LiteralPath $built[$k] -Destination (Join-Path $dest $k) -Force
     $lines += "sha256 $($k.Replace('\', '/')): $((Get-FileHash -LiteralPath (Join-Path $dest $k) -Algorithm SHA256).Hash.ToLowerInvariant())"
 }
