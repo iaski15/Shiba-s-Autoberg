@@ -19,7 +19,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 ## Quick start
 
-1. Download `Goldberg-Patcher-<version>.exe` from the [Releases](https://github.com/iaski15/Shiba-s-Autoberg/releases) page and run it (Windows 10/11, x64 or x86) – or build it yourself, see below
+1. Download `Shibaberg-Setup-<version>.exe` from the [Releases](https://github.com/iaski15/Shiba-s-Autoberg/releases) page and run it (Windows 10/11): it installs to `%LOCALAPPDATA%\Programs\Shibaberg` (no admin) and adds **Shibaberg** to the Start menu; uninstall from Settings › Apps. Silent: `Shibaberg-Setup-<version>.exe --install`. Or build it yourself, see below
 2. Drag & drop your game `.exe` onto the window (or click it to browse)
 3. Enter the Steam AppID — found on [steamdb.info](https://steamdb.info/) under *App ID* (the app tries to detect/cache it for you)
 4. Adjust the options if needed, then click **Patch Game**
@@ -73,6 +73,7 @@ Requirements: Windows and Visual Studio Build Tools with the Roslyn C# compiler 
 ```powershell
 .\build.ps1          # build
 .\build.ps1 -Verify  # build, then run the self-test
+.\build.ps1 -Package # also dist\Shibaberg-Setup-<version>.exe (the installer) and a zip
 ```
 
 The script compiles two binaries:

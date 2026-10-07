@@ -97,7 +97,7 @@ if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe no
 # ---- version ----
 # One place to bump it. The assembly attribute is what the UI renders, so the number on
 # screen cannot drift from the build that produced it.
-$version = '0.5'
+$version = '0.6'
 # Google sign-in for cloud saves: the OAuth "Desktop app" client from google_client.json (the file Google
 # Cloud Console downloads; gitignored). Google treats an installed app's secret as public, but it stays out
 # of the repo anyway. Without the file the build still works and cloud saves say sign-in isn't set up.
@@ -219,7 +219,7 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$src\Cloud.cs`"", "`"$src\CloudForm.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
+    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$src\Cloud.cs`"", "`"$src\CloudForm.cs`"", "`"$src\Installer.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
@@ -251,6 +251,12 @@ if ($Package) {
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -Path $stage -DestinationPath $zip
     Write-Host ("package: {0}  ({1:N1} MB)" -f $zip, ((Get-Item -LiteralPath $zip).Length / 1MB))
+
+    # The installer is the same exe under a Setup name: Installer.cs sees the name and installs itself
+    # (per user, %LOCALAPPDATA%\Programs\Shibaberg + Start menu shortcut + Installed apps entry).
+    $setup = Join-Path $dist "Shibaberg-Setup-$version.exe"
+    Copy-Item -LiteralPath (Join-Path $root 'Shibaberg.exe') -Destination $setup -Force
+    Write-Host ("setup:   {0}  ({1:N1} MB)" -f $setup, ((Get-Item -LiteralPath $setup).Length / 1MB))
 }
 
 Write-Host "`nDone."

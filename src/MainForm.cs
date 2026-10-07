@@ -155,6 +155,26 @@ namespace Gp
             catch { try { SetProcessDPIAware(); } catch { } }
             Ui.InitializeScale();
 
+            // Installed copy's uninstall entry, and the setup exe (this same exe, named Shibaberg-Setup-*.exe).
+            if (args != null && args.Length == 1 && string.Equals(args[0], "--uninstall", StringComparison.OrdinalIgnoreCase))
+            {
+                Installer.Uninstall();
+                return;
+            }
+            if (args != null && args.Length == 1 && string.Equals(args[0], "--install", StringComparison.OrdinalIgnoreCase))
+            {
+                // silent install (scripts): same as the setup window's button, without launching the app
+                AttachParentConsole();
+                try { Installer.Install(); Console.WriteLine("Installed to " + Installer.InstalledExe); }
+                catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+                return;
+            }
+            if (Installer.IsSetupExe)
+            {
+                Installer.RunSetup();
+                return;
+            }
+
             // Any of the CLI modes may be run from a shell that gave this process no console.
             if (args != null && args.Length > 0)
             {
