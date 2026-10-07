@@ -378,6 +378,39 @@ static class TestMain
             }
         }
 
+        Console.WriteLine("\n[backup folder]");
+        {
+            string bw = Path.Combine(Path.GetTempPath(), "gp_selftest_bak_" + Guid.NewGuid().ToString("N").Substring(0, 6));
+            try
+            {
+                // an install patched by an older release: original kept in goldberg_backup
+                string inst = Directory.CreateDirectory(Path.Combine(bw, "game")).FullName;
+                string legacyFile = Path.Combine(inst, "goldberg_backup", "sources", "abc", "steam_api.dll");
+                Directory.CreateDirectory(Path.GetDirectoryName(legacyFile));
+                File.WriteAllText(legacyFile, "orig");
+                File.WriteAllText(Path.Combine(inst, "steam_api.dll"), "emu");
+                Check(OriginalBackups.Existing(inst) == Path.Combine(inst, "goldberg_backup") && Directory.Exists(Path.Combine(inst, "goldberg_backup")),
+                      "the old folder is found read-only, without renaming it", null);
+                Check(OriginalBackups.PatchedBefore(new[] { Path.Combine(inst, "steam_api.dll") }) != null
+                      && OriginalBackups.PatchedBefore(new[] { Path.Combine(bw, "steam_api.dll") }) == null,
+                      "a game is recognised as patched before when a backup folder sits beside its dll", null);
+                string moved = OriginalBackups.Dir(inst);
+                Check(moved == Path.Combine(inst, "shibaberg_backup") && !Directory.Exists(Path.Combine(inst, "goldberg_backup"))
+                      && File.ReadAllText(Path.Combine(moved, "sources", "abc", "steam_api.dll")) == "orig",
+                      "writing renames goldberg_backup to shibaberg_backup with its contents", null);
+                Check(OriginalBackups.Renamed(legacyFile) == Path.Combine(moved, "sources", "abc", "steam_api.dll")
+                      && OriginalBackups.Renamed(Path.Combine(bw, "x.dll")) == Path.Combine(bw, "x.dll"),
+                      "undo records pointing into goldberg_backup find the file under its new name", null);
+                Directory.CreateDirectory(Path.Combine(inst, "goldberg_backup"));
+                Check(OriginalBackups.Dir(inst) == moved && Directory.Exists(Path.Combine(inst, "goldberg_backup")),
+                      "with both folders present the new one is used and the old one is left alone", null);
+                Check(OriginalBackups.IsBackupFolder(Path.Combine(inst, "goldberg_backup"), inst) && OriginalBackups.IsBackupFolder(moved, inst)
+                      && !OriginalBackups.IsBackupFolder(Path.Combine(inst, "other"), inst),
+                      "both folder names count as the install's backup folder", null);
+            }
+            finally { try { Directory.Delete(bw, true); } catch { } }
+        }
+
         Console.WriteLine("\n[cloud saves]");
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -798,7 +831,7 @@ static class TestMain
             Check(!newDll.SequenceEqual(origDllBytes), "existing steam_api.dll was replaced");
             Check(newDll.SequenceEqual(goldberg86), "replaced dll matches bundled goldberg x86");
 
-            var bakDir = Path.Combine(gameDir, "goldberg_backup");
+            var bakDir = Path.Combine(gameDir, OriginalBackups.FolderName);
             var bakCandidates = Directory.GetFiles(Path.Combine(bakDir, "sources"), "steam_api.dll", SearchOption.AllDirectories);
             Check(bakCandidates.Length == 1 &&
                   File.ReadAllBytes(bakCandidates[0]).SequenceEqual(origDllBytes),
@@ -929,6 +962,8 @@ static class TestMain
             Check(res3.Success, "online-fix re-patch succeeded", res3.Summary);
             Check(File.ReadAllBytes(Path.Combine(gameDir3, "steam_api64.dll")).SequenceEqual(origBytes),
                   "Goldberg emulator dll replaced by original from goldberg_backup");
+            Check(Directory.Exists(Path.Combine(gameDir3, OriginalBackups.FolderName)) && !Directory.Exists(Path.Combine(gameDir3, OriginalBackups.LegacyFolderName)),
+                  "an older version's goldberg_backup is renamed to shibaberg_backup on the next patch", null);
             Check(File.Exists(Path.Combine(gameDir3, "steam_appid.txt")) &&
                   File.ReadAllText(Path.Combine(gameDir3, "steam_appid.txt")).Trim() == "480",
                   "online-fix writes steam_appid.txt=480 even with appid writing toggled off");

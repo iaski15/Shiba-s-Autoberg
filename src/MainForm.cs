@@ -962,8 +962,18 @@ namespace Gp
         async Task ScanSelectionAsync(int gen, string dir, string archChip, string sizeChip, CancellationTokenSource source)
         {
             var apis = new List<string>();
+            DateTime? patchedBefore = null;
             string searchRoot = PatchRunner.SearchRoot(zone.GamePath);
-            try { apis = await Task.Run(() => PatchRunner.FindSteamApiFiles(searchRoot, source.Token), source.Token); }
+            try
+            {
+                apis = await Task.Run(() =>
+                {
+                    var found = PatchRunner.FindSteamApiFiles(searchRoot, source.Token);
+                    // a backup folder beside a Steamworks dll = Shibaberg (or the old Goldberg Patcher) was here
+                    try { patchedBefore = OriginalBackups.PatchedBefore(found); } catch { }
+                    return found;
+                }, source.Token);
+            }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { if (!closing && gen == selectGeneration) Log(LogLevel.Warn, ex.Message); }
             finally
@@ -971,7 +981,13 @@ namespace Gp
                 if (selectionCts == source) selectionCts = null;
                 source.Dispose();
             }
-            if (!closing && !IsDisposed && gen == selectGeneration) ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
+            if (!closing && !IsDisposed && gen == selectGeneration)
+            {
+                ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
+                if (patchedBefore != null)
+                    Log(LogLevel.Info, "Already patched before (last on " + patchedBefore.Value.ToString("yyyy-MM-dd HH:mm") + ") – the originals are kept in its "
+                        + OriginalBackups.FolderName + "\\ folder. Patching again updates the install and keeps those originals.");
+            }
         }
 
         void CancelSelectionWork()

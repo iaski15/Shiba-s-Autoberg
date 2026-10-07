@@ -319,7 +319,7 @@ namespace Gp
         public string StagedHash = "";
 
         /// <summary>True when <see cref="RecoveryPath"/> is a pre-existing verified backup (the
-        /// goldberg_backup copy) rather than a copy taken inside the staging area. Such a path lives
+        /// shibaberg_backup copy) rather than a copy taken inside the staging area. Such a path lives
         /// outside the staging area and must never be garbage-collected as part of it.</summary>
         public bool ExternalRecovery;
 
@@ -441,7 +441,7 @@ namespace Gp
         }
 
         /// <param name="externalRecovery">Path to an already-verified copy of the current destination
-        /// content (the goldberg_backup original). When supplied, no second copy is taken inside the
+        /// content (the shibaberg_backup original). When supplied, no second copy is taken inside the
         /// staging area – the caller has already paid for one – and rollback restores from there.</param>
         /// <param name="expectedStagedHash">When set, the bytes written must hash to exactly this, or the write
         /// is abandoned before anything is replaced. Checked against the hash taken while writing, so it costs
@@ -457,7 +457,7 @@ namespace Gp
             return Locked(path, () =>
             {
                 string parent = Path.GetDirectoryName(path);
-                // 12 hex digits, not 32: these areas nest inside goldberg_backup under Unreal's already deep
+                // 12 hex digits, not 32: these areas nest inside shibaberg_backup under Unreal's already deep
                 // Engine\Binaries\ThirdParty\Steamworks\...\Win64 folders, and the full GUID pushed staging
                 // paths past the 260-character MAX_PATH limit.
                 string area = Path.Combine(parent, ".gp-recovery", Guid.NewGuid().ToString("N").Substring(0, 12));
@@ -557,6 +557,74 @@ namespace Gp
 
     public static class OriginalBackups
     {
+        /// <summary>Folder beside the replaced dll that holds the originals.</summary>
+        public const string FolderName = "shibaberg_backup";
+        /// <summary>The name releases up to 0.6 used. Still read everywhere; renamed on the next patch.</summary>
+        public const string LegacyFolderName = "goldberg_backup";
+
+        /// <summary>The backup folder to write into for an install folder. A goldberg_backup left by an older
+        /// release is renamed to shibaberg_backup first (one move on the same volume); if the rename fails (a
+        /// file open in it) the old folder is simply used as it is.</summary>
+        public static string Dir(string installDir)
+        {
+            string dir = Path.Combine(installDir, FolderName), legacy = Path.Combine(installDir, LegacyFolderName);
+            if (Directory.Exists(legacy) && !Directory.Exists(dir))
+            {
+                try { Directory.Move(legacy, dir); }
+                catch (IOException) { return legacy; }
+                catch (UnauthorizedAccessException) { return legacy; }
+            }
+            return dir;
+        }
+
+        /// <summary>The existing backup folder under either name, without changing anything; null when none.</summary>
+        public static string Existing(string installDir)
+        {
+            foreach (var name in new[] { FolderName, LegacyFolderName })
+            {
+                string d = Path.Combine(installDir, name);
+                if (Directory.Exists(d)) return d;
+            }
+            return null;
+        }
+
+        public static bool IsBackupFolder(string root, string sourceDir)
+        {
+            string name = Path.GetFileName(Path.GetFullPath(root).TrimEnd('\\'));
+            return (string.Equals(name, FolderName, StringComparison.OrdinalIgnoreCase) || string.Equals(name, LegacyFolderName, StringComparison.OrdinalIgnoreCase))
+                && string.Equals(Path.GetDirectoryName(Path.GetFullPath(root).TrimEnd('\\')), Path.GetFullPath(sourceDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>An undo record written before the rename points into goldberg_backup; the same file now
+        /// lives under shibaberg_backup. Returns the path unchanged when there's nothing better.</summary>
+        public static string Renamed(string path)
+        {
+            string marker = "\\" + LegacyFolderName + "\\";
+            int i = string.IsNullOrEmpty(path) ? -1 : path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return path;
+            string moved = path.Substring(0, i) + "\\" + FolderName + "\\" + path.Substring(i + marker.Length);
+            return File.Exists(moved) ? moved : path;
+        }
+
+        /// <summary>When a game was last patched by Shibaberg: the newest backup folder next to any of its
+        /// Steamworks dlls (either name). Null for a game never patched with backups on.</summary>
+        public static DateTime? PatchedBefore(IEnumerable<string> steamApiFiles)
+        {
+            DateTime? newest = null;
+            foreach (var dll in steamApiFiles)
+            {
+                string d = Existing(Path.GetDirectoryName(dll));
+                if (d == null) continue;
+                var t = Directory.GetLastWriteTime(d);
+                foreach (var f in Directory.GetFiles(d, "*", SearchOption.AllDirectories))
+                {
+                    var ft = File.GetLastWriteTime(f);
+                    if (ft > t) t = ft;
+                }
+                if (newest == null || t > newest) newest = t;
+            }
+            return newest;
+        }
         /// <summary>Where the backup of <paramref name="source"/> is kept. The folder is the first 16 hex digits
         /// of the path hash - ample to keep the handful of files in one backup root apart, and 48 characters
         /// shorter than the full hash, which put staging paths under Unreal games past MAX_PATH.</summary>
@@ -641,7 +709,7 @@ namespace Gp
                 }
             }
             string legacy = Path.Combine(root, Path.GetFileName(source));
-            if (string.Equals(Path.GetFullPath(root), Path.Combine(Path.GetDirectoryName(Path.GetFullPath(source)), "goldberg_backup"), StringComparison.OrdinalIgnoreCase)
+            if (IsBackupFolder(root, Path.GetDirectoryName(Path.GetFullPath(source)))
                 && Eligible(legacy))
             {
                 hash = SafePersistence.Hash(legacy);
@@ -675,7 +743,7 @@ namespace Gp
                 if (hash == null && existing == null) hash = knownSourceHash;
                 // These two writes are the backup itself, so they need no undo record of their own –
                 // and they are not part of any run's journal, so nothing else would ever collect their
-                // staging areas. Drop them here or goldberg_backup accumulates .gp-recovery litter.
+                // staging areas. Drop them here or shibaberg_backup accumulates .gp-recovery litter.
                 // Copy verifies the bytes it wrote against 'hash' (or hashes the source first when no hash
                 // is known); either way a source that changes mid-copy is rejected.
                 FileWriteRecord backupWrite;
@@ -955,6 +1023,7 @@ namespace Gp
                         continue;
                     }
 
+                    if (!File.Exists(e.RecoveryPath)) e.RecoveryPath = OriginalBackups.Renamed(e.RecoveryPath);
                     if (!File.Exists(e.RecoveryPath))
                     {
                         report.Failed++;
@@ -1817,7 +1886,7 @@ namespace Gp
     }
 
     /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
-    /// <summary>Preserves <paramref name="source"/> in goldberg_backup. <paramref name="knownSourceHash"/>
+    /// <summary>Preserves <paramref name="source"/> in shibaberg_backup. <paramref name="knownSourceHash"/>
     /// spares a re-read when the caller already hashed the source; <paramref name="backupHash"/> returns the
     /// backup's hash for the same reason. Returns null when backups are off or the file is not eligible.</summary>
     public delegate string BackupTaker(string source, string knownSourceHash, out string backupHash);
@@ -1909,7 +1978,10 @@ namespace Gp
                 if (settingsPlan.Status == SettingsStatus.Missing) Log(LogLevel.Warn, settingsPlan.Error);
 
                 // ---- backup dir ----------------------------------------------
-                string backupDir = Path.Combine(installDir, "goldberg_backup");
+                bool legacyBackup = Directory.Exists(Path.Combine(installDir, OriginalBackups.LegacyFolderName));
+                string backupDir = OriginalBackups.Dir(installDir);
+                if (legacyBackup && Path.GetFileName(backupDir) == OriginalBackups.FolderName)
+                    Log(LogLevel.Dim, "Renamed " + OriginalBackups.LegacyFolderName + "\\ (from an older version) to " + OriginalBackups.FolderName + "\\.");
                 bool anyBackup = false;
                 BackupTaker backup = (string src, string known, out string backupHash) =>
                 {
@@ -2199,7 +2271,7 @@ namespace Gp
                 try
                 {
                     string candidate = OriginalBackups.Find(
-                        Path.Combine(Path.GetDirectoryName(target), "goldberg_backup"), target);
+                        OriginalBackups.Existing(Path.GetDirectoryName(target)) ?? Path.Combine(Path.GetDirectoryName(target), OriginalBackups.FolderName), target);
                     if (File.Exists(candidate) && !InstallCheck.IsEmulatorDll(candidate)) original = candidate;
                 }
                 catch { }
@@ -2233,12 +2305,12 @@ namespace Gp
         /// with steam_appid.txt = 480, the process attaches to the running Steam client as Spacewar and
         /// matchmaking/networking is routed through Valve's servers.
         /// The live dll is NEVER modified unless it is provably one of our bundled Goldberg emulator
-        /// builds (byte-identical) – in that case the original from goldberg_backup must be restored,
+        /// builds (byte-identical) – in that case the original from shibaberg_backup must be restored,
         /// because the emulator cannot attach to a real Steam client. Any other dll (original or an
         /// updated Steamworks version) is left exactly as-is; only steam_appid.txt is written.</summary>
         private void PrepareOnlineFixMode(string installDir, PatchResult res)
         {
-            string backupDir = Path.Combine(installDir, "goldberg_backup");
+            string backupDir = OriginalBackups.Dir(installDir);
 
             bool anyApi = false;
             foreach (var n in new[] { "steam_api.dll", "steam_api64.dll" })
@@ -2251,7 +2323,7 @@ namespace Gp
                 {
                     // live dll is a Goldberg emulator build – online-fix cannot work with it in place
                     OriginalBackups.Restore(backupDir, cur, res.Writes, Log);
-                    Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from goldberg_backup\\ (required for online-fix).");
+                    Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from " + Path.GetFileName(backupDir) + "\\ (required for online-fix).");
                     res.ReplacedFiles.Add(n);
                 }
                 else
@@ -2259,7 +2331,7 @@ namespace Gp
                     // not one of our builds: leave it alone, whatever it is
                     string bak = Path.Combine(backupDir, n);
                     if (File.Exists(bak) && !FilesEqual(bak, cur))
-                        Log(LogLevel.Warn, "goldberg_backup\\" + n + " differs from the live dll and the live dll is not a known Goldberg build – leaving it in place.");
+                        Log(LogLevel.Warn, Path.GetFileName(backupDir) + "\\" + n + " differs from the live dll and the live dll is not a known Goldberg build – leaving it in place.");
                     Log(LogLevel.Dim, "Original " + n + " kept in place – required for Steam detection & server routing.");
                 }
             }
@@ -2361,7 +2433,7 @@ namespace Gp
                     string probe = otherPath;
                     if (LooksLikeBundledGoldberg(probe))
                     {
-                        string original = OriginalBackups.Find(Path.Combine(installDir, "goldberg_backup"), probe);
+                        string original = OriginalBackups.Find(OriginalBackups.Existing(installDir) ?? Path.Combine(installDir, OriginalBackups.FolderName), probe);
                         // No original: the emulator dll's own header still names its architecture.
                         probe = File.Exists(original) ? original : otherPath;
                     }
@@ -2593,7 +2665,7 @@ namespace Gp
         // dirs that never contain a steam_api dll – pruned from deep scans for speed
         internal static readonly HashSet<string> SkipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "goldberg_backup", "$recycle.bin", "system volume information", "__macosx",
+            "shibaberg_backup", "goldberg_backup", "$recycle.bin", "system volume information", "__macosx",
             "_commonredist", "redist", "_redist", "__redist", "directx", "dxsetup", "vcredist",
             "physx", "dotnet", ".git", ".svn", "installers", "__installer",
         };

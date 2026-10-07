@@ -66,13 +66,13 @@ $installed = Join-Path $game 'steam_api.dll'
 $installedOk = (Test-Path -LiteralPath $installed) -and ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $originalHash)
 Test-Artifact 'steam_api.dll replaced by the emulator dll' $installedOk 'dll unchanged'
 
-$backupDir = Join-Path $game 'goldberg_backup'
+$backupDir = Join-Path $game 'shibaberg_backup'
 $backupFiles = @(Get-ChildItem -LiteralPath $backupDir -Recurse -File -Filter 'steam_api.dll' -ErrorAction SilentlyContinue)
 $backupOk = (Test-Path -LiteralPath $backupDir) -and ($backupFiles.Count -eq 1) -and ((Get-FileHash -LiteralPath $backupFiles[0].FullName -Algorithm SHA256).Hash -eq $originalHash)
-Test-Artifact 'original dll preserved, hash-verified, in goldberg_backup' $backupOk ("files: " + $backupFiles.Count)
+Test-Artifact 'original dll preserved, hash-verified, in shibaberg_backup' $backupOk ("files: " + $backupFiles.Count)
 
 $stray = @(Get-ChildItem -LiteralPath $backupDir -Recurse -Directory -Filter '.gp-recovery' -ErrorAction SilentlyContinue)
-Test-Artifact 'no .gp-recovery litter inside goldberg_backup' ((Test-Path -LiteralPath $backupDir) -and ($stray.Count -eq 0)) ("backup dir: " + (Test-Path -LiteralPath $backupDir) + ", stray: " + $stray.Count)
+Test-Artifact 'no .gp-recovery litter inside shibaberg_backup' ((Test-Path -LiteralPath $backupDir) -and ($stray.Count -eq 0)) ("backup dir: " + (Test-Path -LiteralPath $backupDir) + ", stray: " + $stray.Count)
 
 # The journal must have been rewritten by *this* run, not left over from an earlier one.
 $journalOk = (Test-Path -LiteralPath $journal) -and ((Get-Item -LiteralPath $journal).LastWriteTimeUtc -gt $journalBefore) `

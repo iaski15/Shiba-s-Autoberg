@@ -8,7 +8,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 
 - **Automatic game analysis** — detects x86/x64 (including .NET AnyCPU executables) from PE headers, and reads the executable's import table to install the emulator under the exact name the loader will ask for
 - **DRM unpacking** — removes SteamStub DRM (every variant Steamless handles, 1.0 to 3.1) with **Shibaless**, our fork of [Steamless](https://github.com/atom0s/Steamless), compiled into the app and run in-process: no helper process, no temporary `.unpacked.exe`, and the result is validated before it replaces the game exe
-- **Backup & restore** — originals are saved to `<game>\goldberg_backup\sources\<pathhash>\`; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from that backup tree
+- **Backup & restore** — originals are saved to `<game>\shibaberg_backup\sources\<pathhash>\` (installs from older versions used `goldberg_backup`, which is still read and renamed on the next patch); picking a game that has one tells you it was patched before; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from that backup tree
 - **Interface generation** — scans the *original* dll for its interface versions (what GSE's `generate_interfaces` does, in-process) so the emulator responds to exactly the interfaces the game requests
 - **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
@@ -27,7 +27,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 | Option | Default | What it does |
 | --- | --- | --- |
 | Unpack DRM (Shibaless) | on | Removes SteamStub DRM from the exe (skipped instantly when it has no `.bind` section) |
-| Backup originals | on | Copies replaced files to `goldberg_backup\sources\` before overwriting |
+| Backup originals | on | Copies replaced files to `shibaberg_backup\sources\` before overwriting |
 | Write steam_appid.txt | on | Writes the AppID next to the dlls and beside the game exe |
 | Create steam_settings folder | off | Creates a settings folder from GSE's examples, ready for custom configs |
 | Auto-detect Steam AppID online | on | Looks the game up on the Steam Store when no local AppID is found |
@@ -43,7 +43,7 @@ After patching, launch the game normally. If it does not work out of the box, re
 For games that need to talk to a real Steam backend (some multiplayer titles), enable **Online fix**. The patcher:
 
 1. Writes `steam_appid.txt` with AppID `480` (Spacewar) — the only file it changes by default
-2. Keeps your genuine `steam_api(64).dll` in place; a live dll is never replaced or downgraded unless it is byte-identical to one of the bundled Goldberg emulator builds, in which case the original from `goldberg_backup\sources\` is restored (the emulator cannot attach to a real Steam client)
+2. Keeps your genuine `steam_api(64).dll` in place; a live dll is never replaced or downgraded unless it is byte-identical to one of the bundled Goldberg emulator builds, in which case the original from `shibaberg_backup\sources\` is restored (the emulator cannot attach to a real Steam client)
 3. Creates the `steam_settings` scaffold folder
 
 The game then attaches to your real Steam account as Spacewar and all traffic is routed through Valve's servers. You must be online with Steam running.
