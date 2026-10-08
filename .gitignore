@@ -32,3 +32,6 @@ plan.md
 
 # Google OAuth client for cloud saves (build.ps1 compiles it in); never committed.
 /google_client.json
+
+# Locked Shibaberg.exe copies the compiler moves aside when a build runs while the app is open.
+/*_Shibaberg.exe

@@ -153,7 +153,7 @@ namespace Gp
             }
             try { if (!SetProcessDpiAwarenessContext((IntPtr)(-4))) SetProcessDPIAware(); }
             catch { try { SetProcessDPIAware(); } catch { } }
-            Ui.InitializeScale();
+            Dpi.Initialize();
 
             // Installed copy's uninstall entry, and the setup exe (this same exe, named Shibaberg-Setup-*.exe).
             if (args != null && args.Length == 1 && string.Equals(args[0], "--uninstall", StringComparison.OrdinalIgnoreCase))
@@ -458,7 +458,7 @@ namespace Gp
     {
         public string StatusText = "Ready";
         public Color DotColor = Ui.MutedC;
-        public string RightText = "shibaberg emu · shibaless";
+        public string RightText = "shibaberg emu · shibaless · offline";
 
         bool _pulse = false, pulseOn = false;
         readonly System.Windows.Forms.Timer pulseTimer;
@@ -510,7 +510,7 @@ namespace Gp
 
     // ─────────────────────────────────────────────── main form
 
-    public class MainForm : Form
+    public class MainForm : ShibaForm
     {
         const int Pad = 28;
         const int Side = 272;                 // the orange sidebar
@@ -532,7 +532,6 @@ namespace Gp
 
         readonly AppSettings settings;
         readonly StartupArgs startup;
-        PatchRunner runner;
         CancellationTokenSource cts;
         Task patchTask = Task.FromResult(0);
         volatile bool running;
@@ -541,8 +540,6 @@ namespace Gp
         string[] lastActions = new string[0];
 
         System.Windows.Forms.Timer autoTimer;
-        Task autoTimerTask = Task.FromResult(0);
-        TaskCompletionSource<bool> autoSignal;
         System.Windows.Forms.Timer exitTimer;
         volatile bool closing;
 
@@ -559,20 +556,10 @@ namespace Gp
             startup = sa;
             settings = AppSettings.Load();
 
-            FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            // The process opts into PerMonitorV2 DPI awareness, so without this the fixed-pixel layout stays
-            // put while the point-sized fonts grow: clipped labels and a window that is tiny on a HiDPI
-            // panel. AutoScaleMode.Dpi makes WinForms scale every control's bounds by the same factor
-            // Ui.Scale uses for the hand-positioned paint geometry.
-            AutoScaleDimensions = new SizeF(96f, 96f);
-            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(Side + 820, 818);
-            BackColor = Ui.Bg;
             Text = BuildInfo.AppName;
             try { using (var bmp = Shiba.Render(64, ShibaMood.Neutral)) Icon = Icon.FromHandle(bmp.GetHicon()); } catch { }
-            KeyPreview = true;
-            DoubleBuffered = true;
             MinimumSize = Size;
 
             titleBar = new TitleBar { ShowBrand = false, Bounds = new Rectangle(Side, 0, 820, 46), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
@@ -603,43 +590,42 @@ namespace Gp
                 Ui.SectionLabel(g, "STEAM APPID", new Point(Ui.S(22), Ui.S(14)));
 
                 var f8 = Ui.F(8.25f, false);
-                int ty = appIdCard.Height / 2 - 8;
+                int ty = appIdCard.Height / 2 - Ui.S(8);
 
                 string t1 = "Find your game's AppID on";
                 string t2 = "steamdb.info ↗";
                 var s1 = TextRenderer.MeasureText(t1, f8, Size.Empty, TextFormatFlags.NoPadding);
                 var s2 = TextRenderer.MeasureText(t2, f8, Size.Empty, TextFormatFlags.NoPadding);
-                int hintX = appIdCard.Width - (s1.Width + 12 + s2.Width) - 26;
+                int hintX = appIdCard.Width - (s1.Width + Ui.S(12) + s2.Width) - Ui.S(26);
 
                 // status line (auto-detect result) left of the hint area
                 if (!appidBusy && appidNote.Length > 0)
                 {
                     var glyph = appidNoteCol == Ui.OkC ? "\u2714" : "!";
-                    using (var b = new SolidBrush(appidNoteCol)) g.DrawString(glyph, Ui.F(8.5f, true), b, 300, ty - 1);
-                    int noteMaxW = hintX - 316 - 12;
-                    string shownNote = noteMaxW > 70 ? Ui.TruncMiddle(g, appidNote, f8, noteMaxW) : "";
-                    TextRenderer.DrawText(g, shownNote, f8, new Point(316, ty), appidNoteCol, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                    using (var b = new SolidBrush(appidNoteCol)) g.DrawString(glyph, Ui.F(8.5f, true), b, Ui.S(300), ty - Ui.S(1));
+                    int noteMaxW = hintX - Ui.S(316 + 12);
+                    string shownNote = noteMaxW > Ui.S(70) ? Ui.TruncMiddle(g, appidNote, f8, noteMaxW) : "";
+                    TextRenderer.DrawText(g, shownNote, f8, new Point(Ui.S(316), ty), appidNoteCol, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
                 }
 
                 if (appidBusy)
                 {
                     string t = "searching Steam Store…";
                     var sz = TextRenderer.MeasureText(t, f8, Size.Empty, TextFormatFlags.NoPadding);
-                    int bx = appIdCard.Width - sz.Width - 26;
+                    int bx = appIdCard.Width - sz.Width - Ui.S(26);
                     float a = notePulseOn ? 1f : 0.45f;
                     using (var b = new SolidBrush(Color.FromArgb((int)(235 * a), Ui.Accent.R, Ui.Accent.G, Ui.Accent.B)))
-                        g.FillEllipse(b, bx - 14, ty + 5, 7, 7);
+                        g.FillEllipse(b, bx - Ui.S(14), ty + Ui.S(5), Ui.S(7), Ui.S(7));
                     TextRenderer.DrawText(g, t, f8, new Point(bx, ty), Color.FromArgb((int)(235 * a), Ui.TextC.R, Ui.TextC.G, Ui.TextC.B), TextFormatFlags.NoPadding);
                     dbRect = Rectangle.Empty;
                 }
                 else
                 {
-                    int tx = hintX;
-                    TextRenderer.DrawText(g, t1, f8, new Point(tx, ty), Ui.MutedC, TextFormatFlags.NoPadding);
-                    int lx = tx + s1.Width + 12;
+                    TextRenderer.DrawText(g, t1, f8, new Point(hintX, ty), Ui.MutedC, TextFormatFlags.NoPadding);
+                    int lx = hintX + s1.Width + Ui.S(12);
                     TextRenderer.DrawText(g, t2, f8, new Point(lx, ty), Ui.Accent2, TextFormatFlags.NoPadding);
-                    if (dbHover) using (var p = new Pen(Ui.Accent2, 1f)) g.DrawLine(p, lx, ty + 15, lx + s2.Width, ty + 15);
-                    dbRect = new Rectangle(lx - 4, ty - 5, s2.Width + 8, 27);
+                    if (dbHover) using (var p = new Pen(Ui.Accent2, 1f)) g.DrawLine(p, lx, ty + s2.Height, lx + s2.Width, ty + s2.Height);
+                    dbRect = new Rectangle(lx - Ui.S(4), ty - Ui.S(5), s2.Width + Ui.S(8), s2.Height + Ui.S(10));
                 }
             };
             appIdCard.MouseMove += (s2b, e2) =>
@@ -740,15 +726,12 @@ namespace Gp
             logCard.Controls.Add(log);
 
             statusBar = new StatusBarCtl();
-            statusBar.RightText = "shibaberg emu · shibaless · offline";
             statusBar.Bounds = new Rectangle(Side, 818 - 30, 820, 30);
             statusBar.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(statusBar);
             appIdBox.Controls[0].TextChanged += delegate { InvalidateSidebar(); };
             tOnlineFix.CheckedChanged += delegate { InvalidateSidebar(); };
 
-            titleBar.CloseClicked += delegate { Close(); };
-            titleBar.MinimizeClicked += delegate { WindowState = FormWindowState.Minimized; };
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape && running) CancelPatch(); };
 
             Shown += OnShownFirst;
@@ -766,12 +749,12 @@ namespace Gp
             StopAutoTimer();
             StopExitTimer();
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
+            SetOptionsEnabled(false);
             CancelSelectionWork();
             SetAppIdBusy(false);
             CancelPatch();
             statusBar.Set("Stopping safely – waiting for outstanding work…", Ui.WarnC);
-            var work = Task.WhenAll(selectionTasks.Concat(new[] { patchTask, autoTimerTask }));
+            var work = Task.WhenAll(selectionTasks.Concat(new[] { patchTask }));
             await Task.Yield();
             try { await work; }
             catch (Exception ex) { if (!IsDisposed) Log(LogLevel.Error, "Shutdown: " + ex.Message); }
@@ -785,7 +768,6 @@ namespace Gp
         void StopAutoTimer()
         {
             if (autoTimer != null) { autoTimer.Stop(); autoTimer.Dispose(); autoTimer = null; }
-            if (autoSignal != null) autoSignal.TrySetResult(true);
         }
 
         void StopExitTimer()
@@ -793,8 +775,6 @@ namespace Gp
             if (exitTimer != null) { exitTimer.Stop(); exitTimer.Dispose(); exitTimer = null; }
         }
 
-        [DllImport("dwmapi.dll")]
-        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         Rectangle LogBounds()
         {
             // Scaled explicitly: WinForms' auto-scale sizes the controls once at load, but this runs again on
@@ -809,28 +789,6 @@ namespace Gp
             log.SetBounds(Ui.S(20), Ui.S(34), logCard.Width - Ui.S(30), Math.Max(0, logCard.Height - Ui.S(42)));
         }
 
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ClassStyle |= 0x20000; // CS_DROPSHADOW
-                return cp;
-            }
-        }
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            try
-            {
-                int round = 2;   // DWMWCP_ROUND
-                DwmSetWindowAttribute(Handle, 33, ref round, 4);
-                int dark = 0;   // light theme
-                DwmSetWindowAttribute(Handle, 20, ref dark, 4);
-                DwmSetWindowAttribute(Handle, 19, ref dark, 4);
-            }
-            catch { }
-        }
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -841,7 +799,6 @@ namespace Gp
         {
             if (closing || IsDisposed) return;
             Log(LogLevel.Dim, "Shibaberg is ready – drop a game .exe to begin.");
-            SetMascot(ShibaMood.Neutral, "Woof! Drop a game's .exe and I'll fetch it.");
 
             Log(LogLevel.Dim, startup.Initialization);
 
@@ -855,7 +812,6 @@ namespace Gp
                     autoTimer = new System.Windows.Forms.Timer();
                     autoTimer.Interval = 300;
                     int waitedMs = 0;
-                    autoSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                     autoTimer.Tick += delegate
                     {
                         waitedMs += 300;
@@ -874,7 +830,6 @@ namespace Gp
                         }
                     };
                     autoTimer.Start();
-                    autoTimerTask = AutoPatchAsync();
                 }
             }
 
@@ -883,16 +838,10 @@ namespace Gp
             if (!startup.Auto && Recovery.HasLastPatch())
             {
                 lastActions = new[] { "Undo patch" };
-                banner.Show(Banner.BannerKind.Warn,
+                ShowBanner(Banner.BannerKind.Warn,
                     "A previous patch can still be undone.\nChoose 'Undo patch' to restore the files it replaced.", lastActions);
-                ShowBannerLayout(true);
                 statusBar.Set("The last patch can be undone", Ui.WarnC);
             }
-        }
-
-        Task AutoPatchAsync()
-        {
-            return autoSignal != null ? autoSignal.Task : Task.FromResult(false);
         }
 
         void BeginAutoExit()
@@ -1018,7 +967,7 @@ namespace Gp
             appIdCard.Invalidate();
         }
 
-        void StartOnlineLookup(int gen, string dir)
+        void StartOnlineLookup(int gen)
         {
             var titles = SteamLookup.CandidateTitles(zone.GamePath);
             if (titles.Count == 0) return;
@@ -1065,12 +1014,11 @@ namespace Gp
         {
             if (running || closing) return;
             var name = Path.GetFileName(path);
-            banner.Show(Banner.BannerKind.Warn, "That doesn't look like a Windows executable.\nDrop the game's .exe file (" + name + ") instead.");
-            ShowBannerLayout(true);
+            ShowBanner(Banner.BannerKind.Warn, "That doesn't look like a Windows executable.\nDrop the game's .exe file (" + name + ") instead.");
             statusBar.Set("Waiting for input", Ui.WarnC);
         }
 
-        void ApplyApiSearch(int gen, string dir, string archChip, string sizeChip, System.Collections.Generic.List<string> apis)
+        void ApplyApiSearch(int gen, string dir, string archChip, string sizeChip, List<string> apis)
         {
             string apiChip; int apiState;
             if (apis.Count > 0)
@@ -1106,7 +1054,7 @@ namespace Gp
             }
 
             // nothing local (cache / steam_appid.txt) found the id – try the Steam Store online
-            if (appIdBox.Text.Trim().Length == 0 && tLookup.Checked) StartOnlineLookup(gen, dir);
+            if (appIdBox.Text.Trim().Length == 0 && tLookup.Checked) StartOnlineLookup(gen);
             selectionResolved = true;
         }
 
@@ -1118,8 +1066,7 @@ namespace Gp
 
             if (string.IsNullOrEmpty(zone.GamePath))
             {
-                banner.Show(Banner.BannerKind.Warn, "Pick a game executable first.\nDrag & drop the game's .exe into the box above.");
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Warn, "Pick a game executable first.\nDrag & drop the game's .exe into the box above.");
                 statusBar.Set("Waiting for input", Ui.WarnC);
                 return false;
             }
@@ -1127,8 +1074,7 @@ namespace Gp
             var id = AppIdDetector.Normalize(appIdBox.Text);
             if (!ofix && !AppIdDetector.IsValid(id))
             {
-                banner.Show(Banner.BannerKind.Warn, "Enter a valid numeric Steam AppID.\nYou can find it on steamdb.info by searching your game's name.");
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Warn, "Enter a valid numeric Steam AppID.\nYou can find it on steamdb.info by searching your game's name.");
                 statusBar.Set("Waiting for input", Ui.WarnC);
                 return false;
             }
@@ -1144,7 +1090,6 @@ namespace Gp
                 OnlineFix = ofix,
                 Achievements = tAchievements.Checked,
             };
-            settings.LastAppId = id;
             settings.UnpackDrm = tUnpack.Checked;
             settings.Backup = tBackup.Checked;
             settings.WriteAppIdTxt = tAppid.Checked;
@@ -1162,7 +1107,7 @@ namespace Gp
             patchBtn.Text = "Cancel";
             zone.Enabled = false;
             appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
+            SetOptionsEnabled(false);
             banner.HideBanner();
             ShowBannerLayout(false);
             progress.SetValue(1);
@@ -1170,7 +1115,7 @@ namespace Gp
             statusBar.Set("Patching… (Esc to cancel)", Ui.Accent);
             SetMascot(ShibaMood.Neutral, "On it! Digging through the files…");
 
-            runner = new PatchRunner();
+            var runner = new PatchRunner();
             var patchLog = new BufferedRunLog(log, "");
             runner.LogLine += e => patchLog.Append(e.Message, e.Level);
             runner.ProgressChanged += p => UiInvoke(delegate { progress.SetValue(p); });
@@ -1199,16 +1144,6 @@ namespace Gp
             }
         }
 
-        // Marshals an action to the UI thread. Swallows ObjectDisposedException when a callback from a
-        // worker thread arrives after the form has already closed – BeginInvoke itself would throw on the
-        // pool thread (unobserved) because IsDisposed can only be checked inside the delegate.
-        void UiInvoke(Action a)
-        {
-            if (IsDisposed || !IsHandleCreated) return;
-            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) a(); }); }
-            catch (InvalidOperationException) { }
-        }
-
         void CancelPatch()
         {
             if (!running) return;
@@ -1224,7 +1159,7 @@ namespace Gp
             patchBtn.Kind = FlatButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = !closing;
+            SetOptionsEnabled(!closing);
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
 
             if (res.Success)
@@ -1254,8 +1189,7 @@ namespace Gp
             {
                 progress.SetValue(0);
                 lastActions = new string[0];
-                banner.Show(Banner.BannerKind.Warn, res.Summary + "\nSee the log below for details.", new string[0]);
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Warn, res.Summary + "\nSee the log below for details.", new string[0]);
                 SetMascot(ShibaMood.Sleepy, "Okay, stopped. Nap time.");
                 statusBar.Set(res.PartialChanges ? "Cancelled – partial changes remain"
                     : res.RolledBack ? "Cancelled – changes undone" : "Cancelled", Ui.WarnC);
@@ -1267,8 +1201,7 @@ namespace Gp
                 if (res.NeedsAdmin) failedActions.Add("Retry as admin");
                 if (Recovery.HasLastPatch()) failedActions.Add("Undo patch");
                 lastActions = failedActions.ToArray();
-                banner.Show(Banner.BannerKind.Error, res.Summary + "\nSee the log below for details.", lastActions);
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Error, res.Summary + "\nSee the log below for details.", lastActions);
                 statusBar.Set(res.RolledBack ? "Failed – changes undone" : "Failed", Ui.ErrC);
                 SetMascot(ShibaMood.Sad, "Oops… that didn't work. The log says why.");
             }
@@ -1350,7 +1283,7 @@ namespace Gp
             banner.HideBanner();
             ShowBannerLayout(false);
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = false;
+            SetOptionsEnabled(false);
             progress.SetValue(10);
             statusBar.Pulse = true;
             statusBar.Set("Undoing the last patch…", Ui.WarnC);
@@ -1360,7 +1293,7 @@ namespace Gp
                 var lines = new List<PatchLogEntry>();
                 Action<LogLevel, string> sink = delegate(LogLevel level, string message)
                 {
-                    lines.Add(new PatchLogEntry { Time = DateTime.Now, Level = level, Message = message });
+                    lines.Add(new PatchLogEntry { Level = level, Message = message });
                 };
                 RecoveryReport report;
                 try
@@ -1378,7 +1311,6 @@ namespace Gp
                 }
                 lines.Add(new PatchLogEntry
                 {
-                    Time = DateTime.Now,
                     Level = report.Failed == 0 ? LogLevel.Ok : LogLevel.Warn,
                     Message = "Undo finished: " + report.Summary
                 });
@@ -1396,15 +1328,14 @@ namespace Gp
             statusBar.Pulse = false;
             progress.SetValue(0);
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
-            tUnpack.Enabled = tBackup.Enabled = tAppid.Enabled = tSettings.Enabled = tOnlineFix.Enabled = tLookup.Enabled = tAchievements.Enabled = !closing;
+            SetOptionsEnabled(!closing);
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
             lastActions = new string[0];
 
             if (report.Failed == 0 && report.ChangedAnything)
             {
-                banner.Show(Banner.BannerKind.Success,
+                ShowBanner(Banner.BannerKind.Success,
                     "Undone – " + report.Summary + "\nThe game is back to its previous state.", new string[0]);
-                ShowBannerLayout(true);
                 statusBar.Set("Undone – " + report.Summary, Ui.OkC);
             }
             else
@@ -1412,14 +1343,13 @@ namespace Gp
                 string detail = report.Messages.Count > 0 ? "\n" + string.Join("\n", report.Messages.ToArray()) : "";
                 // A partial undo keeps its journal, so offer to retry rather than leaving a dead end.
                 lastActions = report.Failed > 0 && Recovery.HasLastPatch() ? new[] { "Undo patch" } : new string[0];
-                banner.Show(report.Failed > 0 ? Banner.BannerKind.Error : Banner.BannerKind.Warn,
+                ShowBanner(report.Failed > 0 ? Banner.BannerKind.Error : Banner.BannerKind.Warn,
                     "Undo finished: " + report.Summary + detail, lastActions);
-                ShowBannerLayout(true);
                 statusBar.Set("Undo finished – " + report.Summary, report.Failed > 0 ? Ui.ErrC : Ui.WarnC);
             }
         }
 
-        // ---------------------------------------------------------- batch patching
+        // ---------------------------------------------------------- cloud saves / batch patching
 
         void OpenCloud()
         {
@@ -1454,32 +1384,36 @@ namespace Gp
 
             if (f.OkCount > 0 && f.FailCount == 0 && f.SkipCount == 0)
             {
-                banner.Show(Banner.BannerKind.Success, "Batch complete – all " + f.TotalGames + " game(s) patched.", new string[0]);
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Success, "Batch complete – all " + f.TotalGames + " game(s) patched.", new string[0]);
                 statusBar.Set("Batch done – " + summary, Ui.OkC);
             }
             else if (f.OkCount > 0)
             {
-                banner.Show(Banner.BannerKind.Warn, "Batch complete with problems: " + summary, new string[0]);
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Warn, "Batch complete with problems: " + summary, new string[0]);
                 statusBar.Set("Batch done – " + summary, f.FailCount > 0 ? Ui.ErrC : Ui.WarnC);
             }
             else
             {
-                banner.Show(Banner.BannerKind.Error, "Batch finished without patching anything. " + summary + "\nSee the batch dialog log for details.", new string[0]);
-                ShowBannerLayout(true);
+                ShowBanner(Banner.BannerKind.Error, "Batch finished without patching anything. " + summary + "\nSee the batch dialog log for details.", new string[0]);
                 statusBar.Set("Batch failed", Ui.ErrC);
             }
+        }
+
+        void ShowBanner(Banner.BannerKind kind, string message, params string[] actions)
+        {
+            banner.Show(kind, message, actions);
+            ShowBannerLayout(true);
+        }
+
+        void SetOptionsEnabled(bool enabled)
+        {
+            foreach (var t in new[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements }) t.Enabled = enabled;
         }
 
         void ShowBannerLayout(bool show)
         {
             banner.Visible = show && banner.MessageText.Length > 0;
             RecalcLog();
-            // Re-enabling the option toggles at the end of a run can leave a one-pixel sliver of stale
-            // native drawing along their top edge. One deferred repaint, after the run's own repaints have
-            // gone through, clears it.
-            if (IsHandleCreated) BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) optionsCard.Invalidate(true); });
         }
 
         void Log(LogLevel lvl, string msg)

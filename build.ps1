@@ -26,17 +26,8 @@ function Compress-File([string]$source, [string]$destination) {
 }
 
 # ---- locate Roslyn csc ----
-# vswhere is the supported way to ask where Visual Studio put things, and it answers in
-# milliseconds. The recursive walk it replaces enumerated the entire VS tree - tens of
-# thousands of files on a machine with several versions and workloads - and then threw
-# almost all of them away. The walk survives only as a last resort.
-#
-# Every step here is defensive on purpose. `$env:ProgramFiles` and `$env:ProgramFiles(x86)`
-# are NOT guaranteed to be set - they are empty in some shells, including this project's
-# sandbox - and `Join-Path` with a null -Path is a terminating error under
-# `$ErrorActionPreference = 'Stop'`, which would kill the build before it compiled anything.
-# So: skip empty variables, fall back to the literal paths, and never let a discovery
-# failure escape a step. Finding the compiler is best-effort until all four steps fail.
+# vswhere first, then a shallow glob. $env:ProgramFiles(x86) can be empty in some shells, and Join-Path
+# with a null -Path is terminating under 'Stop', so empty variables are skipped and literal paths added.
 function Get-VisualStudioRoots {
     $roots = @()
     $bases = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, 'C:\Program Files (x86)', 'C:\Program Files')
@@ -82,22 +73,12 @@ function Find-RoslynByGlob {
 $csc = $CompilerPath
 if (-not $csc) { $csc = Find-RoslynViaVsWhere }
 if (-not $csc) { $csc = Find-RoslynByGlob }
-if (-not $csc) {
-    Write-Warning "vswhere and the targeted glob both came up empty; falling back to a full recursive search."
-    foreach ($root in (Get-VisualStudioRoots + 'C:\Program Files (x86)\Microsoft Visual Studio')) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        $candidates = @(Get-ChildItem -LiteralPath $root -Recurse -Filter csc.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like '*Roslyn*' } |
-            Sort-Object @{Expression = { $_.VersionInfo.FileVersionRaw }; Descending = $true}, FullName)
-        if ($candidates.Count -gt 0) { $csc = $candidates[0].FullName; break }
-    }
-}
 if (-not $csc -or -not (Test-Path -LiteralPath $csc)) { throw "Roslyn csc.exe not found; specify -CompilerPath." }
 
 # ---- version ----
 # One place to bump it. The assembly attribute is what the UI renders, so the number on
 # screen cannot drift from the build that produced it.
-$version = '0.6'
+$version = '0.7'
 # Google sign-in for cloud saves: the OAuth "Desktop app" client from google_client.json (the file Google
 # Cloud Console downloads; gitignored). Google treats an installed app's secret as public, but it stays out
 # of the repo anyway. Without the file the build still works and cloud saves say sign-in isn't set up.
@@ -137,13 +118,11 @@ Write-Host "refs:  $refDir"
 
 # ---- icon ----
 # src\app.ico is committed; regenerate it from the mascot with src\make_icon.ps1 (needs a built Shibaberg.exe).
-$icon = Join-Path $src 'app.ico'
-$iconArg = "/win32icon:`"$icon`""
+$iconArg = "/win32icon:`"$(Join-Path $src 'app.ico')`""
 
 function Compile($sources, $out, $extra) {
     $cscArgs = @('/nologo','/noconfig','/target:exe','/platform:anycpu','/optimize+','/utf8output','/nostdlib-','/deterministic') + @("/pathmap:`"$root=.`"") + $refs + $sources
-    $cscArgs += @("/out:`"$out`"")
-    if ($iconArg) { $cscArgs += $iconArg }
+    $cscArgs += @("/out:`"$out`"", $iconArg)
     if ($extra) { $cscArgs += $extra }
     & $csc @cscArgs
     if ($LASTEXITCODE -ne 0) { throw "compile failed: $out" }
@@ -173,7 +152,6 @@ Compile (@("`"$src\Core.cs`"", "`"$src\Cloud.cs`"", "`"$src\Unpacker\ShibalessUn
 $pay = @('shibaberg\bin\x86\steam_api.dll', 'shibaberg\bin\x64\steam_api64.dll')
 # The overlay build (in-game achievement toast), installed instead when achievements are switched on.
 $pay += @('shibaberg\bin\overlay\x86\steam_api.dll', 'shibaberg\bin\overlay\x64\steam_api64.dll')
-# generate_interfaces is no longer shipped: InterfaceScanner (Core.cs) does the same scan in-process.
 Get-ChildItem (Join-Path $root 'shibaberg\post_build\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
 
 $payRes = @()
@@ -212,7 +190,7 @@ foreach ($rel in $pay) {
     $i++
 }
 $manTmp = Join-Path $env:TEMP ('gp_manifest_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
-# UTF-8 without BOM – the old Ascii encoding would corrupt non-ASCII paths in the manifest.
+# UTF-8 without BOM: Payload.Load reads the lines as-is.
 [IO.File]::WriteAllLines($manTmp, $manLines, (New-Object System.Text.UTF8Encoding($false)))
 $payRes += "/res:`"$manTmp`",gppay.manifest"
 Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTotal / 1MB, 2) + " MB (raw " + [math]::Round($rawTotal / 1MB, 2) + " MB)")

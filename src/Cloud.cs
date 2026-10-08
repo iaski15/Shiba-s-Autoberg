@@ -224,7 +224,6 @@ namespace Gp
         public string Id = "";
         public string Name = "";
         public long Size;
-        public DateTime Created;
     }
 
     /// <summary>Thrown when the stored Google sign-in no longer works (revoked, expired); the user signs in again.</summary>
@@ -396,7 +395,7 @@ namespace Gp
             using (var resp = Send(init)) session = resp.Headers["Location"];
             if (string.IsNullOrEmpty(session)) throw new IOException("Google Drive did not start the upload.");
 
-            var put = (HttpWebRequest)WebRequest.Create(session);
+            var put = Web.Request(session);
             put.Method = "PUT";
             put.ContentType = "application/zip";
             put.ContentLength = len;
@@ -414,17 +413,15 @@ namespace Gp
         /// <summary>Files in a folder, newest first.</summary>
         public List<DriveFile> List(string folderId)
         {
-            var r = Call("GET", Files + "?pageSize=100&orderBy=createdTime%20desc&fields=files(id,name,size,createdTime)&q="
+            var r = Call("GET", Files + "?pageSize=100&orderBy=createdTime%20desc&fields=files(id,name,size)&q="
                 + Uri.EscapeDataString("'" + folderId + "' in parents and trashed=false"));
             var files = r.Element("files");
             if (files == null) return new List<DriveFile>();
             return files.Elements().Select(e =>
             {
                 long size;
-                DateTime created;
                 long.TryParse(Val(e, "size"), out size);
-                DateTime.TryParse(Val(e, "createdTime"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out created);
-                return new DriveFile { Id = Val(e, "id"), Name = Val(e, "name"), Size = size, Created = created.ToLocalTime() };
+                return new DriveFile { Id = Val(e, "id"), Name = Val(e, "name"), Size = size };
             }).ToList();
         }
 
@@ -447,11 +444,9 @@ namespace Gp
 
         HttpWebRequest Req(string method, string url)
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-            var req = (HttpWebRequest)WebRequest.Create(url);
+            var req = Web.Request(url);
             req.Method = method;
             req.Headers[HttpRequestHeader.Authorization] = "Bearer " + Token();
-            req.UserAgent = "Shibaberg/" + BuildInfo.Version;
             req.Timeout = 30000;
             req.ReadWriteTimeout = 60000;
             return req;
@@ -469,8 +464,7 @@ namespace Gp
 
         static XElement PostForm(string url, string form)
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-            var req = (HttpWebRequest)WebRequest.Create(url);
+            var req = Web.Request(url);
             req.Method = "POST";
             req.ContentType = "application/x-www-form-urlencoded";
             req.Timeout = 30000;
@@ -528,17 +522,7 @@ namespace Gp
             return c == null ? "" : c.Value;
         }
 
-        internal static string Js(string s)
-        {
-            var sb = new StringBuilder("\"");
-            foreach (char c in s)
-            {
-                if (c == '"' || c == '\\') sb.Append('\\').Append(c);
-                else if (c < 0x20) sb.AppendFormat("\\u{0:x4}", (int)c);
-                else sb.Append(c);
-            }
-            return sb.Append('"').ToString();
-        }
+        internal static string Js(string s) { return "\"" + AchievementSchema.JsonEscape(s) + "\""; }
 
         static Dictionary<string, string> ParseQuery(string q)
         {

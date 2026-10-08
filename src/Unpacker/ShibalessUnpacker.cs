@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
 using Shibaless.API.Events;
 using Shibaless.API.Model;
@@ -158,7 +157,7 @@ namespace Shibaless
                 result.Error = "Input is not a readable PE file: " + ex.Message;
                 return result;
             }
-            result.SourceSha256 = Sha256Hex(input);
+            result.SourceSha256 = Gp.SafePersistence.Hash(input);
 
             var logService = new LoggingService();
             logService.AddLogMessage += (sender, e) =>
@@ -262,17 +261,6 @@ namespace Shibaless
             const uint Code = 0x00000020, Execute = 0x20000000;
             if ((entry.Characteristics & (Code | Execute)) == 0)
                 throw new InvalidDataException("Restored entry point lands in non-executable section " + entry.Name + ".");
-        }
-
-        static string Sha256Hex(byte[] data)
-        {
-            using (var sha = SHA256.Create())
-            {
-                byte[] hash = sha.ComputeHash(data);
-                var sb = new StringBuilder(hash.Length * 2);
-                foreach (byte b in hash) sb.Append(b.ToString("x2"));
-                return sb.ToString();
-            }
         }
 
         sealed class PeSection

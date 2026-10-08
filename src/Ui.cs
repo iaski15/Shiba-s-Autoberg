@@ -34,8 +34,6 @@ namespace Gp
 
         public static readonly Color DisabledC = FromHex("#C8B39E");   // disabled label / toggle text
         public static readonly Color KnobOffC = FromHex("#DCCBB8");    // disabled toggle knob
-        public static readonly Color CancelA = FromHex("#CF4A3F");
-        public static readonly Color SuccessA = FromHex("#3F9A58");
         public static readonly Color DimC = FromHex("#B59A82");        // dim log lines
         public static readonly Color LogTextC = FromHex("#5A3E2B");    // normal log lines
 
@@ -63,19 +61,10 @@ namespace Gp
             return fontCache[key];
         }
 
-        /// <summary>Display scale relative to 96 DPI, set once at startup. The forms opt into
-        /// <see cref="AutoScaleMode.Dpi"/>, which scales every control's bounds by this same factor, so the
-        /// paint code below - which positions things by hand - has to scale its own constants to stay in
-        /// step. Fonts need no help: they are created in points and GDI+ already maps those through the
-        /// device DPI. The implementation lives in <see cref="Dpi"/> so the self-test can reach it.</summary>
-        public static float Scale { get { return Dpi.Scale; } set { Dpi.Scale = value; } }
-
-        public static void InitializeScale() { Dpi.Initialize(); }
-
+        /// <summary>Scales hand-positioned paint geometry by the display DPI (<see cref="Dpi"/>). The forms use
+        /// <see cref="AutoScaleMode.Dpi"/> for control bounds; fonts are in points and need no help.</summary>
         public static int S(int px) { return Dpi.S(px); }
         public static float S(float px) { return Dpi.S(px); }
-        public static PointF S(PointF p) { return Dpi.S(p); }
-        public static Point S(Point p) { return Dpi.S(p); }
 
         public static GraphicsPath RoundPath(Rectangle r, int rad)
         {
@@ -108,15 +97,15 @@ namespace Gp
         // with every resize step, and every existing caller disposes what RoundPath hands back - a cache
         // entry handed to one of those would be destroyed underneath it.
         [ThreadStatic] static GraphicsPath scratchPath;
-        [ThreadStatic] static string scratchKey;
+        [ThreadStatic] static Rectangle scratchRect;
+        [ThreadStatic] static int scratchRad;
 
         static GraphicsPath ScratchPath(Rectangle r, int rad)
         {
-            string key = r.X + "," + r.Y + "," + r.Width + "," + r.Height + "," + rad;
-            if (scratchPath != null && scratchKey == key) return scratchPath;
+            if (scratchPath != null && scratchRect == r && scratchRad == rad) return scratchPath;
             if (scratchPath != null) scratchPath.Dispose();
             scratchPath = RoundPath(r, rad);
-            scratchKey = key;
+            scratchRect = r; scratchRad = rad;
             return scratchPath;
         }
 
@@ -124,9 +113,10 @@ namespace Gp
         {
             if (string.IsNullOrEmpty(s)) return s;
             if (maxW <= 0) return "";
-            if (g.MeasureString(s, f).Width <= maxW) return s;
+            Func<string, int> width = t => TextRenderer.MeasureText(g, t, f, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            if (width(s) <= maxW) return s;
             string mid = "…";
-            if (g.MeasureString(mid, f).Width > maxW) return "";
+            if (width(mid) > maxW) return "";
             int lo = 1, hi = s.Length - 1;
             string best = mid;
             while (lo <= hi)
@@ -134,7 +124,7 @@ namespace Gp
                 int take = lo + (hi - lo) / 2;
                 int left = (take + 1) / 2, right = take / 2;
                 var t = s.Substring(0, left) + mid + s.Substring(s.Length - right);
-                if (g.MeasureString(t, f).Width <= maxW) { best = t; lo = take + 1; }
+                if (width(t) <= maxW) { best = t; lo = take + 1; }
                 else hi = take - 1;
             }
             return best;
@@ -148,12 +138,6 @@ namespace Gp
                 if (ch != ' ') g.DrawString(ch.ToString(), f, b, x, pt.Y, StringFormat.GenericTypographic);
                 x += GlyphAdvance(g, ch, f) + spacing;
             }
-        }
-
-        public static SizeF MeasureSpaced(Graphics g, string text, Font f, float spacing)
-        {
-            float w = 0; foreach (var ch in text) w += GlyphAdvance(g, ch, f) + spacing;
-            return new SizeF(w, g.MeasureString(text, f).Height);
         }
 
         // GenericTypographic trims trailing whitespace, so a lone space measures as zero width and spaced
@@ -188,13 +172,8 @@ namespace Gp
             var r = new Rectangle(x, y, w, h);
             FillRound(g, r, S(6), back);
             if (border.HasValue) StrokeRound(g, r, S(6), border.Value, 1f);
-            TextRendererHelper(g, text, fore, r);
-            x += w + S(8);
-        }
-
-        static void TextRendererHelper(Graphics g, string text, Color fore, Rectangle r)
-        {
             TextRenderer.DrawText(g, text, F(7.75f, true), r, fore, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            x += w + S(8);
         }
 
         public static Color Tint(Color basec, Color tint, double amt)
@@ -359,8 +338,6 @@ namespace Gp
 
         public Anim(Control owner, float durationMs = 120f) { this.owner = owner; this.durationMs = Math.Max(1f, durationMs); }
 
-        /// <summary>Linear position; use <see cref="Eased"/> for anything drawn.</summary>
-        public float Value { get { return pos; } }
         public float Eased { get { float t = pos; return t * t * (3f - 2f * t); } }
 
         public float Target
@@ -396,12 +373,59 @@ namespace Gp
         }
     }
 
+    // ─────────────────────────────────────────────── window base
+
+    /// <summary>Borderless, DPI-scaled window with a drop shadow and Windows 11 rounded corners - the chrome
+    /// every Shibaberg window shares.</summary>
+    public class ShibaForm : Form
+    {
+        public ShibaForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            // The process is PerMonitorV2 DPI-aware: Dpi auto-scaling grows the control bounds with the fonts.
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            BackColor = Ui.Bg;
+            KeyPreview = true;
+            DoubleBuffered = true;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ClassStyle |= 0x20000; // CS_DROPSHADOW
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int round = 2;   // DWMWCP_ROUND
+                NativeMethods.DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            }
+            catch { }
+        }
+
+        /// <summary>Runs <paramref name="a"/> on the UI thread from a worker. Drops it once the form is closed:
+        /// BeginInvoke would otherwise throw on the worker thread, where nobody observes it.</summary>
+        protected void UiInvoke(Action a)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) a(); }); }
+            catch (InvalidOperationException) { }
+        }
+    }
+
     // ─────────────────────────────────────────────── card panel
 
     public class AppCard : Panel
     {
         public int Radius = 12;
-        public bool ShowBorder = true;
         public AppCard() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true); BackColor = Ui.Bg; }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -410,7 +434,7 @@ namespace Gp
             int rad = Ui.S(Radius);
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
             Ui.FillRound(g, r, rad, Ui.Surface);
-            if (ShowBorder) Ui.StrokeRound(g, r, rad, Ui.BorderC, 1f);
+            Ui.StrokeRound(g, r, rad, Ui.BorderC, 1f);
             base.OnPaint(e);
         }
     }
@@ -477,8 +501,8 @@ namespace Gp
             }
             minimizeButton.AccessibleName = "Minimize";
             closeButton.AccessibleName = "Close";
-            minimizeButton.Click += delegate { OnMinimizeClicked(); };
-            closeButton.Click += delegate { OnCloseClicked(); };
+            minimizeButton.Click += delegate { Minimize(); };
+            closeButton.Click += delegate { var f = FindForm(); if (f != null) f.Close(); };
             LayoutBtns();
         }
         protected override void OnResize(EventArgs e) { LayoutBtns(); base.OnResize(e); }
@@ -494,18 +518,10 @@ namespace Gp
         }
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left && !closeButton.Bounds.Contains(e.Location) && !minimizeButton.Bounds.Contains(e.Location)) OnMinimizeClicked();
+            if (e.Button == MouseButtons.Left && !closeButton.Bounds.Contains(e.Location) && !minimizeButton.Bounds.Contains(e.Location)) Minimize();
             base.OnMouseDoubleClick(e);
         }
-        public event Action CloseClicked;
-        public event Action MinimizeClicked;
-        void OnCloseClicked() { var h = CloseClicked; if (h != null) h(); }
-        void OnMinimizeClicked()
-        {
-            var h = MinimizeClicked;
-            if (h != null) h();
-            else { var f = FindForm(); if (f != null) f.WindowState = FormWindowState.Minimized; }
-        }
+        void Minimize() { var f = FindForm(); if (f != null) f.WindowState = FormWindowState.Minimized; }
         void DragWindow()
         {
             var f = FindForm(); if (f == null) return;
@@ -549,9 +565,8 @@ namespace Gp
         [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         internal static extern int SetWindowTheme(IntPtr hwnd, string appName, string idList);
 
-        /// <summary>Dark native scrollbars (Windows 10 1809+); a bright white scrollbar in the dark log
-        /// looked like a rendering glitch. Silently a no-op on systems without the theme.</summary>
-        internal static void UseDarkScrollbars(Control c)
+        /// <summary>Explorer-themed native scrollbars instead of the classic ones. No-op where unavailable.</summary>
+        internal static void UseExplorerScrollbars(Control c)
         {
             if (c.IsHandleCreated) try { SetWindowTheme(c.Handle, "Explorer", null); } catch { }
             else c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "Explorer", null); } catch { } };
@@ -594,13 +609,6 @@ namespace Gp
             if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return false;
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             return files != null && files.Length == 1 && (files[0] ?? "").EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
-        }
-
-        public void ClearGame()
-        {
-            gamePath = ""; archChip = sizeChip = apiChip = warnChip = ""; apiState = 0;
-            if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
-            Invalidate();
         }
 
         public void UpdateAnalysis(string arch, string size, string api, int state, string warning = null)
@@ -668,25 +676,17 @@ namespace Gp
         protected override void OnMouseClick(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) Browse(); base.OnMouseClick(e); }
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            bool oc = gamePath.Length > 0 && MouseIsOverChange(e.Location);
+            bool oc = gamePath.Length > 0 && ChangeLinkBounds().Contains(e.Location);
             if (oc != overChange) { overChange = oc; Invalidate(); }
             base.OnMouseMove(e);
         }
         protected override void OnMouseLeave(EventArgs e) { overChange = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
 
-        /// <summary>Where the CHANGE link sits. Derived from the width, the font and the DPI scale, so it
-        /// is answerable before the control has ever painted. It used to be assigned inside OnPaint and
-        /// read by OnMouseMove, which meant the hit region was Rectangle.Empty - and the link unclickable
-        /// and never hover-highlighted - until something happened to repaint.</summary>
+        /// <summary>Where the Change link sits; computed, not cached in OnPaint, so hit-testing works before the first paint.</summary>
         Rectangle ChangeLinkBounds()
         {
             int w = TextRenderer.MeasureText("Change", Ui.F(8.25f, true), Size.Empty, TextFormatFlags.NoPadding).Width + Ui.S(24);
             return new Rectangle(Width - Ui.S(16) - w, Ui.S(16), w, Ui.S(26));
-        }
-
-        bool MouseIsOverChange(Point pt)
-        {
-            return ChangeLinkBounds().Contains(pt);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -784,53 +784,68 @@ namespace Gp
 
     // ─────────────────────────────────────────────── toggle
 
-    public class Toggle : CheckBox
+    /// <summary>On/off switch. A plain Control, not a CheckBox: the native BUTTON window under a CheckBox draws
+    /// its own frame and focus marks outside WM_PAINT, which left stray lines over the toggles.</summary>
+    public class Toggle : Control
     {
-        bool hover = false, press = false;
+        bool isChecked, press;
         readonly Anim knob, hoverAnim;
+        public event EventHandler CheckedChanged;
+
         public Toggle(string label, bool initial)
         {
             knob = new Anim(this, 130f); knob.Snap(initial ? 1 : 0);
             hoverAnim = new Anim(this, 100f);
-            Text = label; Checked = initial;
-            AccessibleName = label; AutoSize = false; TabStop = true;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
-            BackColor = Ui.Surface; // match the card so no black/unpainted area shows behind the pill
+            Text = label; isChecked = initial;
+            AccessibleName = label; AccessibleRole = AccessibleRole.CheckButton; TabStop = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint
+                | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            SetStyle(ControlStyles.StandardDoubleClick, false);   // fast clicks each toggle, none become a double-click
+            BackColor = Ui.Surface;
             Cursor = Cursors.Hand; Height = 24;
         }
+
+        public bool Checked
+        {
+            get { return isChecked; }
+            set
+            {
+                if (isChecked == value) return;
+                isChecked = value;
+                // Slide only when the user can see it; a toggle set while hidden or before first paint just jumps.
+                if (Visible && IsHandleCreated) knob.Target = value ? 1 : 0; else knob.Snap(value ? 1 : 0);
+                Invalidate();
+                AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+                var h = CheckedChanged; if (h != null) h(this, EventArgs.Empty);
+            }
+        }
+
+        protected override void OnClick(EventArgs e) { if (Enabled) { Focus(); Checked = !Checked; } base.OnClick(e); }
+        protected override void OnKeyUp(KeyEventArgs e) { if (Enabled && e.KeyCode == Keys.Space) Checked = !Checked; base.OnKeyUp(e); }
+        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+
+        protected override AccessibleObject CreateAccessibilityInstance() { return new ToggleAccessible(this); }
+
+        sealed class ToggleAccessible : ControlAccessibleObject
+        {
+            readonly Toggle toggle;
+            public ToggleAccessible(Toggle t) : base(t) { toggle = t; }
+            public override AccessibleStates State { get { return base.State | (toggle.Checked ? AccessibleStates.Checked : AccessibleStates.None); } }
+            public override string DefaultAction { get { return toggle.Checked ? "Uncheck" : "Check"; } }
+            public override void DoDefaultAction() { if (toggle.Enabled) toggle.Checked = !toggle.Checked; }
+        }
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; if (!Enabled) hoverAnim.Target = 0; Invalidate(); base.OnEnabledChanged(e); }
-        protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) { hover = true; hoverAnim.Target = 1; } base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseEnter(EventArgs e) { if (Enabled && !press) hoverAnim.Target = 1; base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { press = false; hoverAnim.Target = 0; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e) { if (Enabled && e.Button == MouseButtons.Left) { press = true; Invalidate(); } base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left) { press = false; hover = Enabled && ClientRectangle.Contains(e.Location); hoverAnim.Target = hover ? 1 : 0; Invalidate(); }
+            if (e.Button == MouseButtons.Left) { press = false; hoverAnim.Target = Enabled && ClientRectangle.Contains(e.Location) ? 1 : 0; Invalidate(); }
             base.OnMouseUp(e);
         }
         protected override void OnMouseCaptureChanged(EventArgs e) { press = false; Invalidate(); base.OnMouseCaptureChanged(e); }
         protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
         protected override void OnLostFocus(EventArgs e) { press = false; Invalidate(); base.OnLostFocus(e); }
-        // The native BUTTON window draws straight onto the screen when it gains/loses focus, is enabled or
-        // disabled, or its check, highlight or focus-cue state changes - outside WM_PAINT - and left a stray
-        // line across the top of the toggles after a patch run. Repaint over it whenever one goes through.
-        protected override void WndProc(ref Message m)
-        {
-            base.WndProc(ref m);
-            switch (m.Msg)
-            {
-                case 0x0007: case 0x0008:   // WM_SETFOCUS / WM_KILLFOCUS (native XOR focus rectangle)
-                case 0x000A:                // WM_ENABLE
-                case 0x00F1: case 0x00F3:   // BM_SETCHECK / BM_SETSTATE
-                case 0x0128:                // WM_UPDATEUISTATE
-                    Invalidate(); break;
-            }
-        }
-        protected override void OnCheckedChanged(EventArgs e)
-        {
-            // Slide only when the user can see it; a toggle set while hidden or before first paint just jumps.
-            if (knob != null) { if (Visible && IsHandleCreated) knob.Target = Checked ? 1 : 0; else knob.Snap(Checked ? 1 : 0); }
-            Invalidate(); base.OnCheckedChanged(e);
-        }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -871,7 +886,7 @@ namespace Gp
 
     public class FlatButton : Button
     {
-        public enum BtnKind { Primary, Cancel, Success, Secondary }
+        public enum BtnKind { Primary, Cancel, Secondary }
         BtnKind kind = BtnKind.Primary;
         public float TextSize = 10f;
         public int CornerRadius = 10;
@@ -904,8 +919,7 @@ namespace Gp
             float hv = Enabled ? hoverAnim.Eased : 0f;
             Color fill, txt;
             if (!Enabled) { fill = Ui.Surface2; txt = Ui.DisabledC; }
-            else if (Kind == BtnKind.Cancel) { fill = Ui.CancelA; txt = Color.White; }
-            else if (Kind == BtnKind.Success) { fill = Ui.SuccessA; txt = Color.White; }
+            else if (Kind == BtnKind.Cancel) { fill = Ui.ErrC; txt = Color.White; }
             else if (Kind == BtnKind.Secondary) { fill = Ui.Lerp(Ui.Surface, Ui.Surface2, 0.6f + 0.4f * hv); txt = Ui.TextC; }
             else { fill = Ui.Accent; txt = Color.White; }
             if (Enabled && Kind != BtnKind.Secondary) fill = Ui.Tint(fill, Color.White, 0.10 * hv);   // lighten on hover
@@ -968,7 +982,7 @@ namespace Gp
     public class Banner : Control
     {
         public enum BannerKind { Success, Error, Warn }
-        public         BannerKind Kind = BannerKind.Success;
+        public BannerKind Kind = BannerKind.Success;
         string message = "";
         public string MessageText { get { return message; } }
         public event Action<int> ActionClicked;
@@ -1092,7 +1106,7 @@ namespace Gp
             BackColor = Ui.Surface; ForeColor = Ui.TextC;
             Font = Ui.F("Consolas", 8.75f, false);
             HideSelection = false;
-            NativeMethods.UseDarkScrollbars(this);
+            NativeMethods.UseExplorerScrollbars(this);
         }
         public void AppendLine(string msg) { AppendLine(msg, LogLevel.Info); }
 
@@ -1112,8 +1126,7 @@ namespace Gp
             SelectionStart = TextLength;
             SelectionLength = 0;
             SelectionColor = c;
-            AppendText(text);
-            TrimLines();
+            AppendText(text);   // OnTextChanged trims
             SelectionColor = ForeColor;
             SelectionStart = TextLength;
             SelectionLength = 0;

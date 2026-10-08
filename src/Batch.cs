@@ -20,12 +20,10 @@ namespace Gp
         public enum RowState { Queued, Detecting, Ready, NoId, Patching, Ok, Failed, Skipped }
 
         readonly TextBox idBox;
-        Rectangle removeRect = Rectangle.Empty;
         bool updatingText = false;
         int detectionGeneration;
         readonly Button removeButton;
 
-        string detectedId = "";
         RowState state = RowState.Queued;
         string statusText = "queued";
 
@@ -75,10 +73,7 @@ namespace Gp
                     has ? "AppID · entered manually" : "enter a valid Steam AppID");
             };
 
-            // A real Button, not a painted glyph: it keeps the remove action reachable by Tab and by
-            // screen readers. The row used to do BOTH - draw a "x" at this rectangle and place a Button
-            // on top of it - so the two glyphs landed a few pixels apart, and the parent's own
-            // hover/click handlers could never fire because the Button swallowed the mouse events.
+            // A real Button, not a painted glyph: reachable by Tab and by screen readers.
             removeButton = new Button
             {
                 Text = "\u00D7", TabStop = true, FlatStyle = FlatStyle.Flat,
@@ -101,7 +96,7 @@ namespace Gp
         public void ApplyDetection(int generation, string id, string source)
         {
             if (generation != detectionGeneration || Locked || IsDisposed) return;
-            detectedId = AppIdDetector.Normalize(id);
+            string detectedId = AppIdDetector.Normalize(id);
             updatingText = true;
             idBox.Text = detectedId;
             updatingText = false;
@@ -132,13 +127,7 @@ namespace Gp
         public void SetState(RowState st, string status)
         {
             state = st;
-            if (status != null) statusText = status;
-            else switch (st)
-            {
-                case RowState.Detecting: statusText = "detecting AppID…"; break;
-                case RowState.Patching: statusText = "patching…"; break;
-                case RowState.Queued: statusText = "queued"; break;
-            }
+            statusText = status ?? DefaultStatus(st);
             Invalidate();
         }
 
@@ -159,8 +148,7 @@ namespace Gp
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            removeRect = new Rectangle(Width - Ui.S(32), Height / 2 - Ui.S(12), Ui.S(24), Ui.S(24));
-            if (removeButton != null) removeButton.Bounds = removeRect;
+            if (removeButton != null) removeButton.Bounds = new Rectangle(Width - Ui.S(32), Height / 2 - Ui.S(12), Ui.S(24), Ui.S(24));
             if (idBox != null) idBox.SetBounds(Width - Ui.S(32) - Ui.S(8) - Ui.S(106), (Height - Ui.S(30)) / 2, Ui.S(106), Ui.S(30));
         }
 
@@ -177,9 +165,9 @@ namespace Gp
 
             // status dot
             var col = StateColor();
-            using (var b = new SolidBrush(col)) g.FillEllipse(b, 14, Height / 2 - 4, 8, 8);
+            using (var b = new SolidBrush(col)) g.FillEllipse(b, Ui.S(14), Height / 2 - Ui.S(4), Ui.S(8), Ui.S(8));
             if (state == RowState.Patching || state == RowState.Detecting)
-                using (var p = new Pen(Color.FromArgb(90, col.R, col.G, col.B), 1.5f)) g.DrawEllipse(p, 11, Height / 2 - 7, 14, 14);
+                using (var p = new Pen(Color.FromArgb(90, col.R, col.G, col.B), 1.5f)) g.DrawEllipse(p, Ui.S(11), Height / 2 - Ui.S(7), Ui.S(14), Ui.S(14));
 
             int textMaxW = Math.Max(0, idBox.Left - Ui.S(12) - Ui.S(32));
             if (textMaxW > 0)
@@ -194,8 +182,6 @@ namespace Gp
             var br = idBox.Bounds;
             Ui.FillRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.Surface2);
             Ui.StrokeRound(g, Rectangle.Inflate(br, -Ui.S(2), -Ui.S(2)), Ui.S(8), Ui.BorderC, 1f);
-
-            // The remove glyph is not painted here - removeButton owns that rectangle (see the ctor).
 
             if (Locked)
                 using (var b = new SolidBrush(Color.FromArgb(140, Ui.Bg.R, Ui.Bg.G, Ui.Bg.B))) g.FillRectangle(b, ClientRectangle);
@@ -213,9 +199,6 @@ namespace Gp
         readonly System.Windows.Forms.Timer timer;
         readonly Task writer;
         static readonly object fileLock = new object();
-        // Was a second, independent copy of the %APPDATA%\GoldbergPatcher literal. Now the same
-        // AppPaths.StateDir the rest of the app uses, so the three cannot drift apart.
-        static readonly string logDirectory = AppPaths.StateDir;
         int pendingCount, dropped;
         bool completed;
         string writeError;
@@ -299,7 +282,7 @@ namespace Gp
                 {
                     lock (fileLock)
                     {
-                        var dir = logDirectory;
+                        var dir = AppPaths.StateDir;
                         Directory.CreateDirectory(dir);
                         var path = Path.Combine(dir, "last_run.log");
                         if (File.Exists(path) && new FileInfo(path).Length + Encoding.UTF8.GetByteCount(text.ToString()) > 2 * 1024 * 1024)
@@ -337,7 +320,7 @@ namespace Gp
         }
     }
 
-    public class BatchForm : Form
+    public class BatchForm : ShibaForm
     {
         const int Pad = 24;
         const int RowH = 64;
@@ -384,21 +367,13 @@ namespace Gp
             this.settings = settings ?? new AppSettings();
             this.prefs = prefs ?? new BatchPrefs();
 
-            FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
-            AutoScaleDimensions = new SizeF(96f, 96f);
-            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(800, 672);
-            BackColor = Ui.Bg;
             Text = BuildInfo.AppName + " – batch";
-            KeyPreview = true;
-            DoubleBuffered = true;
             MinimumSize = Size;
 
             titleBar = new TitleBar();
             Controls.Add(titleBar);
-            titleBar.CloseClicked += delegate { Close(); };
-            titleBar.MinimizeClicked += delegate { WindowState = FormWindowState.Minimized; };
 
             listCard = new AppCard();
             listCard.Bounds = new Rectangle(Pad, 116, 800 - Pad * 2, 318);
@@ -408,7 +383,7 @@ namespace Gp
             rowsPanel = new Panel();
             rowsPanel.AutoScroll = true;
             rowsPanel.BackColor = Ui.Surface;
-            NativeMethods.UseDarkScrollbars(rowsPanel);
+            NativeMethods.UseExplorerScrollbars(rowsPanel);
             rowsPanel.Bounds = new Rectangle(10, 8, listCard.Width - 20, listCard.Height - 16);
             rowsPanel.SizeChanged += delegate { LayoutRows(); };
             // The list fills nearly the whole card, so it has to take drops itself - with only the card
@@ -487,29 +462,6 @@ namespace Gp
             RefreshRunButton();
         }
 
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ClassStyle |= 0x20000; // CS_DROPSHADOW
-                return cp;
-            }
-        }
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            try
-            {
-                int round = 2;   // DWMWCP_ROUND
-                NativeMethods.DwmSetWindowAttribute(Handle, 33, ref round, 4);
-                int dark = 0;   // light theme
-                NativeMethods.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
-                NativeMethods.DwmSetWindowAttribute(Handle, 19, ref dark, 4);
-            }
-            catch { }
-        }
-
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -518,15 +470,13 @@ namespace Gp
 
             string title = "Patch several games";
             var tf = Ui.F(12.75f, true);
-            TextRenderer.DrawText(g, title, tf, new Point(Pad, 48), Ui.TextC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, title, tf, new Point(Ui.S(Pad), Ui.S(48)), Ui.TextC, TextFormatFlags.NoPadding);
 
             var sub = Subtitle();
-            int subMaxW = Width - Pad * 2;
+            int subMaxW = Width - Ui.S(Pad * 2);
             var subFont = Ui.F(8.5f, false);
-            // Ui.TruncMiddle binary-searches; the loop this replaced did a MeasureString plus a string
-            // allocation per character removed, on every repaint including every resize tick.
             sub = Ui.TruncMiddle(g, sub, subFont, subMaxW);
-            TextRenderer.DrawText(g, sub, subFont, new Point(Pad, 74), prefs.OnlineFix ? Ui.WarnC : Ui.MutedC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, sub, subFont, new Point(Ui.S(Pad), Ui.S(74)), prefs.OnlineFix ? Ui.WarnC : Ui.MutedC, TextFormatFlags.NoPadding);
         }
 
         // ---------------------------------------------------------- list management
@@ -559,13 +509,13 @@ namespace Gp
 
         void ClearAll()
         {
-            foreach (var r in rows.ToArray()) RemoveRow(r, false);
+            foreach (var r in rows.ToArray()) RemoveRow(r);
         }
 
         void AddPaths(string[] paths)
         {
             if (running || closing || paths == null) return;
-            int added = 0, bad = 0;
+            int bad = 0;
             foreach (var p in paths)
             {
                 string full;
@@ -582,12 +532,11 @@ namespace Gp
                     row.SetIdBoxEnabled(false);
                     row.Note("online-fix mode – AppID not needed");
                 }
-                row.Removed += OnRowRemoved;
+                row.Removed += RemoveRow;
                 AcceptExeDrops(row);
                 row.MouseEnter += (s, e) => rowTip.SetToolTip(row, full + "\n" + row.StatusHint());
                 rowsPanel.Controls.Add(row);
                 rows.Add(row);
-                added++;
             }
             if (bad > 0) log.AppendLine(bad + " file(s) skipped – only existing .exe files can be patched.", LogLevel.Warn);
             LayoutRows();
@@ -595,9 +544,7 @@ namespace Gp
             foreach (var r in rows) Detect(r); // no-op for rows that already resolved / were edited manually
         }
 
-        void OnRowRemoved(BatchRow row) { RemoveRow(row, true); }
-
-        void RemoveRow(BatchRow row, bool logIt)
+        void RemoveRow(BatchRow row)
         {
             if (running || rows.IndexOf(row) < 0) return;
             row.InvalidateDetection();
@@ -789,18 +736,6 @@ namespace Gp
             if (!running || cts == null) return;
             try { cts.Cancel(); } catch { }
             runBtn.Text = "Cancelling…";
-        }
-
-        // Marshals an action to the UI thread from a worker thread. Swallows ObjectDisposedException when a
-        // callback arrives after the form has closed – BeginInvoke itself would otherwise throw on the pool
-        // thread (unobserved) because IsDisposed can only be checked inside the delegate.
-        void UiInvoke(Action a)
-        {
-            // Wrap in an anonymous method – Action and MethodInvoker are unrelated delegate types, so a
-            // direct cast is not allowed.
-            if (IsDisposed || !IsHandleCreated) return;
-            try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) a(); }); }
-            catch (InvalidOperationException) { }
         }
 
         readonly HashSet<string> appliedExes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

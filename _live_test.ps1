@@ -13,10 +13,13 @@ Set-Location $PSScriptRoot
 #  * --batch is used rather than the GUI flags (--exe/--appid/--auto) because the GUI path restores its
 #    options from settings.ini, so an online-fix setting left on would silently change what is tested.
 #    --batch pins OnlineFix=false and always exercises the dll replacement path.
-#  * $env:APPDATA is not guaranteed to be set, so the state directory is resolved through the shell API.
+#  * SHIBABERG_STATE_DIR points the patcher's state (undo journal, settings, logs) at the throwaway folder,
+#    so the run never overwrites a real pending "Undo last patch".
 
 $patcher = Join-Path $PSScriptRoot 'Shibaberg.exe'
-$stateDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'GoldbergPatcher'
+$live = Join-Path $env:TEMP 'gp_live'
+if (Test-Path -LiteralPath $live) { Remove-Item -LiteralPath $live -Recurse -Force }
+$stateDir = Join-Path $live 'state'
 $journal = Join-Path $stateDir 'last-patch\journal.txt'
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -31,6 +34,7 @@ function Invoke-Patcher([string]$arguments) {
     $psi.Arguments = $arguments
     $psi.WorkingDirectory = $PSScriptRoot
     $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables['SHIBABERG_STATE_DIR'] = $stateDir
     $proc = [System.Diagnostics.Process]::Start($psi)
     $proc.WaitForExit()
     return $proc.ExitCode
@@ -38,8 +42,6 @@ function Invoke-Patcher([string]$arguments) {
 
 # ---------------------------------------------------------------- patch a throwaway game
 
-$live = Join-Path $env:TEMP 'gp_live'
-if (Test-Path -LiteralPath $live) { Remove-Item -LiteralPath $live -Recurse -Force }
 $game = (New-Item -ItemType Directory -Path (Join-Path $live 'Half-Life 2')).FullName
 # Stock 32-bit Windows binaries stand in for the game: an x86 exe, and an x86 dll whose only job is to be a
 # pre-existing "original" steam_api.dll, so the run exercises backup + replacement, not just file creation.
@@ -132,9 +134,7 @@ $logFile = Join-Path $stateDir 'last_run.log'
 if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Tail 6 | ForEach-Object { Write-Host $_ } }
 
 if ($failures.Count -eq 0) {
-    # Leave no trace: the run left an undo journal pointing at this throwaway game, and the app would
-    # otherwise offer to "undo" a patch whose files are already gone.
+    # The state dir (and its undo journal) lives inside $live, so this leaves no trace.
     Remove-Item -LiteralPath $live -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue
 }
 exit $failures.Count

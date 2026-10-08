@@ -61,7 +61,7 @@ namespace Gp
     }
 
     /// <summary>Cloud saves: sign in to Google, then back up / restore each patched game's saves.</summary>
-    public class CloudForm : Form
+    public class CloudForm : ShibaForm
     {
         const int Pad = 24;
 
@@ -82,21 +82,13 @@ namespace Gp
         {
             this.settings = settings ?? new AppSettings();
 
-            FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
-            AutoScaleDimensions = new SizeF(96f, 96f);
-            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(800, 660);
-            BackColor = Ui.Bg;
             Text = BuildInfo.AppName + " – cloud saves";
-            KeyPreview = true;
-            DoubleBuffered = true;
             MinimumSize = Size;
 
             titleBar = new TitleBar();
             Controls.Add(titleBar);
-            titleBar.CloseClicked += delegate { Close(); };
-            titleBar.MinimizeClicked += delegate { WindowState = FormWindowState.Minimized; };
 
             accountCard = new AppCard();
             accountCard.Bounds = new Rectangle(Pad, 108, 800 - Pad * 2, 72);
@@ -115,7 +107,7 @@ namespace Gp
             rowsPanel = new Panel();
             rowsPanel.AutoScroll = true;
             rowsPanel.BackColor = Ui.Surface;
-            NativeMethods.UseDarkScrollbars(rowsPanel);
+            NativeMethods.UseExplorerScrollbars(rowsPanel);
             rowsPanel.Bounds = new Rectangle(10, 8, listCard.Width - 20, listCard.Height - 16);
             rowsPanel.SizeChanged += delegate { LayoutRows(); };
             listCard.Controls.Add(rowsPanel);
@@ -146,35 +138,14 @@ namespace Gp
                 Log(LogLevel.Warn, "Google sign-in isn't set up in this build: put google_client.json in the repo and rebuild.");
         }
 
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ClassStyle |= 0x20000; // CS_DROPSHADOW
-                return cp;
-            }
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            try
-            {
-                int round = 2;   // DWMWCP_ROUND
-                NativeMethods.DwmSetWindowAttribute(Handle, 33, ref round, 4);
-            }
-            catch { }
-        }
-
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var b = new SolidBrush(Ui.Bg)) g.FillRectangle(b, ClientRectangle);
-            TextRenderer.DrawText(g, "Cloud saves", Ui.F(12.75f, true), new Point(Pad, 48), Ui.TextC, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Cloud saves", Ui.F(12.75f, true), new Point(Ui.S(Pad), Ui.S(48)), Ui.TextC, TextFormatFlags.NoPadding);
             TextRenderer.DrawText(g, "Your saves, zipped into your own Google Drive (folder “" + CloudSaves.RootFolder + "”). The last "
-                + CloudSaves.Keep + " backups per game are kept.", Ui.F(8.5f, false), new Point(Pad, 74), Ui.MutedC, TextFormatFlags.NoPadding);
+                + CloudSaves.Keep + " backups per game are kept.", Ui.F(8.5f, false), new Point(Ui.S(Pad), Ui.S(74)), Ui.MutedC, TextFormatFlags.NoPadding);
         }
 
         void PaintAccount(object sender, PaintEventArgs e)

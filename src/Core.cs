@@ -85,9 +85,16 @@ namespace Gp
     /// %APPDATA%\GoldbergPatcher path used to be duplicated across Core, Batch and MainForm.</summary>
     public static class AppPaths
     {
+        /// <summary>SHIBABERG_STATE_DIR overrides it, so _live_test.ps1 can run without touching the real
+        /// undo journal, settings and logs.</summary>
         public static string StateDir
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher"); }
+            get
+            {
+                string over = Environment.GetEnvironmentVariable("SHIBABERG_STATE_DIR");
+                return !string.IsNullOrEmpty(over) ? over
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoldbergPatcher");
+            }
         }
 
         /// <summary>Undo records for the most recent patch run, kept outside the game folder so that
@@ -105,11 +112,6 @@ namespace Gp
         public ExeArch Arch;
         public string MachineText = "?";
         public long SizeBytes;
-
-        public override string ToString()
-        {
-            return MachineText + (Managed ? " (.NET)" : "");
-        }
     }
 
     /// <summary>Parses PE headers: architecture + managed/AnyCPU detection.</summary>
@@ -1240,7 +1242,6 @@ namespace Gp
 
     public class PatchLogEntry
     {
-        public DateTime Time;
         public LogLevel Level;
         public string Message;
     }
@@ -1252,9 +1253,7 @@ namespace Gp
         public string FinalExe = "";
         public string InstallDir = "";
         public string BackupDir = "";
-        public string SettingsDir = "";
         public bool Unpacked;
-        public List<string> ReplacedFiles = new List<string>();
         public bool NeedsAdmin;
         public bool Cancelled;
         public bool PartialChanges;
@@ -1264,7 +1263,6 @@ namespace Gp
         public bool RolledBack;
 
         public List<FileWriteRecord> Writes = new List<FileWriteRecord>();
-        public SettingsOutcome Settings = new SettingsOutcome();
 
         /// <summary>Post-patch install checks (see <see cref="InstallCheck"/>); empty when the run failed.</summary>
         public List<InstallCheckItem> Checks = new List<InstallCheckItem>();
@@ -1282,7 +1280,6 @@ namespace Gp
         public SettingsStatus Status;
         public string Directory = "";
         public string Error = "";
-        public int FilesCopied;
         internal List<KeyValuePair<string, string>> Files = new List<KeyValuePair<string, string>>();
     }
 
@@ -1335,11 +1332,7 @@ namespace Gp
                     ct.ThrowIfCancellationRequested();
                     SafePersistence.Locked(file.Value, () =>
                     {
-                        if (!File.Exists(file.Value))
-                        {
-                            SafePersistence.Copy(file.Key, file.Value, journal);
-                            outcome.FilesCopied++;
-                        }
+                        if (!File.Exists(file.Value)) SafePersistence.Copy(file.Key, file.Value, journal);
                         return true;
                     });
                 }
@@ -1536,7 +1529,7 @@ namespace Gp
             sb.Append(pad).Append('}');
         }
 
-        static string JsonEscape(string s)
+        internal static string JsonEscape(string s)
         {
             var sb = new StringBuilder(s.Length);
             foreach (char c in s)
@@ -1546,6 +1539,20 @@ namespace Gp
                 else sb.Append(c);
             }
             return sb.ToString();
+        }
+    }
+
+    /// <summary>HTTP requests for the Steam CDN/store and Google. .NET Framework only offers TLS 1.2 when the OS
+    /// default enables it, so it is switched on once here rather than before every request.</summary>
+    public static class Web
+    {
+        static Web() { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; }
+
+        public static HttpWebRequest Request(string url)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "Shibaberg/" + BuildInfo.Version;
+            return req;
         }
     }
 
@@ -1573,8 +1580,8 @@ namespace Gp
 
     /// <summary>Embedded payload: files baked into the exe at build time (gppay.* resources + gppay.manifest)
     /// are written back beside the exe when missing or corrupt, making the binary fully self-contained.
-    /// Manifest lines are `resource|relativePath|sha256`; existing files whose size matches are
-    /// hash-verified so a same-size corrupted file is repaired instead of kept.</summary>
+    /// Manifest lines are `resource|relativePath|sha256|length|deflate-or-raw` (build.ps1); existing files
+    /// whose size matches are hash-verified so a same-size corrupted file is repaired instead of kept.</summary>
     public static class Payload
     {
         class Entry
@@ -1582,11 +1589,8 @@ namespace Gp
             public string Res;
             public string Rel;
             public string Hash;
-
-            /// <summary>Size of the file as embedded *before* deflating, or -1 for a legacy manifest
-            /// that predates compression and carries no length.</summary>
-            public long Length = -1;
-
+            /// <summary>Size of the file before deflating.</summary>
+            public long Length;
             public bool Deflated;
         }
         static List<Entry> entries;
@@ -1646,13 +1650,6 @@ namespace Gp
 
         sealed class Stamp { public long Length; public long Ticks; }
 
-        static string ToHex(byte[] bytes)
-        {
-            var sb = new StringBuilder(bytes.Length * 2);
-            foreach (var b in bytes) sb.Append(b.ToString("x2"));
-            return sb.ToString();
-        }
-
         static void Load()
         {
             entries = new List<Entry>();
@@ -1667,19 +1664,14 @@ namespace Gp
                         string line;
                         while ((line = r.ReadLine()) != null)
                         {
-                            line = line.TrimStart('\uFEFF');
                             var parts = line.Split('|');
-                            if (parts.Length < 2 || parts[0].Length == 0) continue;
-                            var e = new Entry { Res = parts[0], Rel = parts[1] };
-                            if (parts.Length >= 3 && parts[2].Length > 0) e.Hash = parts[2]; // tolerate legacy hash-less manifests
-                            if (parts.Length >= 4)
+                            if (parts.Length < 5) continue;
+                            entries.Add(new Entry
                             {
-                                long len;
-                                if (long.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out len) && len >= 0)
-                                    e.Length = len;
-                            }
-                            e.Deflated = parts.Length >= 5 && string.Equals(parts[4], "deflate", StringComparison.OrdinalIgnoreCase);
-                            entries.Add(e);
+                                Res = parts[0], Rel = parts[1], Hash = parts[2],
+                                Length = long.Parse(parts[3], CultureInfo.InvariantCulture),
+                                Deflated = parts[4] == "deflate",
+                            });
                         }
                     }
                 }
@@ -1696,7 +1688,7 @@ namespace Gp
                 using (var s = typeof(Payload).Assembly.GetManifestResourceStream("gppay.manifest"))
                 {
                     if (s == null) return "";
-                    using (var sha = SHA256.Create()) return ToHex(sha.ComputeHash(s));
+                    using (var sha = SHA256.Create()) return SafePersistence.ToHex(sha.ComputeHash(s));
                 }
             }
             catch { return ""; }
@@ -1752,11 +1744,6 @@ namespace Gp
 
         /// <summary>Writes every missing, size-mismatched or hash-corrupt payload file beside the exe.
         /// Returns the relative paths that were restored; failures land in LastErrors.</summary>
-        public static List<string> ExtractMissing()
-        {
-            return ExtractMissing(false);
-        }
-
         /// <param name="forceVerify">Ignore the stamp and hash every file, even ones that look unchanged.</param>
         public static List<string> ExtractMissing(bool forceVerify)
         {
@@ -1782,7 +1769,6 @@ namespace Gp
                     using (var src = asm.GetManifestResourceStream(e.Res))
                     {
                         if (src == null) { LastErrors.Add(e.Rel + ": embedded resource missing"); continue; }
-                        long expected = e.Length >= 0 ? e.Length : src.Length;   // legacy manifest: resource is raw
 
                         // Fast path. A file whose size and write time are both exactly what the stamp
                         // recorded cannot have been rewritten since it was verified, so skip the hash.
@@ -1790,13 +1776,13 @@ namespace Gp
                         if (stampUsable && stamp.TryGetValue(e.Rel, out known))
                         {
                             var fi = new FileInfo(dst);
-                            if (fi.Exists && fi.Length == known.Length && fi.Length == expected
+                            if (fi.Exists && fi.Length == known.Length && fi.Length == e.Length
                                 && fi.LastWriteTimeUtc.Ticks == known.Ticks)
                                 continue;
                         }
 
-                        bool intact = File.Exists(dst) && new FileInfo(dst).Length == expected;
-                        if (intact && e.Hash != null)
+                        bool intact = File.Exists(dst) && new FileInfo(dst).Length == e.Length;
+                        if (intact)
                         {
                             LastPassHashed = true;
                             intact = Sha256Matches(dst, e.Hash);
@@ -1819,9 +1805,9 @@ namespace Gp
                                 else src.CopyTo(f);
                             }
                             long got = new FileInfo(tempPath).Length;
-                            if (e.Length >= 0 && got != e.Length)
+                            if (got != e.Length)
                                 throw new InvalidDataException("Restored size " + got + " does not match the manifest (" + e.Length + ").");
-                            if (e.Hash != null && !Sha256Matches(tempPath, e.Hash))
+                            if (!Sha256Matches(tempPath, e.Hash))
                                 throw new InvalidDataException("Restored payload failed its hash check.");
                             File.Copy(tempPath, dst, true);
                         }
@@ -1875,22 +1861,17 @@ namespace Gp
 
         static bool Sha256Matches(string path, string expectedHex)
         {
-            try
-            {
-                using (var s = File.OpenRead(path))
-                using (var sha = SHA256.Create())
-                    return string.Equals(ToHex(sha.ComputeHash(s)), expectedHex, StringComparison.OrdinalIgnoreCase);
-            }
+            try { return string.Equals(SafePersistence.Hash(path), expectedHex, StringComparison.OrdinalIgnoreCase); }
             catch { return false; } // unreadable → treat as corrupt so the caller rewrites it
         }
     }
 
-    /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
     /// <summary>Preserves <paramref name="source"/> in shibaberg_backup. <paramref name="knownSourceHash"/>
     /// spares a re-read when the caller already hashed the source; <paramref name="backupHash"/> returns the
     /// backup's hash for the same reason. Returns null when backups are off or the file is not eligible.</summary>
     public delegate string BackupTaker(string source, string knownSourceHash, out string backupHash);
 
+    /// <summary>Executes the full patch pipeline. UI-agnostic; reports via events.</summary>
     public class PatchRunner
     {
         public event Action<PatchLogEntry> LogLine;
@@ -1898,7 +1879,7 @@ namespace Gp
 
         private void Log(LogLevel lvl, string msg)
         {
-            var h = LogLine; if (h != null) h(new PatchLogEntry { Time = DateTime.Now, Level = lvl, Message = msg });
+            var h = LogLine; if (h != null) h(new PatchLogEntry { Level = lvl, Message = msg });
         }
         private void Pct(int p)
         {
@@ -1973,7 +1954,6 @@ namespace Gp
                 res.InstallDir = installDir;
                 var settingsPlan = (o.CreateSettings || o.OnlineFix)
                     ? SettingsScaffold.Plan(Tools.SettingsExampleDir, installDir) : new SettingsOutcome();
-                res.Settings = settingsPlan;
                 if (settingsPlan.Status == SettingsStatus.Failed) throw new IOException(settingsPlan.Error);
                 if (settingsPlan.Status == SettingsStatus.Missing) Log(LogLevel.Warn, settingsPlan.Error);
 
@@ -2049,7 +2029,7 @@ namespace Gp
                 if (o.OnlineFix)
                     PrepareOnlineFixMode(installDir, res);
                 else
-                    InstallGoldbergDlls(installDir, pe.Arch, foundApi, backup, res, o.Achievements);
+                    InstallGoldbergDlls(installDir, pe.Arch, backup, res, o.Achievements);
 
                 // ---- steam_appid.txt ---------------------------------------------
                 Pct(82);
@@ -2058,13 +2038,9 @@ namespace Gp
                     string appId = o.EffectiveAppId;
                     string txt = appId + Environment.NewLine;
                     WriteIfChanged(Path.Combine(installDir, "steam_appid.txt"), txt, res);
-                    res.ReplacedFiles.Add(ShortRel(gameDir, Path.Combine(installDir, "steam_appid.txt")));
                     var besideExe = Path.Combine(Path.GetDirectoryName(finalExe), "steam_appid.txt");
                     if (!string.Equals(besideExe, Path.Combine(installDir, "steam_appid.txt"), StringComparison.OrdinalIgnoreCase))
-                    {
                         WriteIfChanged(besideExe, txt, res);
-                        res.ReplacedFiles.Add(ShortRel(gameDir, besideExe));
-                    }
                     Log(LogLevel.Ok, "steam_appid.txt → " + appId +
                         (o.OnlineFix ? "  (Spacewar / generic online-fix)" : ""));
                 }
@@ -2075,7 +2051,6 @@ namespace Gp
                 {
                     var outcome = settingsPlan;
                     SettingsScaffold.Apply(outcome, res.Writes, ct);
-                    res.SettingsDir = outcome.Directory;
                     if (interfacesTxt != null && outcome.Status != SettingsStatus.Failed && outcome.Directory.Length > 0)
                     {
                         WriteIfChanged(Path.Combine(outcome.Directory, "steam_interfaces.txt"), interfacesTxt, res);
@@ -2324,7 +2299,6 @@ namespace Gp
                     // live dll is a Goldberg emulator build – online-fix cannot work with it in place
                     OriginalBackups.Restore(backupDir, cur, res.Writes, Log);
                     Log(LogLevel.Ok, "Detected Goldberg emulator dll – restored original " + n + " from " + Path.GetFileName(backupDir) + "\\ (required for online-fix).");
-                    res.ReplacedFiles.Add(n);
                 }
                 else
                 {
@@ -2404,7 +2378,7 @@ namespace Gp
             return total;
         }
 
-        private void InstallGoldbergDlls(string installDir, ExeArch arch, List<string> foundApi, BackupTaker backup, PatchResult res, bool overlay)
+        private void InstallGoldbergDlls(string installDir, ExeArch arch, BackupTaker backup, PatchResult res, bool overlay)
         {
             // The *name* comes from the import table; the *architecture* comes from the PE header. Deriving
             // the name from the architecture is the worst failure mode in the app: a correctly-architected
@@ -2437,11 +2411,8 @@ namespace Gp
                         // No original: the emulator dll's own header still names its architecture.
                         probe = File.Exists(original) ? original : otherPath;
                     }
-                    if (probe != null)
-                    {
-                        var probed = PeReader.Analyze(probe).Arch;
-                        if (probed != ExeArch.Unknown) otherArch = probed;
-                    }
+                    var probed = PeReader.Analyze(probe).Arch;
+                    if (probed != ExeArch.Unknown) otherArch = probed;
                 }
                 catch { }
                 wanted.Add(new KeyValuePair<string, ExeArch>(otherName, otherArch));
@@ -2473,7 +2444,6 @@ namespace Gp
                         throw new InvalidDataException("Emulator dll is " + pe.MachineText
                             + " but " + dllName + " needs " + (dllArch == ExeArch.X64 ? "x64" : "x86") + ".");
                 });
-                res.ReplacedFiles.Add(dllName);
                 installed++;
                 Log(LogLevel.Ok, "Installed Goldberg → " + dllName + "  (" + (dllArch == ExeArch.X64 ? "x64" : "x86") + (overlay ? ", with in-game overlay" : "") + ")");
             }
@@ -2545,14 +2515,14 @@ namespace Gp
             {
                 var todo = schema.Icons.Where(n => !File.Exists(Path.Combine(imgDir, n))).ToList();
                 var got = new System.Collections.Concurrent.ConcurrentBag<string>();
+                // .NET Framework allows 2 connections per host by default, which would cap the 6 workers at 2.
+                ServicePointManager.DefaultConnectionLimit = Math.Max(ServicePointManager.DefaultConnectionLimit, 6);
                 Parallel.ForEach(todo, new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct }, icon =>
                 {
                     try
                     {
-                        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-                        var req = (HttpWebRequest)WebRequest.Create(AchievementSchema.IconUrl(appId, icon));
+                        var req = Web.Request(AchievementSchema.IconUrl(appId, icon));
                         req.Timeout = req.ReadWriteTimeout = 8000;
-                        req.UserAgent = "Shibaberg/" + BuildInfo.Version;
                         using (ct.Register(() => req.Abort()))
                         using (var resp = req.GetResponse())
                         using (var f = File.Create(Path.Combine(tmp, icon)))
@@ -2592,8 +2562,6 @@ namespace Gp
             return null;
         }
 
-        /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
-        /// A dll sitting right next to the exe always wins over deep copies.</summary>
         /// <summary>Where to look for the game's Steamworks libraries. Normally the exe's own folder, but an
         /// Unreal game's real exe sits in &lt;Project&gt;\Binaries\Win64 while the library lives under the game
         /// root's Engine\Binaries\ThirdParty - searching down from the exe never finds it, and the emulator
@@ -2647,6 +2615,8 @@ namespace Gp
             catch { return null; }
         }
 
+        /// <summary>Ranks candidates: nearest to the exe first; arch-matching name breaks ties.
+        /// A dll sitting right next to the exe always wins over deep copies.</summary>
         public static string PickApiTarget(List<string> files, string gameDir, string preferredName)
         {
             return files
@@ -2720,7 +2690,7 @@ namespace Gp
         {
             foreach (var d in dirs.Where(d => !string.IsNullOrEmpty(d)))
             {
-                if (d == null || !Directory.Exists(d)) continue;
+                if (!Directory.Exists(d)) continue;
                 var f = Path.Combine(d, "steam_appid.txt");
                 if (File.Exists(f))
                 {
@@ -2755,9 +2725,6 @@ namespace Gp
         }
     }
 
-    // --------------------------------------------------------------------- batch patching
-
-    /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
     /// <summary>Managed replacement for GSE's generate_interfaces tool: lists the Steam interface version
     /// strings an ORIGINAL steam_api dll was built against, which is what steam_interfaces.txt tells the
     /// emulator. Same patterns, same order and the same SteamClient017 rule as the upstream tool
@@ -2800,12 +2767,6 @@ namespace Gp
                 lines.AddRange(matches);
             }
             return lines;
-        }
-
-        public static string Generate(string dllPath)
-        {
-            var lines = Scan(dllPath);
-            return lines.Count == 0 ? null : string.Join("\r\n", lines.ToArray()) + "\r\n";
         }
     }
 
@@ -2855,18 +2816,38 @@ namespace Gp
         /// against the bundled dll byte-for-byte would miss an install made by any other patcher release.</summary>
         public static bool IsEmulatorDll(string path)
         {
-            byte[] data;
-            try { data = File.ReadAllBytes(path); }
+            byte[] settings = Encoding.ASCII.GetBytes("steam_settings"), client = Encoding.ASCII.GetBytes("steamclient");
+            bool hasSettings = false;
+            try
+            {
+                // One sequential pass in 1 MB chunks; the tail of each chunk is carried over so a marker
+                // split across two reads is still found.
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan))
+                {
+                    int keep = Math.Max(settings.Length, client.Length) - 1;
+                    var buf = new byte[(1 << 20) + keep];
+                    int carry = 0, n;
+                    while ((n = fs.Read(buf, carry, buf.Length - carry)) > 0)
+                    {
+                        int len = carry + n;
+                        if (IndexOf(buf, len, client) >= 0) return false;
+                        if (!hasSettings) hasSettings = IndexOf(buf, len, settings) >= 0;
+                        carry = Math.Min(keep, len);
+                        Buffer.BlockCopy(buf, len - carry, buf, 0, carry);
+                    }
+                }
+            }
             catch { return false; }
-            return IndexOf(data, Encoding.ASCII.GetBytes("steam_settings")) >= 0
-                && IndexOf(data, Encoding.ASCII.GetBytes("steamclient")) < 0;
+            return hasSettings;
         }
 
-        internal static int IndexOf(byte[] haystack, byte[] needle)
+        internal static int IndexOf(byte[] haystack, byte[] needle) { return IndexOf(haystack, haystack.Length, needle); }
+
+        internal static int IndexOf(byte[] haystack, int length, byte[] needle)
         {
             byte first = needle[0];
-            int last = haystack.Length - needle.Length;
-            for (int i = Array.IndexOf(haystack, first); i >= 0 && i <= last; i = Array.IndexOf(haystack, first, i + 1))
+            int last = length - needle.Length;
+            for (int i = Array.IndexOf(haystack, first, 0, length); i >= 0 && i <= last; i = Array.IndexOf(haystack, first, i + 1, length - i - 1))
             {
                 int j = 1;
                 while (j < needle.Length && haystack[i + j] == needle[j]) j++;
@@ -3003,6 +2984,7 @@ namespace Gp
         }
     }
 
+    /// <summary>Result of resolving one game's Steam AppID from local sources (and optionally the online store).</summary>
     public class AppIdDetection
     {
         public string AppId = "";   // "" when nothing was found
@@ -3142,6 +3124,8 @@ namespace Gp
         }
     }
 
+    // --------------------------------------------------------------------- batch patching
+
     /// <summary>One game queued for a batch run. AppId may be empty (the engine skips it unless online-fix is on).</summary>
     public class BatchInput
     {
@@ -3180,7 +3164,7 @@ namespace Gp
 
         private void Log(LogLevel lvl, string msg)
         {
-            var h = LogLine; if (h != null) h(new PatchLogEntry { Time = DateTime.Now, Level = lvl, Message = msg });
+            var h = LogLine; if (h != null) h(new PatchLogEntry { Level = lvl, Message = msg });
         }
 
         public Task<List<BatchItemOutcome>> RunAsync(List<BatchInput> items, BatchPrefs prefs, CancellationToken ct)
@@ -3404,11 +3388,6 @@ namespace Gp
             return null;
         }
 
-        public static Task<SteamMatch> FindBestForExeAsync(string exePath, CancellationToken ct = default(CancellationToken))
-        {
-            return Task.Run(() => FindBestForExe(exePath, ct), ct);
-        }
-
         /// <summary>Requests left for online lookups in the current run. A 50-game batch used to be able to
         /// issue unbounded sequential lookups, each with its own timeout; once this is spent the batch falls
         /// back to local detection rather than stalling on the network.</summary>
@@ -3434,14 +3413,11 @@ namespace Gp
             ct.ThrowIfCancellationRequested();
             try
             {
-                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "GET";
+                var req = Web.Request(url);
                 // 4s rather than 8s: this runs while a batch is stalled on the network, and a slow answer
                 // is worth less than the delay costs.
                 req.Timeout = 4000;
                 req.ReadWriteTimeout = 4000;
-                req.UserAgent = "Shibaberg/" + BuildInfo.Version;   // was a stale hardcoded "0.3"
                 using (ct.Register(() => req.Abort()))
                 using (var resp = req.GetResponse())
                 using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
@@ -3470,7 +3446,6 @@ namespace Gp
     public class AppSettings
     {
         public string LastExe = "";
-        public string LastAppId = "";
         public bool UnpackDrm = true;
         public bool Backup = true;
         public bool WriteAppIdTxt = true;
@@ -3500,7 +3475,6 @@ namespace Gp
                     switch (k)
                     {
                         case "lastexe": s.LastExe = v; break;
-                        case "appid": s.LastAppId = v; break;
                         case "unpack": s.UnpackDrm = v == "1"; break;
                         case "backup": s.Backup = v == "1"; break;
                         case "appidsrc": s.WriteAppIdTxt = v == "1"; break;
@@ -3529,7 +3503,6 @@ namespace Gp
                 Directory.CreateDirectory(Dir);
                 var sb = new StringBuilder();
                 sb.AppendLine("lastexe=" + LastExe);
-                sb.AppendLine("appid=" + LastAppId);
                 sb.AppendLine("unpack=" + (UnpackDrm ? "1" : "0"));
                 sb.AppendLine("backup=" + (Backup ? "1" : "0"));
                 sb.AppendLine("appidsrc=" + (WriteAppIdTxt ? "1" : "0"));
