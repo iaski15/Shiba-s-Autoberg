@@ -2041,6 +2041,11 @@ namespace Gp
                     var besideExe = Path.Combine(Path.GetDirectoryName(finalExe), "steam_appid.txt");
                     if (!string.Equals(besideExe, Path.Combine(installDir, "steam_appid.txt"), StringComparison.OrdinalIgnoreCase))
                         WriteIfChanged(besideExe, txt, res);
+                    // Unreal's -Shipping exe runs with its own Binaries\Win64 as working directory, which is where
+                    // Valve's steam_api reads steam_appid.txt (online-fix would otherwise attach as the real game).
+                    string companionExe = UnrealCompanion(exePath);
+                    if (companionExe != null)
+                        WriteIfChanged(Path.Combine(Path.GetDirectoryName(companionExe), "steam_appid.txt"), txt, res);
                     Log(LogLevel.Ok, "steam_appid.txt → " + appId +
                         (o.OnlineFix ? "  (Spacewar / generic online-fix)" : ""));
                 }
@@ -2962,7 +2967,9 @@ namespace Gp
             }
 
             // 3. steam_appid.txt: beside the exe and beside each library, all saying the same thing.
-            var appIdFiles = new[] { exeDir }.Concat(found.Select(Path.GetDirectoryName))
+            if (companion != null && !File.Exists(Path.Combine(Path.GetDirectoryName(companion), "steam_appid.txt")))
+                add(CheckStatus.Fail, "steam_appid.txt beside " + Path.GetFileName(companion), "missing – the game runs from that folder");
+            var appIdFiles = new[] { exeDir }.Concat(stubTargets.Skip(1).Select(Path.GetDirectoryName)).Concat(found.Select(Path.GetDirectoryName))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Select(d => Path.Combine(d, "steam_appid.txt")).Where(File.Exists).ToList();
             string expected = onlineFix ? "480" : (expectedAppId ?? "").Trim();
