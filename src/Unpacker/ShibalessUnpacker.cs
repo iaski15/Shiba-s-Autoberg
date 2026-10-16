@@ -101,6 +101,23 @@ namespace Shibaless
         /// cannot be read or is not a PE.</summary>
         public static List<string> ReadSectionNames(string filePath)
         {
+            var headers = ReadSectionHeaders(filePath);
+            return headers == null ? null : headers.Select(h => h.Name).ToList();
+        }
+
+        /// <summary>One entry of the PE section table.</summary>
+        public sealed class SectionHeader
+        {
+            public string Name = "";
+            public uint VirtualSize;
+            public uint SizeOfRawData;
+            public uint Characteristics;
+        }
+
+        /// <summary>The PE section table (name, sizes, characteristics), reading only the headers. Null when
+        /// the file cannot be read or is not a PE.</summary>
+        public static List<SectionHeader> ReadSectionHeaders(string filePath)
+        {
             try
             {
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096))
@@ -118,14 +135,20 @@ namespace Shibaless
                     var sections = new byte[count * 40];
                     fs.Position = table;
                     if (ReadFully(fs, sections) != sections.Length) return null;
-                    var names = new List<string>(count);
+                    var list = new List<SectionHeader>(count);
                     for (int i = 0; i < count; i++)
                     {
-                        int len = 0;
-                        while (len < 8 && sections[i * 40 + len] != 0) len++;
-                        names.Add(Encoding.ASCII.GetString(sections, i * 40, len));
+                        int at = i * 40, len = 0;
+                        while (len < 8 && sections[at + len] != 0) len++;
+                        list.Add(new SectionHeader
+                        {
+                            Name = Encoding.ASCII.GetString(sections, at, len),
+                            VirtualSize = PeImage.ReadUInt32(sections, at + 8),
+                            SizeOfRawData = PeImage.ReadUInt32(sections, at + 16),
+                            Characteristics = PeImage.ReadUInt32(sections, at + 36),
+                        });
                     }
-                    return names;
+                    return list;
                 }
             }
             catch { return null; }

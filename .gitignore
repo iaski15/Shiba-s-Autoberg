@@ -13,6 +13,7 @@ plan.md
 /Shibaberg.exe
 /Goldberg Patcher.exe
 /_selftest.exe
+/playnite/bin/
 /dist/
 
 # Markdown is local-only, except the repo front page and Shibaberg (whose tree includes the

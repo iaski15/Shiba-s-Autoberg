@@ -7,7 +7,7 @@ using System.Threading;
 using Gp;
 using Shibaless;
 
-static class TestMain
+static partial class TestMain
 {
     static int pass = 0, fail = 0;
 
@@ -20,6 +20,7 @@ static class TestMain
     static int Main(string[] args)
     {
         if (args != null && args.Length == 2 && args[0] == "--corpus") return Corpus(args[1]);
+        if (args != null && args.Length == 2 && args[0] == "--protections") return Protections(args[1]);
         return SelfTest();
     }
 
@@ -856,8 +857,10 @@ static class TestMain
                   File.ReadAllText(Path.Combine(gameDir, "steam_appid.txt")).Trim() == "1250",
                   "steam_appid.txt written with AppID");
 
-            var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.ini");
-            Check(File.Exists(settingsIni), "steam_settings copied & '.EXAMPLE' stripped", settingsIni);
+            var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.EXAMPLE.ini");
+            Check(File.Exists(settingsIni) && !File.Exists(Path.Combine(gameDir, "steam_settings", "configs.main.ini"))
+                  && !File.Exists(Path.Combine(gameDir, "steam_settings", "steam_appid.txt")),
+                  "steam_settings copied with the '.EXAMPLE' names kept (inert samples)", settingsIni);
             var iface = Path.Combine(gameDir, "steam_settings", "steam_interfaces.txt");
             Check(File.Exists(iface) && File.ReadAllLines(iface).SequenceEqual(new[] { "STEAMAPPS_INTERFACE_VERSION008", "SteamClient017", "SteamFriends017", "SteamUser021" }),
                   "steam_interfaces.txt generated in-process, in upstream pattern order", File.Exists(iface) ? File.ReadAllText(iface).Replace("\r\n", ",") : "(missing)");
@@ -1408,7 +1411,32 @@ static class TestMain
         Check(SteamLookup.Search("Half-Life 2") == null, "an exhausted request budget makes no request", null);
         SteamLookup.ResetRequestBudget(int.MaxValue);
 
+        Console.WriteLine("\n[playnite option plumbing]");
+        Check(!new PatchOptions().Playnite, "PatchOptions.Playnite is off unless asked for", null);
+        Check(!new BatchPrefs().Playnite, "BatchPrefs.Playnite is off unless asked for", null);
+        string prevState = Environment.GetEnvironmentVariable("SHIBABERG_STATE_DIR");
+        string stateDir = Path.Combine(Path.GetTempPath(), "gp_selftest_state_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable("SHIBABERG_STATE_DIR", stateDir);
+            Check(AppSettings.Load().Playnite, "settings without a playnite key default to on", null);
+            string saveErr;
+            Check(new AppSettings { Playnite = false }.Save(out saveErr) && !AppSettings.Load().Playnite,
+                  "playnite=0 survives a save/load round trip", saveErr);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHIBABERG_STATE_DIR", prevState);
+            try { Directory.Delete(stateDir, true); } catch { }
+        }
+
         ReviewRegressions();
+        // feature sections, one file each (src\Test*.cs)
+        SelfTestEmuSettings();
+        SelfTestRestore();
+        SelfTestPlaynite();
+        SelfTestProtection();
+        SelfTestScaffold();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 
         Recovery.JournalPathOverride = null;

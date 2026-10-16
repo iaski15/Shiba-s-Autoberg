@@ -1,6 +1,6 @@
 # Shibaberg
 
-A one-click auto-patcher for [Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) (GSE). Drop a game executable, enter the AppID, and it takes care of everything: DRM unpacking, installing the emulator dlls, `steam_appid.txt`, interface generation, and setting up the `steam_settings` folder.
+A one-click auto-patcher for the Goldberg Steam Emulator (GSE), built on [gbe_fork](https://github.com/Detanup01/gbe_fork), the maintained Goldberg continuation. Drop a game executable, enter the AppID, and it takes care of everything: DRM unpacking, installing the emulator dlls, `steam_appid.txt`, interface generation, and setting up the `steam_settings` folder.
 
 Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows executable.
 
@@ -10,9 +10,12 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 - **DRM unpacking** — removes SteamStub DRM (every variant Steamless handles, 1.0 to 3.1) with **Shibaless**, our fork of [Steamless](https://github.com/atom0s/Steamless), compiled into the app and run in-process: no helper process, no temporary `.unpacked.exe`, and the result is validated before it replaces the game exe
 - **Backup & restore** — originals are saved to `<game>\shibaberg_backup\sources\<pathhash>\` (installs from older versions used `goldberg_backup`, which is still read and renamed on the next patch); picking a game that has one tells you it was patched before; online-fix only reverts a dll that is provably one of the bundled Goldberg builds, restoring it from that backup tree
 - **Interface generation** — scans the *original* dll for its interface versions (what GSE's `generate_interfaces` does, in-process) so the emulator responds to exactly the interfaces the game requests
-- **steam_settings scaffolding** — optionally creates a ready-to-edit `steam_settings` folder from GSE's example files, with the generated `steam_interfaces.txt` placed inside
+- **steam_settings scaffolding** — optionally creates a `steam_settings` folder with GSE's example files as inert `*.EXAMPLE` references (rename one to use it), with the generated `steam_interfaces.txt` placed inside. Versions up to 0.7 copied the examples under their live names, which switched on their sample values (AppID 1337, a fake locked DLC list, a fixed account with saves beside the dll); a patch now warns when it finds those, and *Emulator settings…* removes them
+- **Protection pre-flight** — warns (never blocks) when the exe carries a protection the emulator cannot remove: VMProtect, Themida, WinLicense and Enigma by their section names, Denuvo (or an unrecognised protector) by a large executable section under a name no compiler uses
 - **Online-fix mode** — keeps the original Steamworks dll and registers the game on your real Steam account as Spacewar (AppID 480), so multiplayer traffic goes through Steam's own servers without replacing anything
 - **Undo** — every write is journalled, so a patch that fails or is cancelled part-way can be rolled back; "Undo last patch" also works after a restart
+- **Game tools** — for the selected game: *Emulator settings…* (player name, language, DLC, LAN peers), *Restore original…* (back to the game's own files, any time after patching) and *Add to Playnite*
+- **Playnite** — patched games show up in your [Playnite](https://playnite.link) library on their own, with a working Play button
 - **In-game achievement popups** — an Xbox-style toast with the shiba, plus a restyled Shift+Tab overlay; the achievement list comes from the Steam client's local cache (`appcache\stats`), no web API
 - **Cloud saves** — your saves keep going to the game's own folders and a copy is synced with **your own Google Drive**: pulled when the game starts, uploaded when it exits, last 10 backups per game kept; sign in from the Shift+Tab overlay or the Cloud saves window
 - **Self-contained binary** — all tools and payload files are embedded in the exe, compressed, and extracted to `%LOCALAPPDATA%\GoldbergPatcher\payload\<build>\` on first run; one file is all you need
@@ -29,14 +32,35 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 | Unpack DRM (Shibaless) | on | Removes SteamStub DRM from the exe (skipped instantly when it has no `.bind` section) |
 | Backup originals | on | Copies replaced files to `shibaberg_backup\sources\` before overwriting |
 | Write steam_appid.txt | on | Writes the AppID next to the dlls and beside the game exe |
-| Create steam_settings folder | off | Creates a settings folder from GSE's examples, ready for custom configs |
+| Create steam_settings folder | off | Creates a settings folder with GSE's examples as inert `*.EXAMPLE` files, ready for custom configs |
 | Auto-detect Steam AppID online | on | Looks the game up on the Steam Store when no local AppID is found |
 | Generic online-fix | off | Keeps the original dll and presents the game as Spacewar (AppID 480) |
 | In-game overlay: achievements + cloud saves | off | Installs the overlay build of the emulator, the game's achievement list, and cloud-save syncing (Shibaberg.exe must stay where it was when patching) |
+| Add patched games to Playnite | on | Adds every game Shibaberg patches to your Playnite library with a working Play button (greyed out when Playnite is not installed) |
 
 `steam_interfaces.txt` generation is not a toggle — it runs against the original dll whenever one is available and the emulator dll is being installed.
 
 After patching, launch the game normally. If it does not work out of the box, read [shibaberg/post_build/README.release.md](shibaberg/post_build/README.release.md) — it documents every emulator configuration option (achievements, stats, controller bindings, leaderboards, etc.).
+
+### Game tools
+
+Pick a game, then **Game tools ▾**:
+
+- **Emulator settings…** edits the game's own `steam_settings` beside its emulator dll: player name and language (`configs.user.ini`), *Unlock all DLC* or a ticked list (`configs.app.ini`), and LAN peers (`custom_broadcasts.txt`, one IP or host name per line — needed for VPNs like Radmin or ZeroTier, not for Tailscale or a home network). A field left blank is not written, so the global `%APPDATA%\GSE Saves\settings` value applies. The DLC list and the game's languages come from the Steam client's local cache (`appcache\appinfo.vdf`); *Fetch names from Steam store* fills in missing DLC names on request. When an older version left live sample files, the window offers to clean them up, optionally copying the saves out of the sample `local_save_path` first (copied, never moved).
+- **Restore original…** puts the game back to its own files, whenever you like (*Undo last patch* only covers the latest run). It first lists exactly what it will put back, remove and leave alone: originals come from the verified backups (never an emulator dll); only files Shibaberg provably made are removed; anything changed since the patch, and your own files, stay. If one original fails to copy back, the ones already restored are undone. Without a kept original of the Steamworks dll it points you to Steam's *Verify integrity of game files*. The backup folder goes once everything is back.
+- **Add to Playnite** adds an already-patched game, the same way a patch does with the Playnite option on.
+
+Each patch also writes `shibaberg_backup\ledger.txt`, a record of every file it created or replaced, so a restore knows the game's files from Shibaberg's — and a later re-patch notices when a game update replaced an original, and backs up the new one instead of keeping the outdated copy.
+
+### Playnite
+
+With **Add patched games to Playnite** on, every successful patch (single, batch and `--batch`) adds the game to a **Shibaberg** library in Playnite:
+
+1. The first time, Shibaberg installs a small library extension into Playnite (`Extensions\Shibaberg_Library`; portable installs too). If Playnite is running then, **restart it once** to load it; updates to the extension also take effect on the next start.
+2. The game goes on Shibaberg's list (`%APPDATA%\GoldbergPatcher\playnite.txt`). A running Playnite imports it straight away; otherwise it appears the next time Playnite starts.
+3. In Playnite the game is named from Steam's local cache (or the Unity product name, or the folder name without release tags), has the exe's icon, a Steam store link, and the store's cover and background art when the CDN has them. *Play* starts the patched exe and Playnite tracks the playtime. Playnite does not fetch further metadata for these games by itself; use *Download metadata* in Playnite if you want it.
+
+Restoring a game takes it off the list (Playnite keeps it until you remove it there). The extension is built from `playnite\ShibabergLibrary.cs`; `playnite\test-e2e.ps1` checks it against a temporary portable copy of your Playnite.
 
 ### Online-fix mode
 
@@ -53,18 +77,21 @@ The game then attaches to your real Steam account as Spacewar and all traffic is
 The GUI executable is also headless-capable, which is how the live test drives it:
 
 ```text
-Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
-Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings] [--achievements]
+Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done] [--playnite]
+Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings] [--achievements] [--playnite]
 Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]
+Shibaberg.exe --restore <game.exe> [--appid <id>]
 Shibaberg.exe --verify-payload
 ```
 
 - `--auto` is what actually starts a run; `--appid` on its own only pre-fills the box.
 - `--batch` is the only mode that ignores `settings.ini`, so it is the way to script a patch without the GUI's saved options interfering.
+- `--playnite` adds the patched game(s) to Playnite. With `--exe` it switches the option on for that run even when the toggle is off; `--batch` ignores `settings.ini`, so there it is off unless given.
 - `--check` verifies an already-patched install without changing anything: SteamStub removed, the Steamworks library the game actually loads is the emulator (or Valve's original for online-fix, inferred when every `steam_appid.txt` says 480 and no library is the emulator), architecture match, and the AppID. The same check runs automatically after every patch.
-- Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
+- `--restore` is *Restore original…* without the questions: it prints the plan, then carries it out. `--appid` only fills in the Steam verify link when no `steam_appid.txt` names the game.
+- Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--restore` `0` = fully restored, `1` = failure (or the game is running), `2` = partially restored or nothing to restore. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
 
-For development, `_selftest.exe --corpus <folder>` unpacks every SteamStub exe under a folder twice with Shibaless — through the in-memory path the patcher uses, and through the fork's untouched upstream path that writes `<exe>.unpacked.exe` exactly as Steamless.CLI does — and compares the results byte for byte (it works on temp copies and never writes into the folder). `SAME*` means only the certificate-table pointer differs: we move it with the overlay, upstream leaves it stale.
+For development, `_selftest.exe --protections <folder>` prints the protection pre-flight result for every exe below a folder (read-only), and `_selftest.exe --corpus <folder>` unpacks every SteamStub exe under a folder twice with Shibaless — through the in-memory path the patcher uses, and through the fork's untouched upstream path that writes `<exe>.unpacked.exe` exactly as Steamless.CLI does — and compares the results byte for byte (it works on temp copies and never writes into the folder). `SAME*` means only the certificate-table pointer differs: we move it with the overlay, upstream leaves it stale.
 
 ## Building from source
 
@@ -76,9 +103,10 @@ Requirements: Windows and Visual Studio Build Tools with the Roslyn C# compiler 
 .\build.ps1 -Package # also dist\Shibaberg-Setup-<version>.exe (the installer) and a zip
 ```
 
-The script compiles two binaries:
+The script compiles three binaries:
 
 - `_selftest.exe` — headless console self-test (PE analysis, recovery, payload, and regression coverage)
+- `playnite\bin\ShibabergPlaynite.dll` — the Playnite extension (against the vendored `playnite\lib\Playnite.SDK.dll` and WPF), embedded in the app's payload
 - `Shibaberg.exe` — the GUI app, with the entire toolchain embedded as resources
 
 The payload file list lives in `build.ps1`. Adding or removing files there changes the embedded set; a file listed but missing from disk fails the build rather than producing a broken exe.
@@ -95,7 +123,10 @@ The payload file list lives in `build.ps1`. Adding or removing files there chang
 ## Repository layout
 
 ```
-src/                      C# sources (Core.cs = patch pipeline + PE reader, Cloud.cs = cloud saves, Ui.cs, MainForm.cs, Batch.cs, CloudForm.cs)
+src/                      C# sources (Core.cs = patch pipeline + PE reader, Cloud.cs = cloud saves, Restore.cs, EmuSettings.cs,
+                          SteamAppInfo.cs, Playnite.cs, Ui.cs, MainForm*.cs, Batch.cs, CloudForm.cs, EmuSettingsForm.cs; Test*.cs = self-test)
+playnite/                 the Playnite library extension (ShibabergLibrary.cs, extension.yaml, icon.png), its SDK reference, test-e2e.ps1
+licenses/                 licenses of vendored files not covered elsewhere (Playnite.SDK)
 Shibaberg.exe      built GUI app (self-contained) – build output, not tracked
 _selftest.exe             built console self-test – build output, not tracked
 shibaless/                Shibaless: our fork of Steamless (API + 7 unpackers), compiled into the app; see VENDORED.md
@@ -123,6 +154,7 @@ Use of information received from Google APIs adheres to the [Google API Services
 
 - [Mr. Goldberg — Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — the original emulator (discontinued)
 - [Detanup01 — gbe_fork](https://github.com/Detanup01/gbe_fork) — its maintained continuation; our fork of it, Shibaberg, lives in `shibaberg/` (see its `VENDORED.md`, and `CREDITS.md` for its third-party licenses)
+- [Josef Nemec — Playnite](https://github.com/JosefNemec/Playnite) — the Playnite SDK the Shibaberg library extension is built against (MIT, `licenses/Playnite.SDK.txt`)
 - [atom0s — Steamless](https://github.com/atom0s/Steamless) — the SteamStub unpackers; our fork of them, Shibaless, lives in `shibaless/` (renamed throughout, plus one small patch) (see its `VENDORED.md`)
 
 ## License
