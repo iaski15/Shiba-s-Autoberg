@@ -739,7 +739,18 @@ namespace Gp
             {
                 string hash;
                 string existing = Existing(root, source, out hash, log);
-                if (existing != null && File.Exists(destination)) { result = existing; resultHash = hash; return true; }
+                if (existing != null && File.Exists(destination))
+                {
+                    if (!UpdatedSinceBackup(root, source, hash, knownSourceHash))
+                    {
+                        result = existing; resultHash = hash; return true;
+                    }
+                    // A game update replaced the original: the live file is the new original, so it is what
+                    // has to come back after an undo or a restore - not the outdated copy.
+                    if (log != null) log(LogLevel.Info, Path.GetFileName(source) + " changed since its original was backed up (a game update?) – the backup now holds the new version.");
+                    existing = null;
+                    hash = null;
+                }
                 string content = existing ?? source;
                 if (!Eligible(content)) return true;
                 if (hash == null && existing == null) hash = knownSourceHash;
@@ -768,6 +779,42 @@ namespace Gp
             });
             backupHash = resultHash;
             return result;
+        }
+
+        /// <summary>True when the live file is neither the backed-up original, nor something a patch wrote (per the
+        /// ledger), nor any emulator dll - i.e. the game itself was updated after the backup was taken. Only
+        /// decided with a ledger: without one, an unpacked exe would look exactly like an update.</summary>
+        static bool UpdatedSinceBackup(string root, string source, string backupHash, string knownSourceHash)
+        {
+            try
+            {
+                var ledger = BackupLedger.Load(root);
+                if (ledger == null || !File.Exists(source)) return false;
+                string live = knownSourceHash ?? SafePersistence.Hash(source);
+                if (live == backupHash || !Eligible(source) || InstallCheck.IsEmulatorDll(source)) return false;
+                var entry = ledger.Find(source);
+                return entry == null || entry.Written != live;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Keeps <paramref name="contentPath"/> as the original of <paramref name="source"/> (the same
+        /// verified layout as <see cref="Preserve(string, string, Action{LogLevel, string})"/>), for files whose
+        /// previous content only survives in a write's recovery copy. An original already kept is never
+        /// replaced. Returns the backup, or null when the content is not eligible.</summary>
+        public static string PreserveContent(string root, string source, string contentPath, Action<LogLevel, string> log = null)
+        {
+            string destination = Location(root, source);
+            return SafePersistence.Locked(destination, () =>
+            {
+                if (File.Exists(destination)) return destination;
+                if (!Eligible(contentPath)) return null;
+                var write = SafePersistence.Copy(contentPath, destination);
+                var manifest = SafePersistence.WriteText(destination + ".source.txt", Path.GetFullPath(source) + "\r\n" + write.StagedHash + "\r\n");
+                Recovery.Discard(new[] { write, manifest });
+                if (log != null) log(LogLevel.Dim, "Kept the game's own " + Path.GetFileName(source) + " with the originals.");
+                return destination;
+            });
         }
 
         public static void Restore(string root, string source, List<FileWriteRecord> journal = null, Action<LogLevel, string> log = null)
@@ -1329,7 +1376,7 @@ namespace Gp
         }
 
         /// <summary>A sample's live name: every ".EXAMPLE" removed, the way releases up to 0.7 copied it.</summary>
-        static string Activated(string relative)
+        internal static string Activated(string relative)
         {
             return relative.Replace(".EXAMPLE", "");
         }
@@ -2396,6 +2443,8 @@ namespace Gp
             // ---- keep an undo record for the last good patch --------------------
             if (res.Success && res.Writes.Count != 0)
             {
+                // The ledger first: it keeps the recovery copies of replaced files that the journal prune would drop.
+                if (res.BackupDir.Length > 0) BackupLedger.Record(res.BackupDir, SearchRoot(o.GameExe), res.Writes, Log);
                 Recovery.SaveJournal(res.Writes, true);
                 Recovery.CollectStaging(res.Writes);
                 Log(LogLevel.Dim, "Undo record saved – 'Undo last patch' can revert this run.");

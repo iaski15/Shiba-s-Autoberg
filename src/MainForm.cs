@@ -40,8 +40,10 @@ namespace Gp
 
         /// <summary>--check: verify an already-patched install and exit, changing nothing.</summary>
         public string Check = "";
+        /// <summary>--restore: put a patched game back to its original files and exit.</summary>
+        public string Restore = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done] [--playnite]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings] [--achievements] [--playnite]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done] [--playnite]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings] [--achievements] [--playnite]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --restore <game.exe> [--appid <id>]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--restore exits: 0 = fully restored, 1 = failure or bad arguments, 2 = partially restored or nothing to restore.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -50,7 +52,7 @@ namespace Gp
             for (int i = 0; i < a.Length; i++)
             {
                 var s = (a[i] ?? "").ToLowerInvariant();
-                if (s == "--exe" || s == "--appid" || s == "--batch" || s == "--check")
+                if (s == "--exe" || s == "--appid" || s == "--batch" || s == "--check" || s == "--restore")
                 {
                     // Any leading dash means a flag, not a value. The guard used to reject only "--", so a
                     // mistyped "-appid" was silently accepted as the value of the previous flag.
@@ -59,6 +61,7 @@ namespace Gp
                     string value = a[++i];
                     if (s == "--exe") r.Exe = value;
                     else if (s == "--check") r.Check = value;
+                    else if (s == "--restore") r.Restore = value;
                     else if (s == "--appid")
                     {
                         if (!AppIdDetector.TryNormalize(value, out r.AppId)) throw new ArgumentException("Invalid --appid value.");
@@ -74,6 +77,15 @@ namespace Gp
                 else if (s == "--achievements") r.BatchAchievements = true;
                 else if (s == "--playnite") r.Playnite = true;
                 else throw new ArgumentException("Unknown argument: " + s);
+            }
+            if (r.Restore.Length > 0)
+            {
+                if (r.Check.Length > 0 || r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchOnlineFix
+                    || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements || r.Playnite)
+                    throw new ArgumentException("--restore only combines with --appid.");
+                if (!File.Exists(r.Restore) || !r.Restore.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("--restore must name an existing .exe file.");
+                return r;
             }
             if (r.Check.Length > 0)
             {
@@ -222,6 +234,11 @@ namespace Gp
                 Environment.ExitCode = RunCheckCli(sa);
                 return;
             }
+            if (sa.Restore.Length > 0)
+            {
+                Environment.ExitCode = RunRestoreCli(sa);
+                return;
+            }
 
             SweepStaleRecovery();
             if (sa.Batch.Length > 0)
@@ -303,6 +320,19 @@ namespace Gp
             int failed = items.Count(i => i.Status == CheckStatus.Fail);
             Console.WriteLine(failed == 0 ? "All checks passed." : failed + " check(s) failed.");
             return failed == 0 ? 0 : 1;
+        }
+
+        static int RunRestoreCli(StartupArgs sa)
+        {
+            Console.WriteLine("Restore original: " + Path.GetFullPath(sa.Restore));
+            RestorePlan plan;
+            try { plan = GameRestore.Plan(sa.Restore, sa.AppId); }
+            catch (Exception ex) { Console.WriteLine("  " + ex.Message); return 1; }
+            foreach (var line in plan.Describe()) Console.WriteLine("  " + line);
+            if (plan.NothingToDo) { Console.WriteLine("Nothing to restore."); return 2; }
+            var result = GameRestore.Apply(plan, (l, m) => Console.WriteLine("  [" + l.ToString().ToLowerInvariant() + "] " + m));
+            Console.WriteLine("Restore: " + result.Summary);
+            return result.Complete ? 0 : result.Failed > 0 || result.Blocked ? 1 : 2;
         }
 
         static int RunBatchCli(StartupArgs sa)

@@ -19,7 +19,7 @@ namespace Gp
             string exe = zone.GamePath, hint = appIdBox.Text;
             toolsBtn.Enabled = false;   // also keeps a second click out until this finishes
             statusBar.Set("Adding to Playnite…", Ui.Accent);
-            Task.Run(() =>
+            patchTask = Task.Run(() =>   // closing the window waits for it
             {
                 var lines = new List<PatchLogEntry>();
                 var target = EmuSettings.Locate(exe);
