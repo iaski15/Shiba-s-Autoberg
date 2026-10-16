@@ -1786,6 +1786,8 @@ namespace Gp
         public static string OverlayDll86 { get { return Path.Combine(BaseDir, @"shibaberg\bin\overlay\x86\steam_api.dll"); } }
         public static string OverlayDll64 { get { return Path.Combine(BaseDir, @"shibaberg\bin\overlay\x64\steam_api64.dll"); } }
         public static string SettingsExampleDir { get { return Path.Combine(BaseDir, @"shibaberg\post_build\steam_settings.EXAMPLE"); } }
+        /// <summary>The Playnite extension (dll, extension.yaml, icon.png) PlayniteLink installs into Playnite.</summary>
+        public static string PlayniteDir { get { return Path.Combine(BaseDir, @"playnite\bin"); } }
 
         public static List<string> Missing()
         {

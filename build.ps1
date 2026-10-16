@@ -149,6 +149,36 @@ $logicSrc = @('Core.cs', 'Cloud.cs', 'EmuSettings.cs', 'SteamAppInfo.cs', 'Resto
 $testSrc = @(Get-ChildItem -LiteralPath $src -Filter 'Test*.cs' -File | Sort-Object Name | ForEach-Object { "`"$($_.FullName)`"" })
 Compile ($logicSrc + $testSrc + @("`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 
+# ---- Playnite extension (playnite\, loaded by Playnite; embedded so Shibaberg can install it) ----
+# Built against the vendored Playnite.SDK (a reference only - Playnite ships its own) and WPF, which the
+# targeting pack carries beside the other references and an installed Framework keeps in WPF\.
+$pnDir = Join-Path $root 'playnite'
+$pnBin = Join-Path $pnDir 'bin'
+New-Item -ItemType Directory -Force $pnBin | Out-Null
+$wpfRefs = @('PresentationFramework.dll', 'PresentationCore.dll', 'WindowsBase.dll', 'System.Xaml.dll') | ForEach-Object {
+    $p = Join-Path $refDir $_
+    if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path (Join-Path $refDir 'WPF') $_ }
+    if (-not (Test-Path -LiteralPath $p)) { throw "Required WPF reference missing: $_" }
+    "/r:`"$p`""
+}
+$pnArgs = @('/nologo','/noconfig','/target:library','/platform:anycpu','/optimize+','/utf8output','/nostdlib-','/deterministic') + @("/pathmap:`"$root=.`"") + $refs + $wpfRefs
+# Its own version attributes: the app's version file also carries the Google client, which has no business here.
+$pnVerFile = Join-Path $env:TEMP ('gp_pnversion_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.cs')
+[IO.File]::WriteAllText($pnVerFile, @"
+using System.Reflection;
+[assembly: AssemblyVersion("$version.0.0")]
+[assembly: AssemblyFileVersion("$version.0.0")]
+[assembly: AssemblyInformationalVersion("$version")]
+"@, (New-Object System.Text.UTF8Encoding($false)))
+$pnArgs += @("/r:`"$(Join-Path $pnDir 'lib\Playnite.SDK.dll')`"", "`"$(Join-Path $pnDir 'ShibabergLibrary.cs')`"", "`"$pnVerFile`"", "/out:`"$(Join-Path $pnBin 'ShibabergPlaynite.dll')`"")
+try { & $csc @pnArgs } finally { Remove-Item -LiteralPath $pnVerFile -Force -ErrorAction SilentlyContinue }
+if ($LASTEXITCODE -ne 0) { throw "compile failed: ShibabergPlaynite.dll" }
+# extension.yaml carries this build's version; Playnite shows it and Shibaberg updates the extension when it changes.
+$yaml = (Get-Content -LiteralPath (Join-Path $pnDir 'extension.yaml')) | ForEach-Object { if ($_ -match '^Version:') { "Version: $version" } else { $_ } }
+[IO.File]::WriteAllLines((Join-Path $pnBin 'extension.yaml'), [string[]]$yaml, (New-Object System.Text.UTF8Encoding($false)))
+Copy-Item -LiteralPath (Join-Path $pnDir 'icon.png') -Destination (Join-Path $pnBin 'icon.png') -Force
+Write-Host "built: $(Join-Path $pnBin 'ShibabergPlaynite.dll')"
+
 # ---- embedded payload (tools the app needs at runtime) ----
 # Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (shibaless\).
 # The emulator dlls are Shibaberg builds (shibaberg\bin, rebuilt from shibaberg\ by tools\build-shibaberg.ps1).
@@ -156,6 +186,8 @@ $pay = @('shibaberg\bin\x86\steam_api.dll', 'shibaberg\bin\x64\steam_api64.dll')
 # The overlay build (in-game achievement toast), installed instead when achievements are switched on.
 $pay += @('shibaberg\bin\overlay\x86\steam_api.dll', 'shibaberg\bin\overlay\x64\steam_api64.dll')
 Get-ChildItem (Join-Path $root 'shibaberg\post_build\steam_settings.EXAMPLE') -Recurse -File | ForEach-Object { $pay += $_.FullName.Substring($root.Length + 1) }
+# The Playnite extension PlayniteLink copies into Playnite's Extensions folder (Tools.PlayniteDir).
+$pay += @('playnite\bin\ShibabergPlaynite.dll', 'playnite\bin\extension.yaml', 'playnite\bin\icon.png')
 
 $payRes = @()
 $payTemp = @()

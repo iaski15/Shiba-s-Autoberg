@@ -542,6 +542,7 @@ namespace Gp
 
         readonly AppSettings settings;
         readonly StartupArgs startup;
+        readonly bool playniteFound;
         CancellationTokenSource cts;
         Task patchTask = Task.FromResult(0);
         volatile bool running;
@@ -679,7 +680,8 @@ namespace Gp
             tOnlineFix = new Toggle("Generic online-fix (show game as Spacewar on Steam)", settings.OnlineFix);
             tLookup = new Toggle("Auto-detect Steam AppID online", settings.LookupAppId);
             tAchievements = new Toggle("In-game overlay: achievements + cloud saves", settings.Achievements);
-            tPlaynite = new Toggle("Add patched games to Playnite", settings.Playnite);
+            playniteFound = PlayniteLink.Detect() != null;
+            tPlaynite = new Toggle("Add patched games to Playnite" + (playniteFound ? "" : " (not found)"), settings.Playnite);
             tOnlineFix.CheckedChanged += delegate
             {
                 appIdBox.Enabled = !closing && !running && !tOnlineFix.Checked;
@@ -695,6 +697,7 @@ namespace Gp
             tPlaynite.Bounds = new Rectangle(408, 156, 340, 26);
             foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements, tPlaynite }) optionsCard.Controls.Add(c);
             appIdBox.Enabled = !tOnlineFix.Checked; // the handler above only runs on change, not for the saved state
+            tPlaynite.Enabled = playniteFound;
 
             // [Patch Game] [Game tools ▾] [Batch Patch…] [Cloud saves…]
             int rowW = 820 - Pad * 2;
@@ -1455,7 +1458,8 @@ namespace Gp
 
         void SetOptionsEnabled(bool enabled)
         {
-            foreach (var t in new[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements, tPlaynite }) t.Enabled = enabled;
+            foreach (var t in new[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements }) t.Enabled = enabled;
+            tPlaynite.Enabled = enabled && playniteFound;
         }
 
         void ShowBannerLayout(bool show)
