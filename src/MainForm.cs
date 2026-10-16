@@ -548,6 +548,7 @@ namespace Gp
         bool waitingClose, allowClose;
         PatchResult lastResult;
         string[] lastActions = new string[0];
+        KeyValuePair<string, string> pendingAppId;   // exe folder → AppID of the running patch
 
         System.Windows.Forms.Timer autoTimer;
         System.Windows.Forms.Timer exitTimer;
@@ -917,14 +918,7 @@ namespace Gp
                 archChip = "INVALID EXE"; sizeChip = "";
             }
 
-            var protections = ProtectionScan.Detect(path);
-            string companion = PatchRunner.UnrealCompanion(path);
-            if (companion != null) protections.AddRange(ProtectionScan.Detect(companion).Where(x => !protections.Contains(x)));
-            string warnChip = protections.Count > 0 ? string.Join(" + ", protections.ToArray()).ToUpperInvariant() : "";
-            if (protections.Count > 0)
-                Log(LogLevel.Warn, string.Join(" and ", protections.ToArray()) + " detected – the emulator cannot remove "
-                    + (protections.Count == 1 ? "this protection" : "these protections") + "; the game may refuse to start offline.");
-            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0, warnChip);
+            zone.UpdateAnalysis(archChip, sizeChip, "searching game folder for steam_api dlls…", 0, "");
 
             // deep scan can take a moment on big installs – run it off the UI thread
             int gen = ++selectGeneration;
@@ -937,12 +931,19 @@ namespace Gp
         async Task ScanSelectionAsync(int gen, string dir, string archChip, string sizeChip, CancellationTokenSource source)
         {
             var apis = new List<string>();
+            var protections = new List<string>();
             DateTime? patchedBefore = null;
-            string searchRoot = PatchRunner.SearchRoot(zone.GamePath);
+            string exe = zone.GamePath;
+            string searchRoot = PatchRunner.SearchRoot(exe);
             try
             {
                 apis = await Task.Run(() =>
                 {
+                    // The protection scan can read the whole exe (the Denuvo string search), so it runs here too.
+                    protections = ProtectionScan.Detect(exe);
+                    string companion = PatchRunner.UnrealCompanion(exe);
+                    if (companion != null) protections.AddRange(ProtectionScan.Detect(companion).Where(x => !protections.Contains(x)));
+                    source.Token.ThrowIfCancellationRequested();
                     var found = PatchRunner.FindSteamApiFiles(searchRoot, source.Token);
                     // a backup folder beside a Steamworks dll = Shibaberg (or the old Goldberg Patcher) was here
                     try { patchedBefore = OriginalBackups.PatchedBefore(found); } catch { }
@@ -958,7 +959,10 @@ namespace Gp
             }
             if (!closing && !IsDisposed && gen == selectGeneration)
             {
-                ApplyApiSearch(gen, dir, archChip, sizeChip, apis);
+                if (protections.Count > 0)
+                    Log(LogLevel.Warn, string.Join(" and ", protections.ToArray()) + " detected – the emulator cannot remove "
+                        + (protections.Count == 1 ? "this protection" : "these protections") + "; the game may not run under the emulator.");
+                ApplyApiSearch(gen, dir, archChip, sizeChip, apis, protections.Count > 0 ? string.Join(" + ", protections.ToArray()).ToUpperInvariant() : "");
                 if (patchedBefore != null)
                     Log(LogLevel.Info, "Already patched before (last on " + patchedBefore.Value.ToString("yyyy-MM-dd HH:mm") + ") – the originals are kept in its "
                         + OriginalBackups.FolderName + "\\ folder. Patching again updates the install and keeps those originals.");
@@ -1044,7 +1048,7 @@ namespace Gp
             statusBar.Set("Waiting for input", Ui.WarnC);
         }
 
-        void ApplyApiSearch(int gen, string dir, string archChip, string sizeChip, List<string> apis)
+        void ApplyApiSearch(int gen, string dir, string archChip, string sizeChip, List<string> apis, string warnChip)
         {
             string apiChip; int apiState;
             if (apis.Count > 0)
@@ -1062,7 +1066,7 @@ namespace Gp
                 apiState = 0;
                 apiChip = "no steam_api dll in game folder – will be placed beside exe";
             }
-            zone.UpdateAnalysis(archChip, sizeChip, apiChip, apiState);
+            zone.UpdateAnalysis(archChip, sizeChip, apiChip, apiState, warnChip);
 
             if (appIdBox.Text.Length == 0)
             {
@@ -1125,7 +1129,8 @@ namespace Gp
             settings.LookupAppId = tLookup.Checked;
             settings.Achievements = tAchievements.Checked;
             settings.Playnite = tPlaynite.Checked;
-            if (id.Length > 0) settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id; // don't cache empty ids
+            // Cached once the patch has succeeded (OnPatchDone): a failed or cancelled run must not teach it.
+            pendingAppId = new KeyValuePair<string, string>(Path.GetDirectoryName(opts.GameExe), id);
             string saveError;
             if (!settings.Save(out saveError)) Log(LogLevel.Error, saveError);
 
@@ -1191,6 +1196,14 @@ namespace Gp
             toolsBtn.Enabled = ToolsReady;
             SetOptionsEnabled(!closing);
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
+
+            if (res.Success && !string.IsNullOrEmpty(pendingAppId.Value))
+            {
+                settings.AppIdsByFolder[pendingAppId.Key] = pendingAppId.Value;   // don't cache empty ids
+                string saveError;
+                if (!settings.Save(out saveError)) Log(LogLevel.Error, saveError);
+            }
+            pendingAppId = new KeyValuePair<string, string>();
 
             if (res.Success)
             {

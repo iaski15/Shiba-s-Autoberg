@@ -20,6 +20,7 @@ static partial class TestMain
     static int Main(string[] args)
     {
         if (args != null && args.Length == 2 && args[0] == "--corpus") return Corpus(args[1]);
+        if (args != null && args.Length == 2 && args[0] == "--protections") return Protections(args[1]);
         return SelfTest();
     }
 
@@ -856,8 +857,10 @@ static partial class TestMain
                   File.ReadAllText(Path.Combine(gameDir, "steam_appid.txt")).Trim() == "1250",
                   "steam_appid.txt written with AppID");
 
-            var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.ini");
-            Check(File.Exists(settingsIni), "steam_settings copied & '.EXAMPLE' stripped", settingsIni);
+            var settingsIni = Path.Combine(gameDir, "steam_settings", "configs.main.EXAMPLE.ini");
+            Check(File.Exists(settingsIni) && !File.Exists(Path.Combine(gameDir, "steam_settings", "configs.main.ini"))
+                  && !File.Exists(Path.Combine(gameDir, "steam_settings", "steam_appid.txt")),
+                  "steam_settings copied with the '.EXAMPLE' names kept (inert samples)", settingsIni);
             var iface = Path.Combine(gameDir, "steam_settings", "steam_interfaces.txt");
             Check(File.Exists(iface) && File.ReadAllLines(iface).SequenceEqual(new[] { "STEAMAPPS_INTERFACE_VERSION008", "SteamClient017", "SteamFriends017", "SteamUser021" }),
                   "steam_interfaces.txt generated in-process, in upstream pattern order", File.Exists(iface) ? File.ReadAllText(iface).Replace("\r\n", ",") : "(missing)");

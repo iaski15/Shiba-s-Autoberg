@@ -1311,6 +1311,10 @@ namespace Gp
             return outcome;
         }
 
+        /// <summary>The upstream samples are copied under their own names, ".EXAMPLE" kept: the emulator never
+        /// reads a name with ".EXAMPLE" in it, so they are inert reference files the user can rename. Stripping
+        /// the suffix (what releases up to 0.7 did) turned the sample values into live config - see
+        /// <see cref="FindActivatedExamples"/>.</summary>
         static void Collect(string source, string destination, List<KeyValuePair<string, string>> files)
         {
             if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)
@@ -1318,10 +1322,172 @@ namespace Gp
             foreach (string file in Directory.GetFiles(source).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
             {
                 using (File.OpenRead(file)) { }
-                files.Add(new KeyValuePair<string, string>(file, Path.Combine(destination, Path.GetFileName(file).Replace(".EXAMPLE", ""))));
+                files.Add(new KeyValuePair<string, string>(file, Path.Combine(destination, Path.GetFileName(file))));
             }
             foreach (string dir in Directory.GetDirectories(source).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
-                Collect(dir, Path.Combine(destination, Path.GetFileName(dir).Replace(".EXAMPLE", "")), files);
+                Collect(dir, Path.Combine(destination, Path.GetFileName(dir)), files);
+        }
+
+        /// <summary>A sample's live name: every ".EXAMPLE" removed, the way releases up to 0.7 copied it.</summary>
+        static string Activated(string relative)
+        {
+            return relative.Replace(".EXAMPLE", "");
+        }
+
+        /// <summary>Live files in <paramref name="steamSettingsDir"/> that are byte-identical copies of an upstream
+        /// sample under its activated name - left by releases up to 0.7, which stripped ".EXAMPLE". They are not
+        /// harmless: steam_appid.txt (1337) overrides the real AppID, configs.app.ini locks every DLC behind two
+        /// fake ones, configs.user.ini sets a fixed account and moves the saves to local_save_path, and
+        /// controller\ switches Steam Input on. steam_appid.txt also counts when it only differs in whitespace.</summary>
+        public static List<string> FindActivatedExamples(string steamSettingsDir, string exampleDir = null)
+        {
+            var found = new List<string>();
+            exampleDir = exampleDir ?? Tools.SettingsExampleDir;
+            try
+            {
+                if (!Directory.Exists(steamSettingsDir) || !Directory.Exists(exampleDir)) return found;
+                string root = Path.GetFullPath(exampleDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                foreach (var example in Directory.GetFiles(exampleDir, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                {
+                    string rel = Path.GetFullPath(example).Substring(root.Length);
+                    string activatedRel = Activated(rel);
+                    if (activatedRel == rel) continue;   // achievements_EXAMPLE.json and the like were never renamed
+                    string live = Path.Combine(steamSettingsDir, activatedRel);
+                    if (!File.Exists(live)) continue;
+                    bool same;
+                    if (string.Equals(activatedRel, "steam_appid.txt", StringComparison.OrdinalIgnoreCase))
+                        same = new FileInfo(live).Length < 64 && File.ReadAllText(live).Trim() == File.ReadAllText(example).Trim();
+                    else
+                        same = SafePersistence.Hash(live) == SafePersistence.Hash(example);
+                    if (same) found.Add(live);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return found;
+        }
+
+        /// <summary>The folder the sample configs.user.ini points the saves at (local_save_path, relative to the
+        /// dll); while that configs.user.ini is live, the game's saves are written there.</summary>
+        public static string ExampleLocalSaveDir(string steamSettingsDir)
+        {
+            return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(steamSettingsDir).TrimEnd(Path.DirectorySeparatorChar)), "path", "relative", "to", "dll");
+        }
+
+        public sealed class CleanupResult
+        {
+            public readonly List<string> Deleted = new List<string>();
+            public readonly List<string> Kept = new List<string>();
+            /// <summary>Where the saves were copied to, when they were migrated.</summary>
+            public string MigratedTo = "";
+            public readonly List<string> Messages = new List<string>();
+        }
+
+        /// <summary>Deletes the activated samples <see cref="FindActivatedExamples"/> reports, and nothing else (a
+        /// file the user edited no longer matches and stays). configs.user.ini is special: while it is live the
+        /// emulator saves under <see cref="ExampleLocalSaveDir"/>, so when that folder holds anything the file is
+        /// kept - unless <paramref name="migrateSaves"/> is set, in which case the saves are first COPIED (never
+        /// moved) to where the emulator looks without it, %APPDATA%\GSE Saves\&lt;appid&gt;, and only when that
+        /// folder does not exist yet. The local save folder itself is always left in place.</summary>
+        /// <param name="globalSavesRoot">The emulator's global save root; null for %APPDATA%\GSE Saves.</param>
+        public static CleanupResult CleanUpActivatedExamples(string steamSettingsDir, string appId, bool migrateSaves,
+            string exampleDir = null, string globalSavesRoot = null)
+        {
+            var result = new CleanupResult();
+            var targets = FindActivatedExamples(steamSettingsDir, exampleDir);
+            string userIni = targets.FirstOrDefault(t => string.Equals(Path.GetFileName(t), "configs.user.ini", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetDirectoryName(t), Path.GetFullPath(steamSettingsDir).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase));
+            if (userIni != null && !MayDropUserIni(steamSettingsDir, appId, migrateSaves, globalSavesRoot, result))
+            {
+                targets.Remove(userIni);
+                result.Kept.Add(userIni);
+            }
+            foreach (var file in targets)
+            {
+                try
+                {
+                    File.Delete(file);
+                    result.Deleted.Add(file);
+                }
+                catch (Exception ex)
+                {
+                    result.Kept.Add(file);
+                    result.Messages.Add("Could not delete " + Path.GetFileName(file) + ": " + ex.Message);
+                }
+            }
+            // Folders that only ever held samples (controller\, sounds\, ...) go once they are empty.
+            foreach (var dir in result.Deleted.Select(Path.GetDirectoryName).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(d => d.Length))
+            {
+                for (string d = dir; d != null && d.Length > Path.GetFullPath(steamSettingsDir).TrimEnd(Path.DirectorySeparatorChar).Length; d = Path.GetDirectoryName(d))
+                {
+                    try { if (Directory.Exists(d) && Directory.GetFileSystemEntries(d).Length == 0) Directory.Delete(d); else break; }
+                    catch { break; }
+                }
+            }
+            return result;
+        }
+
+        static bool MayDropUserIni(string steamSettingsDir, string appId, bool migrateSaves, string globalSavesRoot, CleanupResult result)
+        {
+            string local = ExampleLocalSaveDir(steamSettingsDir);
+            bool hasSaves;
+            try { hasSaves = Directory.Exists(local) && Directory.EnumerateFiles(local, "*", SearchOption.AllDirectories).Any(); }
+            catch { hasSaves = true; }   // cannot tell: keep it
+            if (!hasSaves) return true;
+            if (!migrateSaves)
+            {
+                result.Messages.Add("configs.user.ini kept: the game's saves are in " + local + " while it is in place.");
+                return false;
+            }
+            string id = AppIdDetector.Normalize(appId);
+            if (id.Length == 0)
+            {
+                result.Messages.Add("configs.user.ini kept: the saves cannot be moved over without the game's AppID.");
+                return false;
+            }
+            // The emulator keys saves by AppID; with the sample steam_appid.txt live too that AppID was 1337.
+            string source = new[] { id, "1337" }.Select(x => Path.Combine(local, x)).FirstOrDefault(Directory.Exists);
+            if (source == null)
+            {
+                result.Messages.Add("configs.user.ini kept: " + local + " holds files, but no save folder for AppID " + id + " (or 1337).");
+                return false;
+            }
+            string target = Path.Combine(globalSavesRoot ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GSE Saves"), id);
+            if (Directory.Exists(target))
+            {
+                result.Messages.Add("configs.user.ini kept: " + target + " already exists, so the saves in " + source + " were not copied over it.");
+                return false;
+            }
+            try
+            {
+                CopyTree(source, target);
+                result.MigratedTo = target;
+                result.Messages.Add("Saves copied from " + source + " to " + target + " (the originals stay where they were).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                try { if (Directory.Exists(target)) Directory.Delete(target, true); } catch { }
+                result.Messages.Add("configs.user.ini kept: copying the saves failed (" + ex.Message + ").");
+                return false;
+            }
+        }
+
+        static void CopyTree(string source, string target)
+        {
+            Directory.CreateDirectory(target);
+            foreach (var file in Directory.GetFiles(source))
+            {
+                string dst = Path.Combine(target, Path.GetFileName(file));
+                File.Copy(file, dst);
+                if (SafePersistence.Hash(dst) != SafePersistence.Hash(file)) throw new IOException("Copy of " + file + " failed verification.");
+            }
+            foreach (var dir in Directory.GetDirectories(source))
+            {
+                if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) continue;
+                CopyTree(dir, Path.Combine(target, Path.GetFileName(dir)));
+            }
         }
 
         public static void Apply(SettingsOutcome outcome, List<FileWriteRecord> journal, CancellationToken ct = default(CancellationToken))
@@ -1926,7 +2092,7 @@ namespace Gp
                 foreach (var target in new[] { exePath, UnrealCompanion(exePath) }.Where(t => t != null))
                     foreach (var protection in ProtectionScan.Detect(target))
                         Log(LogLevel.Warn, protection + " detected on " + Path.GetFileName(target)
-                            + " – the emulator replaces Steam's API but cannot remove this protection; the game may refuse to start offline.");
+                            + " – the emulator replaces Steam's API but cannot remove this protection; the game may not run under the emulator.");
 
                 // ---- locate steam api install dir ------------------------------
                 Pct(8);
@@ -1959,6 +2125,12 @@ namespace Gp
                     ? SettingsScaffold.Plan(Tools.SettingsExampleDir, installDir) : new SettingsOutcome();
                 if (settingsPlan.Status == SettingsStatus.Failed) throw new IOException(settingsPlan.Error);
                 if (settingsPlan.Status == SettingsStatus.Missing) Log(LogLevel.Warn, settingsPlan.Error);
+                // Reported, never deleted here: the sample configs.user.ini may have moved the saves next to the dll.
+                var activated = SettingsScaffold.FindActivatedExamples(Path.Combine(installDir, "steam_settings"));
+                if (activated.Count > 0)
+                    Log(LogLevel.Warn, "steam_settings holds " + activated.Count + " sample file(s) an older version switched on ("
+                        + string.Join(", ", activated.Take(4).Select(f => Path.GetFileName(f)).ToArray()) + (activated.Count > 4 ? ", …" : "")
+                        + ") – they override the real settings (AppID 1337, fake DLC list, fixed account). Remove them with Game tools → Emulator settings… → Clean up.");
 
                 // ---- backup dir ----------------------------------------------
                 bool legacyBackup = Directory.Exists(Path.Combine(installDir, OriginalBackups.LegacyFolderName));
@@ -2519,7 +2691,9 @@ namespace Gp
             }
             WriteIfChanged(achPath, schema.AchievementsJson, res);
             string statsPath = Path.Combine(dir, "stats.json");
-            if (schema.Stats > 0 && !File.Exists(statsPath)) WriteIfChanged(statsPath, schema.StatsJson, res);
+            // A stats.json that is only the upstream sample switched on by an older version holds no real stats.
+            if (schema.Stats > 0 && (!File.Exists(statsPath) || SettingsScaffold.FindActivatedExamples(dir).Contains(statsPath, StringComparer.OrdinalIgnoreCase)))
+                WriteIfChanged(statsPath, schema.StatsJson, res);
             Log(LogLevel.Ok, string.Format("{0} achievements and {1} stats from Steam's local cache → steam_settings.", schema.Achievements, schema.Stats));
 
             // Icons: only the overlay's achievement list (Shift+Tab) shows them, so a failed download costs nothing.
@@ -2785,10 +2959,18 @@ namespace Gp
         }
     }
 
-    /// <summary>Pre-flight: protections the emulator cannot get past, recognised from the section table
-    /// alone (a header read, no full-file scan). Only protectors with fixed, documented section names are
-    /// listed; Denuvo and Arxan have no reliable structural marker and are deliberately not guessed at - a
-    /// false "Denuvo detected" would stop people patching games that would have worked.</summary>
+    /// <summary>Pre-flight: protections the emulator cannot get past, recognised from the section table (a
+    /// header read; the whole file is only searched when the structural rule below fires). Warnings only - a
+    /// false alarm must never stop anyone patching a game that would have worked.
+    ///
+    /// Two kinds of evidence:
+    ///  * protectors with fixed, documented section names (VMProtect, Themida, WinLicense, Enigma);
+    ///  * a structural rule: a large (1 MiB+) executable section under a name no compiler or packer we know
+    ///    uses. That is how Denuvo-protected binaries look (its virtualised code gets sections of its own); it
+    ///    is labelled Denuvo only when the file also carries the string "denuvo", otherwise it is reported as
+    ///    an unrecognised protection. A plain mention of Denuvo is not evidence: stock Steamworks games carry
+    ///    "GetDenuvoTicketLocation" in their import names.
+    /// There is no Arxan rule: it has no validated marker, and guessing would cost false positives.</summary>
     public static class ProtectionScan
     {
         static readonly KeyValuePair<string, string>[] Markers =
@@ -2799,15 +2981,76 @@ namespace Gp
             new KeyValuePair<string, string>(".enigma", "Enigma Protector"),
         };
 
+        /// <summary>Executable sections every toolchain or known packer produces; a big one of these is normal.</summary>
+        static readonly HashSet<string> StockCode = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".text", ".textbss", ".bind", "il2cpp", "IPPCODE", "UPX0", "UPX1",
+        };
+
+        const uint CodeOrExecute = 0x20000020;   // IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE
+        const long LargeSection = 1L << 20;
+
         public static List<string> Detect(string exePath)
         {
             var found = new List<string>();
-            var names = Shibaless.ShibalessUnpacker.ReadSectionNames(exePath);
-            if (names == null) return found;
+            var sections = Shibaless.ShibalessUnpacker.ReadSectionHeaders(exePath);
+            if (sections == null) return found;
             foreach (var marker in Markers)
-                if (names.Any(n => n.StartsWith(marker.Key, StringComparison.OrdinalIgnoreCase)) && !found.Contains(marker.Value))
+                if (sections.Any(s => s.Name.StartsWith(marker.Key, StringComparison.OrdinalIgnoreCase)) && !found.Contains(marker.Value))
                     found.Add(marker.Value);
+
+            // Sections a named protector already accounts for (Themida also adds blank-named ones) are left to it.
+            var odd = sections.FirstOrDefault(s => (s.Characteristics & CodeOrExecute) != 0
+                && Math.Max((long)s.VirtualSize, s.SizeOfRawData) >= LargeSection
+                && !StockCode.Contains(s.Name)
+                && !Markers.Any(m => s.Name.StartsWith(m.Key, StringComparison.OrdinalIgnoreCase)));
+            if (odd == null) return found;
+            if (ContainsDenuvo(exePath)) found.Add("Denuvo");
+            else if (found.Count == 0) found.Add("unrecognised protection (section '" + odd.Name + "')");
             return found;
+        }
+
+        static readonly byte[] DenuvoAscii = Encoding.ASCII.GetBytes("denuvo");
+        static readonly byte[] DenuvoUtf16 = Encoding.Unicode.GetBytes("denuvo");
+
+        /// <summary>"denuvo" anywhere in the file, ASCII or UTF-16LE, any case. One sequential pass in 1 MB
+        /// chunks with the tail carried over, like <see cref="InstallCheck.IsEmulatorDll"/>.</summary>
+        internal static bool ContainsDenuvo(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan))
+                {
+                    int keep = DenuvoUtf16.Length - 1;
+                    var buf = new byte[(1 << 20) + keep];
+                    int carry = 0, n;
+                    while ((n = fs.Read(buf, carry, buf.Length - carry)) > 0)
+                    {
+                        int len = carry + n;
+                        if (IndexOfIgnoreCase(buf, len, DenuvoAscii) >= 0 || IndexOfIgnoreCase(buf, len, DenuvoUtf16) >= 0) return true;
+                        carry = Math.Min(keep, len);
+                        Buffer.BlockCopy(buf, len - carry, buf, 0, carry);
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Position of a lower-case ASCII needle (zero bytes match exactly) in the first
+        /// <paramref name="length"/> bytes, comparing letters case-insensitively; -1 when absent.</summary>
+        internal static int IndexOfIgnoreCase(byte[] haystack, int length, byte[] needle)
+        {
+            int last = length - needle.Length;
+            byte first = needle[0];
+            for (int i = 0; i <= last; i++)
+            {
+                if ((haystack[i] | 0x20) != first) continue;
+                int j = 1;
+                while (j < needle.Length && (needle[j] == 0 ? haystack[i + j] == 0 : (haystack[i + j] | 0x20) == needle[j])) j++;
+                if (j == needle.Length) return i;
+            }
+            return -1;
         }
     }
 
@@ -2997,6 +3240,20 @@ namespace Gp
                     add(distinct[0].Length > 0 ? CheckStatus.Pass : CheckStatus.Fail, "steam_appid.txt is valid",
                         distinct[0].Length > 0 ? "AppID " + distinct[0] + " in " + appIdFiles.Count + " place(s)" : "not a numeric AppID");
             }
+
+            // 4. The emulator reads steam_settings\steam_appid.txt before any other copy, so a stale one there
+            //    (the 1337 sample older versions switched on) silently wins. Valve's library never reads it.
+            if (!onlineFix && expected.Length > 0)
+                foreach (var dir in new[] { exeDir }.Concat(found.Select(Path.GetDirectoryName)).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    string f = Path.Combine(dir, "steam_settings", "steam_appid.txt");
+                    if (!File.Exists(f)) continue;
+                    string v;
+                    try { v = AppIdDetector.Normalize(File.ReadAllText(f)); } catch { v = ""; }
+                    if (v != expected)
+                        add(CheckStatus.Fail, "steam_settings\\steam_appid.txt carries AppID " + expected,
+                            PatchRunner.ShortRel(exeDir, f) + " says " + (v.Length == 0 ? "something invalid" : v) + " and overrides every other steam_appid.txt");
+                }
             return items;
         }
     }
@@ -3483,6 +3740,8 @@ namespace Gp
         public static AppSettings Load()
         {
             var s = new AppSettings();
+            // A redirected state folder is a test run: its games live in the temp folder on purpose.
+            bool keepTemp = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SHIBABERG_STATE_DIR"));
             try
             {
                 if (!System.IO.File.Exists(File0)) return s;
@@ -3505,7 +3764,10 @@ namespace Gp
                         case "playnite": s.Playnite = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
-                                s.AppIdsByFolder[UnescKey(k.Substring(7))] = v;
+                            {
+                                string folder = UnescKey(k.Substring(7));
+                                if (KeepFolder(folder, keepTemp)) s.AppIdsByFolder[folder] = v;
+                            }
                             else if (k.StartsWith("savedirs:"))
                                 s.SaveDirs[k.Substring(9)] = v.Split('|').Where(x => x.Length > 0).ToList();
                             break;
@@ -3514,6 +3776,23 @@ namespace Gp
             }
             catch { }
             return s;
+        }
+
+        /// <summary>Whether a cached AppID folder is worth keeping. Dropped: folders that are gone while their
+        /// drive is there (uninstalled or moved games), and anything under the temp folder (test runs, extracted
+        /// archives) unless <paramref name="keepTemp"/>. A folder on a drive that is not plugged in stays.</summary>
+        internal static bool KeepFolder(string folder, bool keepTemp)
+        {
+            try
+            {
+                string full = Path.GetFullPath(folder);
+                string temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                if (!keepTemp && (full + Path.DirectorySeparatorChar).StartsWith(temp, StringComparison.OrdinalIgnoreCase)) return false;
+                if (Directory.Exists(full)) return true;
+                string root = Path.GetPathRoot(full);
+                return string.IsNullOrEmpty(root) || !Directory.Exists(root);
+            }
+            catch { return true; }   // an unparseable key is left as it is
         }
 
         public bool Save(out string error)
