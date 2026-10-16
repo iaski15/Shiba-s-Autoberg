@@ -145,7 +145,7 @@ $shibalessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDi
 
 # ---- self test host (console) ----
 # Logic only (no WinForms UI files) + every src\Test*.cs. The app compiles every other src\*.cs (below).
-$logicSrc = @('Core.cs', 'Cloud.cs', 'EmuSettings.cs', 'Restore.cs', 'Playnite.cs', 'Unpacker\ShibalessUnpacker.cs') | ForEach-Object { "`"$src\$_`"" }
+$logicSrc = @('Core.cs', 'Cloud.cs', 'EmuSettings.cs', 'SteamAppInfo.cs', 'Restore.cs', 'Playnite.cs', 'Unpacker\ShibalessUnpacker.cs') | ForEach-Object { "`"$src\$_`"" }
 $testSrc = @(Get-ChildItem -LiteralPath $src -Filter 'Test*.cs' -File | Sort-Object Name | ForEach-Object { "`"$($_.FullName)`"" })
 Compile ($logicSrc + $testSrc + @("`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 

@@ -1536,13 +1536,10 @@ namespace Gp
         {
             try
             {
-                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
-                {
-                    string steam = k == null ? null : k.GetValue("SteamPath") as string;
-                    if (string.IsNullOrEmpty(steam)) return null;
-                    string p = Path.Combine(steam.Replace('/', '\\'), "appcache", "stats", "UserGameStatsSchema_" + appId + ".bin");
-                    return File.Exists(p) ? p : null;
-                }
+                string steam = SteamClient.InstallDir;
+                if (steam == null) return null;
+                string p = Path.Combine(steam, "appcache", "stats", "UserGameStatsSchema_" + appId + ".bin");
+                return File.Exists(p) ? p : null;
             }
             catch { return null; }
         }
@@ -1621,7 +1618,7 @@ namespace Gp
 
         static KeyValuePair<string, object> Pair(string k, object v) { return new KeyValuePair<string, object>(k, v); }
 
-        static object Get(Kv kv, string key)
+        internal static object Get(Kv kv, string key)
         {
             if (kv == null) return null;
             foreach (var p in kv) if (string.Equals(p.Key, key, StringComparison.OrdinalIgnoreCase)) return p.Value;
@@ -1643,22 +1640,40 @@ namespace Gp
         internal static Kv ParseKv(byte[] b)
         {
             int i = 0;
-            return ReadSection(b, ref i);
+            return ReadSection(b, ref i, null);
         }
 
-        static Kv ReadSection(byte[] b, ref int i)
+        /// <summary>Binary KeyValues starting at <paramref name="start"/>. With <paramref name="strings"/> each
+        /// key is an int32 index into that table instead of an inline string (appinfo.vdf v29).</summary>
+        internal static Kv ParseKv(byte[] b, int start, string[] strings)
+        {
+            int i = start;
+            return ReadSection(b, ref i, strings);
+        }
+
+        static Kv ReadSection(byte[] b, ref int i, string[] strings)
         {
             var kv = new Kv();
             while (i < b.Length)
             {
                 byte t = b[i++];
                 if (t == 8 || t == 11) break;
-                string key = ReadZ(b, ref i);
+                string key;
+                if (strings == null) key = ReadZ(b, ref i);
+                else
+                {
+                    Need(b, i, 4);
+                    int index = BitConverter.ToInt32(b, i);
+                    i += 4;
+                    if (index < 0 || index >= strings.Length) throw new InvalidDataException("KeyValues key index " + index + " is outside the string table.");
+                    key = strings[index];
+                }
                 object v;
                 switch (t)
                 {
-                    case 0: v = ReadSection(b, ref i); break;
+                    case 0: v = ReadSection(b, ref i, strings); break;
                     case 1: v = ReadZ(b, ref i); break;
+                    case 5: v = ReadWideZ(b, ref i); break;
                     case 2: case 4: case 6: Need(b, i, 4); v = BitConverter.ToInt32(b, i).ToString(CultureInfo.InvariantCulture); i += 4; break;
                     case 3: Need(b, i, 4); v = BitConverter.ToSingle(b, i).ToString("R", CultureInfo.InvariantCulture); i += 4; break;
                     case 7: Need(b, i, 8); v = BitConverter.ToUInt64(b, i).ToString(CultureInfo.InvariantCulture); i += 8; break;
@@ -1681,6 +1696,16 @@ namespace Gp
             while (i < b.Length && b[i] != 0) i++;
             if (i >= b.Length) throw new InvalidDataException("Truncated KeyValues.");
             return Encoding.UTF8.GetString(b, start, i++ - start);
+        }
+
+        static string ReadWideZ(byte[] b, ref int i)
+        {
+            int start = i;
+            while (i + 1 < b.Length && (b[i] != 0 || b[i + 1] != 0)) i += 2;
+            if (i + 1 >= b.Length) throw new InvalidDataException("Truncated KeyValues.");
+            string s = Encoding.Unicode.GetString(b, start, i - start);
+            i += 2;
+            return s;
         }
 
         static void WriteJson(StringBuilder sb, object v, int depth)
@@ -1708,6 +1733,30 @@ namespace Gp
                 else sb.Append(c);
             }
             return sb.ToString();
+        }
+    }
+
+    /// <summary>The local Steam client.</summary>
+    public static class SteamClient
+    {
+        /// <summary>Steam's install folder (HKCU\Software\Valve\Steam SteamPath, which Steam writes with forward
+        /// slashes), or null when Steam is not installed.</summary>
+        public static string InstallDir
+        {
+            get
+            {
+                try
+                {
+                    using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+                    {
+                        string steam = k == null ? null : k.GetValue("SteamPath") as string;
+                        if (string.IsNullOrEmpty(steam)) return null;
+                        steam = steam.Replace('/', Path.DirectorySeparatorChar);
+                        return Directory.Exists(steam) ? steam : null;
+                    }
+                }
+                catch { return null; }
+            }
         }
     }
 

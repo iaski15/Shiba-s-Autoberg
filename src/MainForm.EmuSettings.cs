@@ -1,5 +1,3 @@
-using System.Windows.Forms;
-
 namespace Gp
 {
     public partial class MainForm
@@ -7,7 +5,10 @@ namespace Gp
         /// <summary>Game tools → Emulator settings… for the selected game (zone.GamePath).</summary>
         void OpenEmuSettings()
         {
-            MessageBox.Show(this, "Emulator settings are coming soon.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!ToolsReady) return;
+            toolsBtn.Enabled = false;
+            var f = new EmuSettingsForm(zone.GamePath, appIdBox.Text);
+            try { f.ShowDialog(this); } finally { f.Dispose(); toolsBtn.Enabled = ToolsReady; }
         }
     }
 }
