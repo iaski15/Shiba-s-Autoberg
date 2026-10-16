@@ -7,7 +7,7 @@ using System.Threading;
 using Gp;
 using Shibaless;
 
-static class TestMain
+static partial class TestMain
 {
     static int pass = 0, fail = 0;
 
@@ -1408,7 +1408,32 @@ static class TestMain
         Check(SteamLookup.Search("Half-Life 2") == null, "an exhausted request budget makes no request", null);
         SteamLookup.ResetRequestBudget(int.MaxValue);
 
+        Console.WriteLine("\n[playnite option plumbing]");
+        Check(!new PatchOptions().Playnite, "PatchOptions.Playnite is off unless asked for", null);
+        Check(!new BatchPrefs().Playnite, "BatchPrefs.Playnite is off unless asked for", null);
+        string prevState = Environment.GetEnvironmentVariable("SHIBABERG_STATE_DIR");
+        string stateDir = Path.Combine(Path.GetTempPath(), "gp_selftest_state_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable("SHIBABERG_STATE_DIR", stateDir);
+            Check(AppSettings.Load().Playnite, "settings without a playnite key default to on", null);
+            string saveErr;
+            Check(new AppSettings { Playnite = false }.Save(out saveErr) && !AppSettings.Load().Playnite,
+                  "playnite=0 survives a save/load round trip", saveErr);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHIBABERG_STATE_DIR", prevState);
+            try { Directory.Delete(stateDir, true); } catch { }
+        }
+
         ReviewRegressions();
+        // feature sections, one file each (src\Test*.cs)
+        SelfTestEmuSettings();
+        SelfTestRestore();
+        SelfTestPlaynite();
+        SelfTestProtection();
+        SelfTestScaffold();
         Console.WriteLine("\nRESULT: PASS=" + pass + "  FAIL=" + fail);
 
         Recovery.JournalPathOverride = null;

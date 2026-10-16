@@ -144,7 +144,10 @@ Compress-File $sharpDisasm $sharpDisasmDeflated
 $shibalessArgs = @("/r:`"$sharpDisasm`"", "/res:`"$sharpDisasmDeflated`",SharpDisasm.dll.deflate")
 
 # ---- self test host (console) ----
-Compile (@("`"$src\Core.cs`"", "`"$src\Cloud.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\TestMain.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
+# Logic only (no WinForms UI files) + every src\Test*.cs. The app compiles every other src\*.cs (below).
+$logicSrc = @('Core.cs', 'Cloud.cs', 'EmuSettings.cs', 'Restore.cs', 'Playnite.cs', 'Unpacker\ShibalessUnpacker.cs') | ForEach-Object { "`"$src\$_`"" }
+$testSrc = @(Get-ChildItem -LiteralPath $src -Filter 'Test*.cs' -File | Sort-Object Name | ForEach-Object { "`"$($_.FullName)`"" })
+Compile ($logicSrc + $testSrc + @("`"$verFile`"") + $shibalessSrc) (Join-Path $root '_selftest.exe') $shibalessArgs
 
 # ---- embedded payload (tools the app needs at runtime) ----
 # Steamless is not in the payload: Shibaless, our fork of it, is compiled into the exe (shibaless\).
@@ -197,7 +200,9 @@ Write-Host ("payload files: " + $i + "   embedded " + [math]::Round($embeddedTot
 
 # ---- main app (windowed, self-contained) ----
 try {
-    Compile (@("`"$src\Core.cs`"", "`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$src\Ui.cs`"", "`"$src\MainForm.cs`"", "`"$src\Batch.cs`"", "`"$src\Cloud.cs`"", "`"$src\CloudForm.cs`"", "`"$src\Installer.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
+    # Every src\*.cs except the self-test's, so a new form or MainForm.*.cs partial needs no edit here.
+    $appSrc = @(Get-ChildItem -LiteralPath $src -Filter '*.cs' -File | Where-Object { $_.Name -notlike 'Test*' } | Sort-Object Name | ForEach-Object { "`"$($_.FullName)`"" })
+    Compile ($appSrc + @("`"$src\Unpacker\ShibalessUnpacker.cs`"", "`"$verFile`"") + $shibalessSrc) (Join-Path $root 'Shibaberg.exe') (@('/target:winexe') + $shibalessArgs + $payRes)
 } finally {
     # The deflated payload copies are only needed while the compiler reads them.
     foreach ($temp in $payTemp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }

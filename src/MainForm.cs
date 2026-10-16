@@ -31,13 +31,17 @@ namespace Gp
         public bool BatchSettings;
         public bool BatchAchievements;
 
+        /// <summary>--playnite: add the patched game(s) to Playnite. With --exe it switches the option on for
+        /// that run even when the toggle is off; --batch ignores settings.ini, so there it is off unless given.</summary>
+        public bool Playnite;
+
         // "C:\game1\g1.exe|480;C:\game2\g2.exe" – the AppID part may be omitted (auto-detected locally) or empty (skipped)
         public string Batch = "";
 
         /// <summary>--check: verify an already-patched install and exit, changing nothing.</summary>
         public string Check = "";
         public string Initialization = "";
-        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings] [--achievements]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
+        public const string Usage = "Usage: Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done] [--playnite]\n       Shibaberg.exe --batch \"<game.exe>|<id>;<game.exe>\" [--online-fix] [--no-unpack] [--settings] [--achievements] [--playnite]\n       Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]\n       Shibaberg.exe --verify-payload\nBatch exits: 0 = every entry patched; 1 = invalid input, failures or partial completion; 2 = nothing patched (skipped/cancelled only).\nSingle-game exits: 0 = patched, 1 = bad arguments or failure, 3 = --auto could not resolve an AppID.\n--check exits: 0 = every check passed (warnings allowed), 1 = a check failed or bad arguments.\n--verify-payload exits: 0 = payload intact, 1 = missing or corrupt files.";
 
         public static StartupArgs Parse(string[] a)
         {
@@ -68,11 +72,12 @@ namespace Gp
                 else if (s == "--no-unpack") r.BatchNoUnpack = true;
                 else if (s == "--settings") r.BatchSettings = true;
                 else if (s == "--achievements") r.BatchAchievements = true;
+                else if (s == "--playnite") r.Playnite = true;
                 else throw new ArgumentException("Unknown argument: " + s);
             }
             if (r.Check.Length > 0)
             {
-                if (r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements)
+                if (r.Exe.Length > 0 || r.Batch.Length > 0 || r.Auto || r.ExitWhenDone || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements || r.Playnite)
                     throw new ArgumentException("--check only combines with --appid and --online-fix.");
                 if (!File.Exists(r.Check) || !r.Check.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                     throw new ArgumentException("--check must name an existing .exe file.");
@@ -82,6 +87,8 @@ namespace Gp
                 throw new ArgumentException("--batch cannot be combined with single-game flags.");
             if (r.Batch.Length == 0 && r.Check.Length == 0 && (r.BatchOnlineFix || r.BatchNoUnpack || r.BatchSettings || r.BatchAchievements))
                 throw new ArgumentException("--online-fix, --no-unpack, --settings and --achievements require --batch.");
+            if (r.Batch.Length == 0 && r.Exe.Length == 0 && r.Playnite)
+                throw new ArgumentException("--playnite requires --batch or --exe.");
             if (r.Batch.Length == 0 && r.Exe.Length == 0 && (r.AppId.Length > 0 || r.Auto || r.ExitWhenDone))
                 throw new ArgumentException("Single-game flags require --exe.");
             if (r.Exe.Length > 0 && (!File.Exists(r.Exe) || !r.Exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
@@ -345,6 +352,7 @@ namespace Gp
                 CreateSettings = sa.BatchSettings,
                 Achievements = sa.BatchAchievements,
                 OnlineFix = sa.BatchOnlineFix,
+                Playnite = sa.Playnite,
             };
             var patcher = new BatchPatcher();
             patcher.LogLine += e => Console.WriteLine("  [" + e.Level.ToString().ToLowerInvariant() + "] " + e.Message);
@@ -510,7 +518,8 @@ namespace Gp
 
     // ─────────────────────────────────────────────── main form
 
-    public class MainForm : ShibaForm
+    // Game tools live in partial files: MainForm.EmuSettings.cs, MainForm.Restore.cs, MainForm.Playnite.cs.
+    public partial class MainForm : ShibaForm
     {
         const int Pad = 28;
         const int Side = 272;                 // the orange sidebar
@@ -521,9 +530,10 @@ namespace Gp
         readonly AppCard appIdCard;
         readonly AppIdBox appIdBox;
         readonly AppCard optionsCard;
-        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements;
+        readonly Toggle tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements, tPlaynite;
         readonly FlatButton patchBtn;
-        readonly FlatButton batchBtn, cloudBtn;
+        readonly FlatButton toolsBtn, batchBtn, cloudBtn;
+        readonly ShibaMenu toolsMenu;
         readonly ProgressBarLite progress;
         readonly Banner banner;
         readonly AppCard logCard;
@@ -668,6 +678,7 @@ namespace Gp
             tOnlineFix = new Toggle("Generic online-fix (show game as Spacewar on Steam)", settings.OnlineFix);
             tLookup = new Toggle("Auto-detect Steam AppID online", settings.LookupAppId);
             tAchievements = new Toggle("In-game overlay: achievements + cloud saves", settings.Achievements);
+            tPlaynite = new Toggle("Add patched games to Playnite", settings.Playnite);
             tOnlineFix.CheckedChanged += delegate
             {
                 appIdBox.Enabled = !closing && !running && !tOnlineFix.Checked;
@@ -680,25 +691,39 @@ namespace Gp
             tOnlineFix.Bounds = new Rectangle(22, 118, 370, 26);
             tLookup.Bounds = new Rectangle(408, 118, 340, 26);
             tAchievements.Bounds = new Rectangle(22, 156, 370, 26);
-            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements }) optionsCard.Controls.Add(c);
+            tPlaynite.Bounds = new Rectangle(408, 156, 340, 26);
+            foreach (Control c in new Control[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements, tPlaynite }) optionsCard.Controls.Add(c);
             appIdBox.Enabled = !tOnlineFix.Checked; // the handler above only runs on change, not for the saved state
 
+            // [Patch Game] [Game tools ▾] [Batch Patch…] [Cloud saves…]
             int rowW = 820 - Pad * 2;
-            int batchW = 170, gap = 14;
+            int secW = 150, gap = 14;
             patchBtn = new FlatButton("Patch Game");
-            patchBtn.Bounds = new Rectangle(X0, 552, rowW - (batchW + gap) * 2, 52);
+            patchBtn.Bounds = new Rectangle(X0, 552, rowW - (secW + gap) * 3, 52);
             patchBtn.Click += delegate { if (running) CancelPatch(); else StartPatch(); };
             Controls.Add(patchBtn);
 
+            toolsMenu = new ShibaMenu();
+            toolsMenu.Items.Add("Emulator settings…", null, delegate { if (ToolsReady) OpenEmuSettings(); });
+            toolsMenu.Items.Add("Restore original…", null, delegate { if (ToolsReady) StartRestore(); });
+            toolsMenu.Items.Add("Add to Playnite", null, delegate { if (ToolsReady) AddSelectedToPlaynite(); });
+
+            toolsBtn = new FlatButton("Game tools ▾");
+            toolsBtn.Kind = FlatButton.BtnKind.Secondary;
+            toolsBtn.Bounds = new Rectangle(X0 + rowW - secW * 3 - gap * 2, 552, secW, 52);
+            toolsBtn.Enabled = false; // until a game is picked
+            toolsBtn.Click += delegate { if (ToolsReady) toolsMenu.Show(toolsBtn, new Point(0, toolsBtn.Height + Ui.S(4))); };
+            Controls.Add(toolsBtn);
+
             batchBtn = new FlatButton("Batch Patch…");
             batchBtn.Kind = FlatButton.BtnKind.Secondary;
-            batchBtn.Bounds = new Rectangle(X0 + rowW - batchW * 2 - gap, 552, batchW, 52);
+            batchBtn.Bounds = new Rectangle(X0 + rowW - secW * 2 - gap, 552, secW, 52);
             batchBtn.Click += delegate { OpenBatch(); };
             Controls.Add(batchBtn);
 
             cloudBtn = new FlatButton("Cloud saves…");
             cloudBtn.Kind = FlatButton.BtnKind.Secondary;
-            cloudBtn.Bounds = new Rectangle(X0 + rowW - batchW, 552, batchW, 52);
+            cloudBtn.Bounds = new Rectangle(X0 + rowW - secW, 552, secW, 52);
             cloudBtn.Click += delegate { OpenCloud(); };
             Controls.Add(cloudBtn);
 
@@ -748,7 +773,7 @@ namespace Gp
             closing = true;
             StopAutoTimer();
             StopExitTimer();
-            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
+            patchBtn.Enabled = toolsBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = banner.Enabled = false;
             SetOptionsEnabled(false);
             CancelSelectionWork();
             SetAppIdBusy(false);
@@ -874,6 +899,7 @@ namespace Gp
             SetMascot(ShibaMood.Happy, "Ooh, " + Path.GetFileNameWithoutExtension(path) + "! Let me sniff around…");
             settings.LastExe = path;
             settings.Save();
+            toolsBtn.Enabled = ToolsReady;
 
             string dir = Path.GetDirectoryName(path);
             PeInfo pe = null;
@@ -1089,6 +1115,7 @@ namespace Gp
                 CreateSettings = tSettings.Checked,
                 OnlineFix = ofix,
                 Achievements = tAchievements.Checked,
+                Playnite = tPlaynite.Checked || startup.Playnite,
             };
             settings.UnpackDrm = tUnpack.Checked;
             settings.Backup = tBackup.Checked;
@@ -1097,11 +1124,13 @@ namespace Gp
             settings.OnlineFix = ofix;
             settings.LookupAppId = tLookup.Checked;
             settings.Achievements = tAchievements.Checked;
+            settings.Playnite = tPlaynite.Checked;
             if (id.Length > 0) settings.AppIdsByFolder[Path.GetDirectoryName(opts.GameExe)] = id; // don't cache empty ids
             string saveError;
             if (!settings.Save(out saveError)) Log(LogLevel.Error, saveError);
 
             running = true;
+            toolsBtn.Enabled = false;
             cts = new CancellationTokenSource();
             patchBtn.Kind = FlatButton.BtnKind.Cancel;
             patchBtn.Text = "Cancel";
@@ -1159,6 +1188,7 @@ namespace Gp
             patchBtn.Kind = FlatButton.BtnKind.Primary;
             patchBtn.Text = "Patch Game";
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
+            toolsBtn.Enabled = ToolsReady;
             SetOptionsEnabled(!closing);
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
 
@@ -1282,7 +1312,7 @@ namespace Gp
             running = true;
             banner.HideBanner();
             ShowBannerLayout(false);
-            patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
+            patchBtn.Enabled = toolsBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = appIdBox.Enabled = false;
             SetOptionsEnabled(false);
             progress.SetValue(10);
             statusBar.Pulse = true;
@@ -1328,6 +1358,7 @@ namespace Gp
             statusBar.Pulse = false;
             progress.SetValue(0);
             patchBtn.Enabled = batchBtn.Enabled = cloudBtn.Enabled = zone.Enabled = !closing;
+            toolsBtn.Enabled = ToolsReady;
             SetOptionsEnabled(!closing);
             appIdBox.Enabled = !closing && !tOnlineFix.Checked;
             lastActions = new string[0];
@@ -1371,6 +1402,7 @@ namespace Gp
                 CreateSettings = tSettings.Checked,
                 OnlineFix = tOnlineFix.Checked,
                 Achievements = tAchievements.Checked,
+                Playnite = tPlaynite.Checked,
             };
 
             batchBtn.Enabled = false;
@@ -1405,9 +1437,12 @@ namespace Gp
             ShowBannerLayout(true);
         }
 
+        /// <summary>The Game tools menu acts on the selected game, so it needs one and no patch/undo running.</summary>
+        bool ToolsReady { get { return !closing && !running && !string.IsNullOrEmpty(zone.GamePath); } }
+
         void SetOptionsEnabled(bool enabled)
         {
-            foreach (var t in new[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements }) t.Enabled = enabled;
+            foreach (var t in new[] { tUnpack, tBackup, tAppid, tSettings, tOnlineFix, tLookup, tAchievements, tPlaynite }) t.Enabled = enabled;
         }
 
         void ShowBannerLayout(bool show)
@@ -1431,6 +1466,7 @@ namespace Gp
                 CancelSelectionWork();
                 if (notePulse != null) { notePulse.Dispose(); notePulse = null; }
                 if (zoneTip != null) { zoneTip.Dispose(); zoneTip = null; }
+                toolsMenu.Dispose();
                 if (cts != null) { try { cts.Dispose(); } catch { } cts = null; }
             }
             base.Dispose(disposing);

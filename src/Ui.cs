@@ -936,6 +936,52 @@ namespace Gp
         }
     }
 
+    // ─────────────────────────────────────────────── drop-down menu
+
+    /// <summary>ContextMenuStrip in the palette: white surface, brown text, fur-orange hover. Paddings go through
+    /// Ui.S - WinForms does not scale ToolStrip metrics in this process (PerMonitorV2 set at runtime, no app.config).</summary>
+    public class ShibaMenu : ContextMenuStrip
+    {
+        public ShibaMenu()
+        {
+            Renderer = new MenuRenderer();
+            Font = Ui.F(9.75f, false);
+            ShowImageMargin = false;
+            Padding = new Padding(Ui.S(4));
+        }
+
+        protected override void OnItemAdded(ToolStripItemEventArgs e)
+        {
+            e.Item.Padding = new Padding(Ui.S(6), Ui.S(7), Ui.S(6), Ui.S(7));
+            base.OnItemAdded(e);
+        }
+
+        sealed class MenuRenderer : ToolStripRenderer
+        {
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+            {
+                using (var b = new SolidBrush(Ui.Surface)) e.Graphics.FillRectangle(b, e.AffectedBounds);
+            }
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                using (var p = new Pen(Ui.BorderC)) e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+            }
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                if (!e.Item.Selected || !e.Item.Enabled) return;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                // inset from the menu's edges (the item bounds run under the border on the right)
+                var r = new Rectangle(Ui.S(4) - e.Item.Bounds.X, 0, e.ToolStrip.Width - Ui.S(8), e.Item.Height - 1);
+                Ui.FillRound(e.Graphics, r, Ui.S(6), Ui.Accent);
+            }
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = !e.Item.Enabled ? Ui.DisabledC : e.Item.Selected ? Color.White : Ui.TextC;
+                base.OnRenderItemText(e);
+            }
+        }
+    }
+
     // ─────────────────────────────────────────────── progress bar
 
     public class ProgressBarLite : Control

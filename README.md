@@ -1,6 +1,6 @@
 # Shibaberg
 
-A one-click auto-patcher for [Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) (GSE). Drop a game executable, enter the AppID, and it takes care of everything: DRM unpacking, installing the emulator dlls, `steam_appid.txt`, interface generation, and setting up the `steam_settings` folder.
+A one-click auto-patcher for the Goldberg Steam Emulator (GSE), built on [gbe_fork](https://github.com/Detanup01/gbe_fork), the maintained Goldberg continuation. Drop a game executable, enter the AppID, and it takes care of everything: DRM unpacking, installing the emulator dlls, `steam_appid.txt`, interface generation, and setting up the `steam_settings` folder.
 
 Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows executable.
 
@@ -33,6 +33,7 @@ Written in C# (.NET Framework 4.8, WinForms) as a single self-contained Windows 
 | Auto-detect Steam AppID online | on | Looks the game up on the Steam Store when no local AppID is found |
 | Generic online-fix | off | Keeps the original dll and presents the game as Spacewar (AppID 480) |
 | In-game overlay: achievements + cloud saves | off | Installs the overlay build of the emulator, the game's achievement list, and cloud-save syncing (Shibaberg.exe must stay where it was when patching) |
+| Add patched games to Playnite | on | Adds every game Shibaberg patches to your Playnite library with a working Play button (needs Playnite installed) |
 
 `steam_interfaces.txt` generation is not a toggle — it runs against the original dll whenever one is available and the emulator dll is being installed.
 
@@ -53,14 +54,15 @@ The game then attaches to your real Steam account as Spacewar and all traffic is
 The GUI executable is also headless-capable, which is how the live test drives it:
 
 ```text
-Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done]
-Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings] [--achievements]
+Shibaberg.exe --exe <game.exe> [--appid <id>] [--auto] [--exit-when-done] [--playnite]
+Shibaberg.exe --batch "<game.exe>|<id>;<game.exe>" [--online-fix] [--no-unpack] [--settings] [--achievements] [--playnite]
 Shibaberg.exe --check <game.exe> [--appid <id>] [--online-fix]
 Shibaberg.exe --verify-payload
 ```
 
 - `--auto` is what actually starts a run; `--appid` on its own only pre-fills the box.
 - `--batch` is the only mode that ignores `settings.ini`, so it is the way to script a patch without the GUI's saved options interfering.
+- `--playnite` adds the patched game(s) to Playnite. With `--exe` it switches the option on for that run even when the toggle is off; `--batch` ignores `settings.ini`, so there it is off unless given.
 - `--check` verifies an already-patched install without changing anything: SteamStub removed, the Steamworks library the game actually loads is the emulator (or Valve's original for online-fix, inferred when every `steam_appid.txt` says 480 and no library is the emulator), architecture match, and the AppID. The same check runs automatically after every patch.
 - Exits: batch `0` = every entry patched, `1` = invalid input or failures, `2` = nothing patched. Single-game `0` = patched, `1` = bad arguments or failure, `3` = `--auto` could not resolve an AppID. `--check` `0` = no failed checks, `1` = a check failed. `--verify-payload` `0` = payload intact, `1` = missing or corrupt.
 

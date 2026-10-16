@@ -1235,6 +1235,9 @@ namespace Gp
         public bool OnlineFix = false;
         /// <summary>Install the overlay build and achievements.json so unlocks pop up in game.</summary>
         public bool Achievements = false;
+        /// <summary>Add the game to Playnite after a successful patch. Off by default so callers that never
+        /// asked for it (the self-test runs PatchRunner directly) leave Playnite alone.</summary>
+        public bool Playnite = false;
 
         /// <summary>AppID actually written when online-fix mode forces Spacewar.</summary>
         public string EffectiveAppId { get { return OnlineFix ? "480" : AppIdDetector.Normalize(AppId); } }
@@ -2173,6 +2176,13 @@ namespace Gp
                 Recovery.SaveJournal(res.Writes, true);
                 Recovery.CollectStaging(res.Writes);
                 Log(LogLevel.Dim, "Undo record saved – 'Undo last patch' can revert this run.");
+            }
+
+            // ---- Playnite: best effort, outside the journal (undo never removes it) ----
+            if (res.Success && o.Playnite)
+            {
+                try { PlayniteLink.Register(o, res, Log); }
+                catch (Exception ex) { Log(LogLevel.Warn, "Playnite: " + ex.Message); }
             }
             return res;
         }
@@ -3159,6 +3169,7 @@ namespace Gp
         public bool CreateSettings = false;
         public bool OnlineFix = false;   // force Spacewar 480 for every game, AppIDs are ignored
         public bool Achievements = false;
+        public bool Playnite = false;
     }
 
     /// <summary>Patches several games sequentially. AppIDs must be resolved by the caller (see AppIdDetector).</summary>
@@ -3220,6 +3231,7 @@ namespace Gp
                             WriteAppIdTxt = prefs.WriteAppIdTxt,
                             CreateSettings = prefs.CreateSettings,
                             Achievements = prefs.Achievements,
+                            Playnite = prefs.Playnite,
                             OnlineFix = ofix,
                         };
                         o.AppIdUsed = opts.EffectiveAppId;
@@ -3460,6 +3472,7 @@ namespace Gp
         public bool OnlineFix = false;
         public bool LookupAppId = true;
         public bool Achievements = false;
+        public bool Playnite = true;
         public Dictionary<string, string> AppIdsByFolder = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         /// <summary>Cloud saves: save folders the user added per AppID, beyond the detected ones.</summary>
         public Dictionary<string, List<string>> SaveDirs = new Dictionary<string, List<string>>();
@@ -3489,6 +3502,7 @@ namespace Gp
                         case "onlinefix": s.OnlineFix = v == "1"; break;
                         case "lookup": s.LookupAppId = v == "1"; break;
                         case "achievements": s.Achievements = v == "1"; break;
+                        case "playnite": s.Playnite = v == "1"; break;
                         default:
                             if (k.StartsWith("folder:"))
                                 s.AppIdsByFolder[UnescKey(k.Substring(7))] = v;
@@ -3517,6 +3531,7 @@ namespace Gp
                 sb.AppendLine("onlinefix=" + (OnlineFix ? "1" : "0"));
                 sb.AppendLine("lookup=" + (LookupAppId ? "1" : "0"));
                 sb.AppendLine("achievements=" + (Achievements ? "1" : "0"));
+                sb.AppendLine("playnite=" + (Playnite ? "1" : "0"));
                 foreach (var kv in AppIdsByFolder)
                     sb.AppendLine("folder:" + EscKey(kv.Key) + "=" + kv.Value);
                 foreach (var kv in SaveDirs)
