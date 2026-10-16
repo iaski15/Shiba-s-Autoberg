@@ -104,6 +104,20 @@ static partial class TestMain
                   "restore (Unity): the backup folder and staging areas are removed", null);
             Check(GameRestore.Plan(uExe, "").NothingToDo, "restore (Unity): a second plan finds nothing to do", null);
 
+            // ---- a file planned for deletion that changes before the plan is applied (the user read the dialog) stays
+            string late = Directory.CreateDirectory(Path.Combine(work, "late")).FullName;
+            string lExe = Path.Combine(late, "Game.exe");
+            WriteSteamStub31(lExe, true);
+            string lPlugins = Directory.CreateDirectory(Path.Combine(late, "Game_Data", "Plugins", "x86_64")).FullName;
+            File.WriteAllBytes(Path.Combine(lPlugins, "steam_api64.dll"), FakeValveDll(scratch, "v1"));
+            SimulatePatch(late, lExe, Path.Combine(lPlugins, "steam_api64.dll"), emu, unpacked, "1250");
+            var lPlan = GameRestore.Plan(lExe, "");
+            string lAppId = Path.Combine(late, "steam_appid.txt");
+            File.WriteAllText(lAppId, "my own edit");
+            var lRes = GameRestore.Apply(lPlan, null);
+            Check(File.Exists(lAppId) && File.ReadAllText(lAppId) == "my own edit" && lRes.NeedAttention == 1 && !File.Exists(Path.Combine(lPlugins, "steam_appid.txt")),
+                  "restore: a file that changed after planning is left, the unchanged one still goes", lRes.Summary);
+
             // ---- a game that shipped its own steam_appid.txt: the patch overwrites it, restore brings it back
             string shipped = Directory.CreateDirectory(Path.Combine(work, "shipped")).FullName;
             string sExe = Path.Combine(shipped, "Game.exe");

@@ -268,6 +268,8 @@ namespace Gp
         static void Add(RestorePlan plan, Dictionary<string, RestoreItem> byPath, RestoreItem item)
         {
             item.Path = Path.GetFullPath(item.Path);
+            // A file planned for deletion is deleted only if it still has this content when the plan is applied.
+            if (item.Action == RestoreAction.Delete && item.Hash.Length == 0) item.Hash = Hash(item.Path);
             RestoreItem existing;
             if (byPath.TryGetValue(item.Path, out existing))
             {
@@ -474,7 +476,14 @@ namespace Gp
             {
                 try
                 {
-                    if (File.Exists(item.Path)) File.Delete(item.Path);
+                    if (!File.Exists(item.Path)) continue;
+                    if (item.Hash.Length > 0 && SafePersistence.Hash(item.Path) != item.Hash)
+                    {
+                        result.Left++; result.NeedAttention++;
+                        say(LogLevel.Warn, "Left " + PatchRunner.ShortRel(plan.GameRoot, item.Path) + " – it changed after the restore was planned.");
+                        continue;
+                    }
+                    File.Delete(item.Path);
                     result.Deleted++;
                     say(LogLevel.Ok, "Removed " + PatchRunner.ShortRel(plan.GameRoot, item.Path));
                 }

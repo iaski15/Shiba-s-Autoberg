@@ -273,7 +273,7 @@ namespace Gp
             foreach (var name in ExtensionFiles)
             {
                 string src = Path.Combine(sourceDir, name), dst = Path.Combine(dest, name);
-                if (File.Exists(dst) && SafePersistence.Hash(dst) == SafePersistence.Hash(src)) continue;
+                if (SameContent(src, dst)) continue;
                 try { CopyVerified(src, dst); }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                 {
@@ -290,6 +290,13 @@ namespace Gp
             if (!changed) return ExtensionState.UpToDate;
             restartNeeded = IsRunning();
             return existed ? ExtensionState.Updated : ExtensionState.Installed;
+        }
+
+        /// <summary>False when dst is missing or unreadable (locked without sharing): the copy path then decides.</summary>
+        static bool SameContent(string src, string dst)
+        {
+            try { return File.Exists(dst) && SafePersistence.Hash(dst) == SafePersistence.Hash(src); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return false; }
         }
 
         static void CopyVerified(string src, string dst)

@@ -25,6 +25,7 @@ namespace Gp
         readonly ComboBox langBox;
         readonly Toggle tUnlock;
         readonly CheckedListBox dlcList;
+        bool dlcFresh;   // nothing saved under [app::dlcs] yet
         readonly FlatButton fetchBtn, saveBtn, closeBtn, cleanBtn;
         readonly CheckBox chkMigrate;
         readonly Label status;
@@ -261,11 +262,13 @@ namespace Gp
             tUnlock.Checked = v.UnlockAllDlc;
             dlc.Clear();
             dlc.AddRange(v.Dlc);
+            // No DLC saved for this game yet: tick every known one, so games that list their DLC see them all.
+            dlcFresh = v.Dlc.Count == 0;
             if (r.LocalDlc != null)
                 foreach (var d in r.LocalDlc)
                 {
                     var known = dlc.FirstOrDefault(x => x.Id == d.Id);
-                    if (known == null) dlc.Add(d);
+                    if (known == null) { d.Enabled = dlcFresh; dlc.Add(d); }
                     else if (known.Name.Length == 0 || known.Name == "DLC " + known.Id) known.Name = d.Name;
                 }
             RefreshDlcList();
@@ -382,7 +385,7 @@ namespace Gp
                 foreach (var d in list)
                 {
                     var known = dlc.FirstOrDefault(x => x.Id == d.Id);
-                    if (known == null) { dlc.Add(d); added++; }
+                    if (known == null) { d.Enabled = dlcFresh; dlc.Add(d); added++; }
                     else if (d.Name.Length > 0 && known.Name != d.Name) { known.Name = d.Name; named++; }
                 }
                 RefreshDlcList();

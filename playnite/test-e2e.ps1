@@ -25,6 +25,13 @@ $work = Join-Path $env:TEMP ('gp_playnite_e2e_' + [guid]::NewGuid().ToString('N'
 $pn = Join-Path $work 'Playnite'
 $state = Join-Path $work 'state'
 $proc = $null
+# reg.exe runs via cmd: PowerShell 5.1 under 'Stop' turns its stderr chatter into an error.
+# Playnite re-registers the playnite:// protocol for itself on startup, so the copy would take it over (and leave it
+# pointing at a deleted temp folder). Save the user's key and put it back afterwards.
+$protoKey = 'HKCU\Software\Classes\playnite'
+$protoBak = Join-Path $env:TEMP ('gp_playnite_proto_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.reg')
+cmd /c "reg export `"$protoKey`" `"$protoBak`" /y >nul 2>&1"
+$hadProto = ($LASTEXITCODE -eq 0)
 try {
     Write-Host "copying Playnite to $pn ..."
     New-Item -ItemType Directory -Force $pn | Out-Null
@@ -84,6 +91,8 @@ finally {
         if (-not $proc.WaitForExit(15000)) { $proc.Kill() }
     }
     Start-Sleep -Seconds 1
+    if ($hadProto) { cmd /c "reg import `"$protoBak`" >nul 2>&1"; Remove-Item -LiteralPath $protoBak -Force -ErrorAction SilentlyContinue }
+    else { cmd /c "reg delete `"$protoKey`" /f >nul 2>&1" }
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($script:failed) { exit 1 }
