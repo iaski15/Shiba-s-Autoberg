@@ -86,6 +86,8 @@ static partial class TestMain
                   && ledger.Find(Path.Combine(plugins, "steam_appid.txt")).Created
                   && ledger.Find(uDll).Written == SafePersistence.Hash(emu),
                   "ledger: replaced files keep their original hash, created files are marked, the written hash is kept", null);
+            Check(Directory.GetDirectories(OriginalBackups.Existing(plugins), ".gp-recovery", SearchOption.AllDirectories).Length == 0,
+                  "ledger: writing it leaves no .gp-recovery litter inside the backup folder", null);
 
             var plan = GameRestore.Plan(uExe, "");
             Check(plan.HasLedger && plan.Of(RestoreAction.Restore).Select(i => Path.GetFileName(i.Path)).OrderBy(n => n).SequenceEqual(new[] { "Game.exe", "steam_api64.dll" })
